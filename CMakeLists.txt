@@ -756,6 +756,7 @@ if (BUILD_MAIN_DUCKDB_LIBRARY)
 endif()
 
 add_subdirectory(extension)
+add_subdirectory(examples/embedded-c++)
 
 if(NOT CLANG_TIDY)
   if(${BUILD_UNITTESTS})

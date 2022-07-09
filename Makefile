@@ -1,7 +1,7 @@
 .PHONY: all opt unit clean debug release release_expanded test unittest allunit benchmark docs doxygen format sqlite imdb
 
-all: release
-opt: release
+all: debug
+opt: debug
 unit: unittest
 imdb: third_party/imdb/data
 
