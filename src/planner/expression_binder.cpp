@@ -1,3 +1,4 @@
+#include <iostream>
 #include "duckdb/planner/expression_binder.hpp"
 
 #include "duckdb/parser/expression/list.hpp"
@@ -29,6 +30,7 @@ ExpressionBinder::~ExpressionBinder() {
 }
 
 BindResult ExpressionBinder::BindExpression(unique_ptr<ParsedExpression> &expr, idx_t depth, bool root_expression) {
+	std::cerr << "BindResult ExpressionBinder::BindExpression(unique_ptr<ParsedExpression> &expr, idx_t depth, bool root_expression) "<< expr->ToString() << " depth " << depth << " root_expression " << root_expression << std::endl;
 	auto &expr_ref = *expr;
 	switch (expr_ref.expression_class) {
 	case ExpressionClass::BETWEEN:
@@ -188,6 +190,7 @@ LogicalType ExpressionBinder::ExchangeNullType(const LogicalType &type) {
 unique_ptr<Expression> ExpressionBinder::Bind(unique_ptr<ParsedExpression> &expr, optional_ptr<LogicalType> result_type,
                                               bool root_expression) {
 	// bind the main expression
+	std::cerr << "+++unique_ptr<Expression> ExpressionBinder::Bind(unique_ptr<ParsedExpression> &expr, " << expr->ToString() << " root_expression " << root_expression << std::endl;
 	auto error_msg = Bind(expr, 0, root_expression);
 	if (!error_msg.empty()) {
 		// failed to bind: try to bind correlated columns in the expression (if any)
@@ -219,10 +222,12 @@ unique_ptr<Expression> ExpressionBinder::Bind(unique_ptr<ParsedExpression> &expr
 	if (result_type) {
 		*result_type = result->return_type;
 	}
+    std::cerr << "unique_ptr<Expression> ExpressionBinder::Bind(unique_ptr<ParsedExpression> &expr, " << result->ToString() << " root_expression " << root_expression << " boundExpr " << result->ToString() << std::endl;
 	return result;
 }
 
 string ExpressionBinder::Bind(unique_ptr<ParsedExpression> &expr, idx_t depth, bool root_expression) {
+	std::cerr << "string ExpressionBinder::Bind(unique_ptr<ParsedExpression> &expr, idx_t depth, bool root_expression) " << expr->ToString() << " depth " << depth << " root_expression " << root_expression << std::endl;
 	// bind the node, but only if it has not been bound yet
 	auto &expression = *expr;
 	auto alias = expression.alias;
@@ -242,6 +247,7 @@ string ExpressionBinder::Bind(unique_ptr<ParsedExpression> &expr, idx_t depth, b
 	if (!alias.empty()) {
 		be.expr->alias = alias;
 	}
+	std::cerr << "ExpressionBinder::Bind.exit " << be.ToString() << std::endl;
 	return string();
 }
 

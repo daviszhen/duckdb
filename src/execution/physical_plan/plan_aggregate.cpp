@@ -1,3 +1,4 @@
+#include <iostream>
 #include "duckdb/catalog/catalog_entry/aggregate_function_catalog_entry.hpp"
 #include "duckdb/common/operator/subtract.hpp"
 #include "duckdb/execution/operator/aggregate/physical_hash_aggregate.hpp"
@@ -117,6 +118,7 @@ static bool CanUsePerfectHashAggregate(ClientContext &context, LogicalAggregate 
 }
 
 unique_ptr<PhysicalOperator> PhysicalPlanGenerator::CreatePlan(LogicalAggregate &op) {
+    std::cerr << "+++unique_ptr<PhysicalOperator> PhysicalPlanGenerator::CreatePlan(LogicalAggregate &op) " << op.ToString() << std::endl;
 	unique_ptr<PhysicalOperator> groupby;
 	D_ASSERT(op.children.size() == 1);
 

@@ -1,3 +1,4 @@
+#include <iostream>
 #include "duckdb/planner/expression_binder/column_alias_binder.hpp"
 
 #include "duckdb/parser/expression/columnref_expression.hpp"
@@ -14,6 +15,10 @@ ColumnAliasBinder::ColumnAliasBinder(BoundSelectNode &node, const case_insensiti
 
 BindResult ColumnAliasBinder::BindAlias(ExpressionBinder &enclosing_binder, ColumnRefExpression &expr, idx_t depth,
                                         bool root_expression) {
+	std::cerr << "BindResult ColumnAliasBinder::BindAlias(ExpressionBinder &enclosing_binder, ColumnRefExpression &expr, idx_t A | depth,| " <<
+	    " expr_name " << expr.column_names[0] << " expr " <<
+	    expr.ToString() << " depth " << depth << " root_expression " << root_expression <<
+	    std::endl;
 	if (expr.IsQualified()) {
 		return BindResult(StringUtil::Format("Alias %s cannot be qualified.", expr.ToString()));
 	}
@@ -31,10 +36,14 @@ BindResult ColumnAliasBinder::BindAlias(ExpressionBinder &enclosing_binder, Colu
 	auto expression = node.original_expressions[alias_entry->second]->Copy();
 	visited_select_indexes.insert(alias_entry->second);
 
+    std::cerr << "BindResult ColumnAliasBinder::BindAlias(ExpressionBinder &enclosing_binder, ColumnRefExpression &expr, idx_t B | " <<
+        expr.column_names[0] << " " << alias_entry->second << " " << expression->ToString() << std::endl;
+
 	// since the alias has been found, pass a depth of 0. See Issue 4978 (#16)
 	// ColumnAliasBinders are only in Having, Qualify and Where Binders
 	auto result = enclosing_binder.BindExpression(expression, 0, root_expression);
 	visited_select_indexes.erase(alias_entry->second);
+    std::cerr << "BindResult ColumnAliasBinder::BindAlias(ExpressionBinder &enclosing_binder, ColumnRefExpression &expr, idx_t C | " << std::endl;
 	return result;
 }
 

@@ -119,16 +119,19 @@ static vector<string> RemoveDuplicateUsingColumns(const vector<string> &using_co
 }
 
 unique_ptr<BoundTableRef> Binder::Bind(JoinRef &ref) {
+	std::cerr << "+++unique_ptr<BoundTableRef> Binder::Bind(JoinRef &ref) A| " << ref.ToString() << std::endl;
 	auto result = make_uniq<BoundJoinRef>(ref.ref_type);
 	result->left_binder = Binder::CreateBinder(context, this);
 	result->right_binder = Binder::CreateBinder(context, this);
 	auto &left_binder = *result->left_binder;
 	auto &right_binder = *result->right_binder;
 
+    std::cerr << "unique_ptr<BoundTableRef> Binder::Bind(JoinRef &ref) B|left_binder.Bind| " << ref.left->ToString() << std::endl;
 	result->type = ref.type;
 	result->left = left_binder.Bind(*ref.left);
 	{
 		LateralBinder binder(left_binder, context);
+        std::cerr << "unique_ptr<BoundTableRef> Binder::Bind(JoinRef &ref) C|right_binder.Bind| " << ref.right->ToString() << std::endl;
 		result->right = right_binder.Bind(*ref.right);
 		result->correlated_columns = binder.ExtractCorrelatedColumns(right_binder);
 
@@ -265,12 +268,14 @@ unique_ptr<BoundTableRef> Binder::Bind(JoinRef &ref) {
 	}
 
 	auto right_bindings_list_copy = right_binder.bind_context.GetBindingsList();
-
+    std::cerr << "unique_ptr<BoundTableRef> Binder::Bind(JoinRef &ref) D|AddContext(left)| " << std::endl;
 	bind_context.AddContext(std::move(left_binder.bind_context));
+    std::cerr << "unique_ptr<BoundTableRef> Binder::Bind(JoinRef &ref) E|AddContext(right)| " << std::endl;
 	bind_context.AddContext(std::move(right_binder.bind_context));
 	MoveCorrelatedExpressions(left_binder);
 	MoveCorrelatedExpressions(right_binder);
 	for (auto &condition : extra_conditions) {
+        std::cerr << "unique_ptr<BoundTableRef> Binder::Bind(JoinRef &ref) F|Conjunct(extra_condition)| " << condition->ToString() << std::endl;
 		if (ref.condition) {
 			ref.condition = make_uniq<ConjunctionExpression>(ExpressionType::CONJUNCTION_AND, std::move(ref.condition),
 			                                                 std::move(condition));
@@ -279,8 +284,10 @@ unique_ptr<BoundTableRef> Binder::Bind(JoinRef &ref) {
 		}
 	}
 	if (ref.condition) {
+        std::cerr << "unique_ptr<BoundTableRef> Binder::Bind(JoinRef &ref) G|Bind_join_condition| " << ref.condition->ToString() << std::endl;
 		WhereBinder binder(*this, context);
 		result->condition = binder.Bind(ref.condition);
+        std::cerr << "unique_ptr<BoundTableRef> Binder::Bind(JoinRef &ref) H|Bind_join_condition(result)| " << result->condition->ToString() << std::endl;
 	}
 
 	if (result->type == JoinType::SEMI || result->type == JoinType::ANTI) {

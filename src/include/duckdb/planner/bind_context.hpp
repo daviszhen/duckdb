@@ -152,9 +152,9 @@ private:
 
 private:
 	//! The set of bindings
-	case_insensitive_map_t<unique_ptr<Binding>> bindings;
+	case_insensitive_map_t<unique_ptr<Binding>> bindings;//alias -> Binding
 	//! The list of bindings in insertion order
-	vector<reference<Binding>> bindings_list;
+	vector<reference<Binding>> bindings_list;//Binding; Binding; Binding
 	//! The set of columns used in USING join conditions
 	case_insensitive_map_t<reference_set_t<UsingColumnSet>> using_columns;
 	//! Using column sets

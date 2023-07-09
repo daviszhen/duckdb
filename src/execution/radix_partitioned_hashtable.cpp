@@ -1,3 +1,4 @@
+#include <iostream>
 #include "duckdb/execution/radix_partitioned_hashtable.hpp"
 
 #include "duckdb/execution/operator/aggregate/physical_hash_aggregate.hpp"
@@ -291,6 +292,7 @@ public:
 	}
 
 	TaskExecutionResult ExecuteTask(TaskExecutionMode mode) override {
+		std::cerr << "RadixAggregateFinalizeTask " << radix << std::endl;
 		FinalizeHT(state, radix);
 		event->FinishTask();
 		return TaskExecutionResult::TASK_FINISHED;

@@ -1,3 +1,4 @@
+#include <iostream>
 #include "duckdb/common/sort/partition_state.hpp"
 
 #include "duckdb/common/types/column/column_data_consumer.hpp"
@@ -488,6 +489,7 @@ private:
 };
 
 TaskExecutionResult PartitionMergeTask::ExecuteTask(TaskExecutionMode mode) {
+	std::cerr << "PartitionMergeTask::ExecuteTask" << std::endl;
 	// Loop until all hash groups are done
 	size_t sorted = 0;
 	while (sorted < hash_groups.states.size()) {

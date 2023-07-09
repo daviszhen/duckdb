@@ -1,3 +1,4 @@
+#include <iostream>
 #include "duckdb/catalog/catalog_entry/table_catalog_entry.hpp"
 #include "duckdb/catalog/catalog_entry/view_catalog_entry.hpp"
 #include "duckdb/parser/tableref/basetableref.hpp"
@@ -18,6 +19,7 @@
 namespace duckdb {
 
 unique_ptr<BoundTableRef> Binder::Bind(BaseTableRef &ref) {
+	std::cerr << "+++unique_ptr<BoundTableRef> Binder::Bind(BaseTableRef &ref) " << ref.ToString() << std::endl;
 	QueryErrorContext error_context(root_statement, ref.query_location);
 	// CTEs and views are also referred to using BaseTableRefs, hence need to distinguish here
 	// check if the table name refers to a CTE
@@ -130,7 +132,7 @@ unique_ptr<BoundTableRef> Binder::Bind(BaseTableRef &ref) {
 		auto alias = ref.alias.empty() ? ref.table_name : ref.alias;
 		// TODO: bundle the type and name vector in a struct (e.g PackedColumnMetadata)
 		vector<LogicalType> table_types;
-		vector<string> table_names;
+		vector<string> table_names;//column names
 		vector<TableColumnType> table_categories;
 
 		vector<LogicalType> return_types;
@@ -143,8 +145,17 @@ unique_ptr<BoundTableRef> Binder::Bind(BaseTableRef &ref) {
 		}
 		table_names = BindContext::AliasColumnNames(alias, table_names, ref.column_name_alias);
 
+        std::cerr << "Binder::Bind(BaseTableRef &ref).names_and_types [" << std::endl;
+
+		auto cnt = table_names.size();
+		for (auto i = 0; i < cnt;i++){
+            std::cerr << "(" << table_names[i] << "," << table_types[i].ToString() << ") "<< std::endl;
+		}
+		std::cerr << "\n]" << std::endl;
+
 		auto logical_get = make_uniq<LogicalGet>(table_index, scan_function, std::move(bind_data),
 		                                         std::move(return_types), std::move(return_names));
+		std::cerr << "Binder::Bind(BaseTableRef &ref).logical_get \n" << logical_get->ToString() << std::endl;
 		bind_context.AddBaseTable(table_index, alias, table_names, table_types, logical_get->column_ids,
 		                          logical_get->GetTable().get());
 		return make_uniq_base<BoundTableRef, BoundBaseTableRef>(table, std::move(logical_get));

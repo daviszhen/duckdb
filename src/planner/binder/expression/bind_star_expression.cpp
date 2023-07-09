@@ -19,9 +19,11 @@ string GetColumnsStringValue(ParsedExpression &expr) {
 
 bool Binder::FindStarExpression(unique_ptr<ParsedExpression> &expr, StarExpression **star, bool is_root,
                                 bool in_columns) {
+	std::cerr << "+++bool Binder::FindStarExpression " << std::endl;
 	bool has_star = false;
 	if (expr->GetExpressionClass() == ExpressionClass::STAR) {
 		auto &current_star = expr->Cast<StarExpression>();
+		std::cerr << "star expr 1 : " << current_star.ToString() << std::endl;
 		if (!current_star.columns) {
 			if (is_root) {
 				*star = &current_star;
@@ -47,6 +49,7 @@ bool Binder::FindStarExpression(unique_ptr<ParsedExpression> &expr, StarExpressi
 			D_ASSERT(!values.empty());
 
 			expr = make_uniq<ConstantExpression>(Value::LIST(LogicalType::VARCHAR, values));
+            std::cerr << "star expr 2 : " << expr->ToString() << std::endl;
 			return true;
 		}
 		if (in_columns) {
@@ -85,6 +88,8 @@ void Binder::ReplaceStarExpression(unique_ptr<ParsedExpression> &expr, unique_pt
 
 void Binder::ExpandStarExpression(unique_ptr<ParsedExpression> expr,
                                   vector<unique_ptr<ParsedExpression>> &new_select_list) {
+	std::cerr << "+++void Binder::ExpandStarExpression" << std::endl;
+	std::cerr << "expr: " << expr->ToString() << std::endl;
 	StarExpression *star = nullptr;
 	if (!FindStarExpression(expr, &star, true, false)) {
 		// no star expression: add it as-is
@@ -180,12 +185,14 @@ void Binder::ExpandStarExpression(unique_ptr<ParsedExpression> expr,
 	for (idx_t i = 0; i < star_list.size(); i++) {
 		auto new_expr = expr->Copy();
 		ReplaceStarExpression(new_expr, star_list[i]);
+        std::cerr << "expr : " << expr->ToString() << "\n\t" << "new_expr : " << new_expr->ToString() << std::endl;
 		new_select_list.push_back(std::move(new_expr));
 	}
 }
 
 void Binder::ExpandStarExpressions(vector<unique_ptr<ParsedExpression>> &select_list,
                                    vector<unique_ptr<ParsedExpression>> &new_select_list) {
+	std::cerr << "+++void Binder::ExpandStarExpressions" << std::endl;
 	for (auto &select_element : select_list) {
 		ExpandStarExpression(std::move(select_element), new_select_list);
 	}

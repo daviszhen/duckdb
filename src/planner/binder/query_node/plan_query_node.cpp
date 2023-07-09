@@ -10,9 +10,11 @@ namespace duckdb {
 
 unique_ptr<LogicalOperator> Binder::VisitQueryNode(BoundQueryNode &node, unique_ptr<LogicalOperator> root) {
 	D_ASSERT(root);
+	std::cerr << "+++unique_ptr<LogicalOperator> Binder::VisitQueryNode(BoundQueryNode &node, unique_ptr<LogicalOperator> root)" << std::endl;
 	for (auto &mod : node.modifiers) {
 		switch (mod->type) {
 		case ResultModifierType::DISTINCT_MODIFIER: {
+            std::cerr << "unique_ptr<LogicalOperator> Binder::VisitQueryNode(BoundQueryNode &node, unique_ptr<LogicalOperator> root)|DISTINCT_MODIFIER" << std::endl;
 			auto &bound = mod->Cast<BoundDistinctModifier>();
 			auto distinct = make_uniq<LogicalDistinct>(std::move(bound.target_distincts), bound.distinct_type);
 			distinct->AddChild(std::move(root));
@@ -20,6 +22,7 @@ unique_ptr<LogicalOperator> Binder::VisitQueryNode(BoundQueryNode &node, unique_
 			break;
 		}
 		case ResultModifierType::ORDER_MODIFIER: {
+            std::cerr << "unique_ptr<LogicalOperator> Binder::VisitQueryNode(BoundQueryNode &node, unique_ptr<LogicalOperator> root)|ORDER_MODIFIER" << std::endl;
 			auto &bound = mod->Cast<BoundOrderModifier>();
 			if (root->type == LogicalOperatorType::LOGICAL_DISTINCT) {
 				auto &distinct = root->Cast<LogicalDistinct>();
@@ -37,6 +40,7 @@ unique_ptr<LogicalOperator> Binder::VisitQueryNode(BoundQueryNode &node, unique_
 			break;
 		}
 		case ResultModifierType::LIMIT_MODIFIER: {
+            std::cerr << "unique_ptr<LogicalOperator> Binder::VisitQueryNode(BoundQueryNode &node, unique_ptr<LogicalOperator> root)|LIMIT_MODIFIER" << std::endl;
 			auto &bound = mod->Cast<BoundLimitModifier>();
 			auto limit = make_uniq<LogicalLimit>(bound.limit_val, bound.offset_val, std::move(bound.limit),
 			                                     std::move(bound.offset));
@@ -45,6 +49,7 @@ unique_ptr<LogicalOperator> Binder::VisitQueryNode(BoundQueryNode &node, unique_
 			break;
 		}
 		case ResultModifierType::LIMIT_PERCENT_MODIFIER: {
+            std::cerr << "unique_ptr<LogicalOperator> Binder::VisitQueryNode(BoundQueryNode &node, unique_ptr<LogicalOperator> root)|LIMIT_PERCENT_MODIFIER" << std::endl;
 			auto &bound = mod->Cast<BoundLimitPercentModifier>();
 			auto limit = make_uniq<LogicalLimitPercent>(bound.limit_percent, bound.offset_val, std::move(bound.limit),
 			                                            std::move(bound.offset));

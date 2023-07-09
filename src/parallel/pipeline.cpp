@@ -29,6 +29,7 @@ public:
 
 public:
 	TaskExecutionResult ExecuteTask(TaskExecutionMode mode) override {
+		std::cerr << "PipelineTask" << std::endl;
 		if (!pipeline_executor) {
 			pipeline_executor = make_uniq<PipelineExecutor>(pipeline.GetClientContext(), pipeline);
 		}

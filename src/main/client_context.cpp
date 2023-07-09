@@ -1,3 +1,4 @@
+#include <iostream>
 #include "duckdb/main/client_context.hpp"
 
 #include "duckdb/catalog/catalog_entry/scalar_function_catalog_entry.hpp"
@@ -307,6 +308,7 @@ static bool IsExplainAnalyze(SQLStatement *statement) {
 shared_ptr<PreparedStatementData> ClientContext::CreatePreparedStatement(ClientContextLock &lock, const string &query,
                                                                          unique_ptr<SQLStatement> statement,
                                                                          vector<Value> *values) {
+	std::cerr << "+++shared_ptr<PreparedStatementData> ClientContext::CreatePreparedStatement" << std::endl;
 	StatementType statement_type = statement->type;
 	auto result = make_shared<PreparedStatementData>(statement_type);
 
@@ -319,9 +321,11 @@ shared_ptr<PreparedStatementData> ClientContext::CreatePreparedStatement(ClientC
 			planner.parameter_data.emplace_back(value);
 		}
 	}
+	std::cerr << "planner.CreatePlan: " << query << std::endl;
 	planner.CreatePlan(std::move(statement));
 	D_ASSERT(planner.plan || !planner.properties.bound_all_parameters);
 	profiler.EndPhase();
+    std::cerr << "planner.CreatePlan:|after " << std::endl;
 
 	auto plan = std::move(planner.plan);
 	// extract the result column names from the plan
@@ -340,8 +344,11 @@ shared_ptr<PreparedStatementData> ClientContext::CreatePreparedStatement(ClientC
 	if (config.enable_optimizer && plan->RequireOptimizer()) {
 		profiler.StartPhase("optimizer");
 		Optimizer optimizer(*planner.binder, *this);
+		std::cerr << "optimizer.Optimize: " << std::endl;
 		plan = optimizer.Optimize(std::move(plan));
+        std::cerr << "optimizer.Optimize:|after " << std::endl;
 		D_ASSERT(plan);
+        plan->Print();
 		profiler.EndPhase();
 
 #ifdef DEBUG
@@ -352,9 +359,11 @@ shared_ptr<PreparedStatementData> ClientContext::CreatePreparedStatement(ClientC
 	profiler.StartPhase("physical_planner");
 	// now convert logical query plan into a physical query plan
 	PhysicalPlanGenerator physical_planner(*this);
+	std::cerr << "physical_planner.CreatePlan: " << std::endl;
 	auto physical_plan = physical_planner.CreatePlan(std::move(plan));
+    std::cerr << "physical_planner.CreatePlan:|after " << std::endl;
 	profiler.EndPhase();
-
+    physical_plan->Print();
 #ifdef DEBUG
 	D_ASSERT(!physical_plan->ToString().empty());
 #endif
@@ -413,8 +422,10 @@ unique_ptr<PendingQueryResult> ClientContext::PendingPreparedStatement(ClientCon
 		    config.result_collector ? config.result_collector : PhysicalResultCollector::GetResultCollector;
 		collector = get_method(*this, statement);
 		D_ASSERT(collector->type == PhysicalOperatorType::RESULT_COLLECTOR);
+        std::cerr << "executor.Initialize 1: \n" << statement.plan->ToString() << std::endl;
 		executor.Initialize(std::move(collector));
 	} else {
+		std::cerr << "executor.Initialize 2: \n" << statement.plan->ToString() << std::endl;
 		executor.Initialize(*statement.plan);
 	}
 	auto types = executor.GetTypes();
@@ -432,6 +443,7 @@ PendingExecutionResult ClientContext::ExecuteTaskInternal(ClientContextLock &loc
 	D_ASSERT(active_query);
 	D_ASSERT(active_query->open_result == &result);
 	try {
+		//std::cerr << "ExecuteTaskInternal.ExecuteTask:"<<std::endl;
 		auto result = active_query->executor->ExecuteTask();
 		if (active_query->progress_bar) {
 			active_query->progress_bar->Update(result == PendingExecutionResult::RESULT_READY);
@@ -450,6 +462,7 @@ PendingExecutionResult ClientContext::ExecuteTaskInternal(ClientContextLock &loc
 	} catch (...) { // LCOV_EXCL_START
 		result.SetError(PreservedError("Unhandled exception in ExecuteTaskInternal"));
 	} // LCOV_EXCL_STOP
+	//std::cerr << "ExecuteTaskInternal.EndQueryInternal"<<std::endl;
 	EndQueryInternal(lock, false, true);
 	return PendingExecutionResult::EXECUTION_ERROR;
 }
@@ -604,6 +617,7 @@ unique_ptr<PendingQueryResult> ClientContext::PendingStatementInternal(ClientCon
                                                                        unique_ptr<SQLStatement> statement,
                                                                        PendingQueryParameters parameters) {
 	// prepare the query for execution
+	std::cerr << "CreatePreparedStatement: " << query << std::endl;
 	auto prepared = CreatePreparedStatement(lock, query, std::move(statement), parameters.parameters);
 	if (prepared->properties.parameter_count > 0 && !parameters.parameters) {
 		string error_message = StringUtil::Format("Expected %lld parameters, but none were supplied",
@@ -614,6 +628,7 @@ unique_ptr<PendingQueryResult> ClientContext::PendingStatementInternal(ClientCon
 		return make_uniq<PendingQueryResult>(PreservedError("Not all parameters were bound"));
 	}
 	// execute the prepared statement
+	std::cerr << "PendingPreparedStatement: " << query << std::endl;
 	return PendingPreparedStatement(lock, std::move(prepared), parameters);
 }
 
@@ -699,6 +714,7 @@ unique_ptr<PendingQueryResult> ClientContext::PendingStatementOrPreparedStatemen
 	unique_ptr<PendingQueryResult> result;
 
 	try {
+		std::cerr << "PendingStatementOrPreparedStatement.BeginQueryInternal " << query << std::endl;
 		BeginQueryInternal(lock, query);
 	} catch (FatalException &ex) {
 		// fatal exceptions invalidate the entire database
@@ -718,6 +734,7 @@ unique_ptr<PendingQueryResult> ClientContext::PendingStatementOrPreparedStatemen
 	bool invalidate_query = true;
 	try {
 		if (statement) {
+			std::cerr   << "PendingStatementOrPreparedStatement.PendingStatementInternal " << query << std::endl;
 			result = PendingStatementInternal(lock, query, std::move(statement), parameters);
 		} else {
 			if (prepared->RequireRebind(*this, *parameters.parameters)) {
@@ -729,6 +746,7 @@ unique_ptr<PendingQueryResult> ClientContext::PendingStatementOrPreparedStatemen
 				prepared = std::move(new_prepared);
 				prepared->properties.bound_all_parameters = false;
 			}
+			std::cerr << "PendingStatementOrPreparedStatement.PendingPreparedStatement " << query << std::endl;
 			result = PendingPreparedStatement(lock, prepared, parameters);
 		}
 	} catch (StandardException &ex) {
@@ -790,7 +808,7 @@ unique_ptr<QueryResult> ClientContext::Query(unique_ptr<SQLStatement> statement,
 
 unique_ptr<QueryResult> ClientContext::Query(const string &query, bool allow_stream_result) {
 	auto lock = LockContext();
-
+    std::cerr << "query: " << query << std::endl;
 	PreservedError error;
 	vector<unique_ptr<SQLStatement>> statements;
 	if (!ParseStatements(*lock, query, statements, error)) {
@@ -813,12 +831,14 @@ unique_ptr<QueryResult> ClientContext::Query(const string &query, bool allow_str
 		bool is_last_statement = i + 1 == statements.size();
 		PendingQueryParameters parameters;
 		parameters.allow_stream_result = allow_stream_result && is_last_statement;
+		std::cerr << "PendingQueryInternal: " << query << std::endl;
 		auto pending_query = PendingQueryInternal(*lock, std::move(statement), parameters);
 		auto has_result = pending_query->properties.return_type == StatementReturnType::QUERY_RESULT;
 		unique_ptr<QueryResult> current_result;
 		if (pending_query->HasError()) {
 			current_result = make_uniq<MaterializedQueryResult>(pending_query->GetErrorObject());
 		} else {
+			std::cerr << "ExecutePendingQueryInternal: " << query << std::endl;
 			current_result = ExecutePendingQueryInternal(*lock, *pending_query);
 		}
 		// now append the result to the list of results
@@ -886,8 +906,10 @@ unique_ptr<PendingQueryResult> ClientContext::PendingQueryInternal(ClientContext
 	auto query = statement->query;
 	shared_ptr<PreparedStatementData> prepared;
 	if (verify) {
+        std::cerr << "PendingStatementOrPreparedStatementInternal(verify): " << std::endl;
 		return PendingStatementOrPreparedStatementInternal(lock, query, std::move(statement), prepared, parameters);
 	} else {
+		std::cerr << "PendingStatementOrPreparedStatement: " << std::endl;
 		return PendingStatementOrPreparedStatement(lock, query, std::move(statement), prepared, parameters);
 	}
 }

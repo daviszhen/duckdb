@@ -5,6 +5,7 @@
 namespace duckdb {
 
 unique_ptr<PhysicalOperator> PhysicalPlanGenerator::CreatePlan(LogicalDummyScan &op) {
+	std::cerr << "+++unique_ptr<PhysicalOperator> PhysicalPlanGenerator::CreatePlan(LogicalDummyScan &op) " << op.ToString() << std::endl;
 	D_ASSERT(op.children.size() == 0);
 	return make_uniq<PhysicalDummyScan>(op.types, op.estimated_cardinality);
 }

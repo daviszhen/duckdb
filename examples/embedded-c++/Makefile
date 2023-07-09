@@ -8,7 +8,7 @@ clean:
 	rm -rf build
 
 duckdb:
-	cd ../.. && make
+	cd ../.. && make debug
 
 main:
 	mkdir -p build

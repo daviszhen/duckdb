@@ -6,6 +6,7 @@
 namespace duckdb {
 
 unique_ptr<PhysicalOperator> PhysicalPlanGenerator::CreatePlan(LogicalPositionalJoin &op) {
+	std::cerr << "+++unique_ptr<PhysicalOperator> PhysicalPlanGenerator::CreatePlan(LogicalPositionalJoin &op) " << op.ToString() << std::endl;
 	D_ASSERT(op.children.size() == 2);
 
 	auto left = CreatePlan(*op.children[0]);

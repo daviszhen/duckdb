@@ -18,6 +18,7 @@ namespace duckdb {
 
 BindResult ExpressionBinder::BindExpression(FunctionExpression &function, idx_t depth,
                                             unique_ptr<ParsedExpression> &expr_ptr) {
+	std::cerr << "+++BindResult ExpressionBinder::BindExpression(FunctionExpression &function, idx_t depth, unique_ptr<ParsedExpression> &expr_ptr) "<< function.ToString() << " depth " << depth << std::endl;
 	// lookup the function in the catalog
 	QueryErrorContext error_context(binder.root_statement, function.query_location);
 	auto func = Catalog::GetEntry(context, CatalogType::SCALAR_FUNCTION_ENTRY, function.catalog, function.schema,
@@ -71,7 +72,7 @@ BindResult ExpressionBinder::BindExpression(FunctionExpression &function, idx_t 
 	switch (func->type) {
 	case CatalogType::SCALAR_FUNCTION_ENTRY:
 		// scalar function
-
+        std::cerr << "BindResult ExpressionBinder::BindExpression(FunctionExpression &function, idx_t depth, unique_ptr<ParsedExpression> &expr_ptr)|SCALAR_FUNCTION_ENTRY| "<< function.function_name <<std::endl;
 		// check for lambda parameters, ignore ->> operator (JSON extension)
 		if (function.function_name != "->>") {
 			for (auto &child : function.children) {
@@ -88,13 +89,15 @@ BindResult ExpressionBinder::BindExpression(FunctionExpression &function, idx_t 
 		// macro function
 		return BindMacro(function, func->Cast<ScalarMacroCatalogEntry>(), depth, expr_ptr);
 	default:
+        std::cerr << "BindResult ExpressionBinder::BindExpression(FunctionExpression &function, idx_t depth, unique_ptr<ParsedExpression> &expr_ptr)|AGG_FUNCTION| "<< function.function_name <<std::endl;
 		// aggregate function
 		return BindAggregate(function, func->Cast<AggregateFunctionCatalogEntry>(), depth);
 	}
 }
 
 BindResult ExpressionBinder::BindFunction(FunctionExpression &function, ScalarFunctionCatalogEntry &func, idx_t depth) {
-
+    std::cerr << "+++BindResult ExpressionBinder::BindFunction(FunctionExpression &function, ScalarFunctionCatalogEntry &func, idx_t depth) "<<
+	    function.ToString() << " depth " << depth << std::endl;
 	// bind the children of the function expression
 	string error;
 
@@ -118,12 +121,14 @@ BindResult ExpressionBinder::BindFunction(FunctionExpression &function, ScalarFu
 		children.push_back(std::move(child));
 	}
 
+    std::cerr << "BindResult ExpressionBinder::BindFunction(FunctionExpression &function, ScalarFunctionCatalogEntry &func, idx_t depth)|A| " << std::endl;
 	FunctionBinder function_binder(context);
 	unique_ptr<Expression> result =
 	    function_binder.BindScalarFunction(func, std::move(children), error, function.is_operator, &binder);
 	if (!result) {
 		throw BinderException(binder.FormatError(function, error));
 	}
+    std::cerr << "BindResult ExpressionBinder::BindFunction(FunctionExpression &function, ScalarFunctionCatalogEntry &func, idx_t depth)|B| " << result->ToString() << std::endl;
 	return BindResult(std::move(result));
 }
 

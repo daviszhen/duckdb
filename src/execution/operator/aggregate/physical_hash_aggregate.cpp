@@ -1,9 +1,12 @@
 #include "duckdb/execution/operator/aggregate/physical_hash_aggregate.hpp"
 
 #include "duckdb/catalog/catalog_entry/aggregate_function_catalog_entry.hpp"
+#include "duckdb/common/atomic.hpp"
 #include "duckdb/common/vector_operations/vector_operations.hpp"
 #include "duckdb/execution/aggregate_hashtable.hpp"
+#include "duckdb/execution/operator/aggregate/distinct_aggregate_data.hpp"
 #include "duckdb/main/client_context.hpp"
+#include "duckdb/parallel/base_pipeline_event.hpp"
 #include "duckdb/parallel/interrupt.hpp"
 #include "duckdb/parallel/pipeline.hpp"
 #include "duckdb/parallel/task_scheduler.hpp"
@@ -11,9 +14,8 @@
 #include "duckdb/planner/expression/bound_aggregate_expression.hpp"
 #include "duckdb/planner/expression/bound_constant_expression.hpp"
 #include "duckdb/planner/expression/bound_reference_expression.hpp"
-#include "duckdb/parallel/base_pipeline_event.hpp"
-#include "duckdb/common/atomic.hpp"
-#include "duckdb/execution/operator/aggregate/distinct_aggregate_data.hpp"
+
+#include <iostream>
 
 namespace duckdb {
 
@@ -481,6 +483,7 @@ public:
 	}
 
 	TaskExecutionResult ExecuteTask(TaskExecutionMode mode) override {
+		std::cerr << "HashAggregateFinalizeTask" << std::endl;
 		op.FinalizeInternal(pipeline, *event, context, gstate, false);
 		D_ASSERT(!gstate.finished);
 		gstate.finished = true;
@@ -623,6 +626,7 @@ public:
 	}
 
 	TaskExecutionResult ExecuteTask(TaskExecutionMode mode) override {
+		std::cerr << "HashDistinctAggregateFinalizeTask" << std::endl;
 		D_ASSERT(op.distinct_collection_info);
 		auto &info = *op.distinct_collection_info;
 		for (idx_t i = 0; i < op.groupings.size(); i++) {

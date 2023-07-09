@@ -1,3 +1,4 @@
+#include <iostream>
 #include "duckdb/common/field_writer.hpp"
 #include "duckdb/planner/expression/bound_cast_expression.hpp"
 #include "duckdb/planner/expression/bound_default_expression.hpp"
@@ -93,6 +94,7 @@ unique_ptr<Expression> BoundCastExpression::AddCastToType(ClientContext &context
                                                           const LogicalType &target_type, bool try_cast) {
 	auto &cast_functions = DBConfig::GetConfig(context).GetCastFunctions();
 	GetCastFunctionInput get_input(context);
+	std::cerr << "BoundCastExpression::AddCastToTypeInternal " << expr->ToString() << " "<< target_type.ToString() << std::endl;
 	return AddCastToTypeInternal(std::move(expr), target_type, cast_functions, get_input, try_cast);
 }
 

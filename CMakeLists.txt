@@ -295,8 +295,8 @@ endif()
 option(BUILD_CORE_FUNCTIONS_EXTENSION "Build the core functions." TRUE)
 option(BUILD_ICU_EXTENSION "Build the ICU extension." FALSE)
 option(BUILD_PARQUET_EXTENSION "Build the Parquet extension." FALSE)
-option(BUILD_TPCH_EXTENSION "Build the TPC-H extension." FALSE)
-option(BUILD_TPCDS_EXTENSION "Build the TPC-DS extension." FALSE)
+option(BUILD_TPCH_EXTENSION "Build the TPC-H extension." TRUE)
+option(BUILD_TPCDS_EXTENSION "Build the TPC-DS extension." TRUE)
 option(BUILD_FTS_EXTENSION "Build the FTS extension." FALSE)
 option(BUILD_HTTPFS_EXTENSION "Build the HTTP File System extension." FALSE)
 option(BUILD_VISUALIZER_EXTENSION "Build the profiler-output visualizer extension." FALSE)
@@ -885,6 +885,9 @@ if (BUILD_MAIN_DUCKDB_LIBRARY)
   add_subdirectory(src)
   add_subdirectory(tools)
 endif()
+
+#add example
+add_subdirectory(examples/embedded-c++)
 
 # Add In-tree extensions
 add_subdirectory(extension)

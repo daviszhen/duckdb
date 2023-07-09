@@ -1,3 +1,4 @@
+#include <iostream>
 #include "duckdb/planner/binder.hpp"
 
 #include "duckdb/catalog/catalog_entry/table_catalog_entry.hpp"
@@ -43,6 +44,7 @@ Binder::Binder(bool, ClientContext &context, shared_ptr<Binder> parent_p, bool i
 }
 
 BoundStatement Binder::Bind(SQLStatement &statement) {
+	std::cerr << "+++BoundStatement Binder::Bind(SQLStatement &statement) " << std::endl;
 	root_statement = &statement;
 	switch (statement.type) {
 	case StatementType::SELECT_STATEMENT:
@@ -106,8 +108,11 @@ void Binder::AddCTEMap(CommonTableExpressionMap &cte_map) {
 }
 
 unique_ptr<BoundQueryNode> Binder::BindNode(QueryNode &node) {
+	std::cerr << "+++unique_ptr<BoundQueryNode> Binder::BindNode(QueryNode &node) A " << std::endl;
 	// first we visit the set of CTEs and add them to the bind context
 	AddCTEMap(node.cte_map);
+	std::cerr << "Binder::BindNode " << node.ToString() << std::endl;
+
 	// now we bind the node
 	unique_ptr<BoundQueryNode> result;
 	switch (node.type) {
@@ -122,22 +127,36 @@ unique_ptr<BoundQueryNode> Binder::BindNode(QueryNode &node) {
 		result = BindNode(node.Cast<SetOperationNode>());
 		break;
 	}
+    std::cerr << "+++unique_ptr<BoundQueryNode> Binder::BindNode(QueryNode &node) B \n";
+	for(auto i = 0 ; i < result->names.size();i++){
+        std::cerr << result->names[i] << " , " << result->types[i].ToString() << "\n";
+	}
+	std::cerr << std::endl;
+
 	return result;
 }
 
 BoundStatement Binder::Bind(QueryNode &node) {
+	std::cerr << "+++BoundStatement Binder::Bind(QueryNode &node) " << node.ToString() << std::endl;
+	std::cerr << "===>BindNode<===" << std::endl;
+	//ast -> bound statement
 	auto bound_node = BindNode(node);
-
+    std::cerr << "===>BindNode<===|after" << std::endl;
 	BoundStatement result;
 	result.names = bound_node->names;
 	result.types = bound_node->types;
 
 	// and plan it
+	//bound statement -> logical plan
+    std::cerr << "===>CreatePlan<===" << std::endl;
 	result.plan = CreatePlan(*bound_node);
+    std::cerr << "===>CreatePlan<===|after" << std::endl;
+    result.plan->Print();
 	return result;
 }
 
 unique_ptr<LogicalOperator> Binder::CreatePlan(BoundQueryNode &node) {
+	std::cerr << "unique_ptr<LogicalOperator> Binder::CreatePlan(BoundQueryNode &node)" << std::endl;
 	switch (node.type) {
 	case QueryNodeType::SELECT_NODE:
 		return CreatePlan(node.Cast<BoundSelectNode>());
@@ -151,6 +170,7 @@ unique_ptr<LogicalOperator> Binder::CreatePlan(BoundQueryNode &node) {
 }
 
 unique_ptr<BoundTableRef> Binder::Bind(TableRef &ref) {
+	std::cerr << "+++unique_ptr<BoundTableRef> Binder::Bind(TableRef &ref) " << std::endl;
 	unique_ptr<BoundTableRef> result;
 	switch (ref.type) {
 	case TableReferenceType::BASE_TABLE:
@@ -184,6 +204,7 @@ unique_ptr<BoundTableRef> Binder::Bind(TableRef &ref) {
 }
 
 unique_ptr<LogicalOperator> Binder::CreatePlan(BoundTableRef &ref) {
+	std::cerr << "+++unique_ptr<LogicalOperator> Binder::CreatePlan(BoundTableRef &ref) " << std::endl;
 	unique_ptr<LogicalOperator> root;
 	switch (ref.type) {
 	case TableReferenceType::BASE_TABLE:
@@ -329,6 +350,7 @@ void Binder::AddCorrelatedColumn(const CorrelatedColumnInfo &info) {
 }
 
 bool Binder::HasMatchingBinding(const string &table_name, const string &column_name, string &error_message) {
+	std::cerr << "bool Binder::HasMatchingBinding(const string &table_name, const string &column_name, " << table_name << " -> " << column_name << std::endl;
 	string empty_schema;
 	return HasMatchingBinding(empty_schema, table_name, column_name, error_message);
 }
@@ -341,6 +363,12 @@ bool Binder::HasMatchingBinding(const string &schema_name, const string &table_n
 
 bool Binder::HasMatchingBinding(const string &catalog_name, const string &schema_name, const string &table_name,
                                 const string &column_name, string &error_message) {
+	std::cerr  << "bool Binder::HasMatchingBinding(const string &catalog_name, const string &schema_name, const string &table_name,\n"
+	             "                                const string &column_name, " <<
+	    catalog_name << " " <<
+	    schema_name << " " <<
+	    table_name << " " <<
+	    column_name << std::endl;
 	optional_ptr<Binding> binding;
 	D_ASSERT(!lambda_bindings);
 	if (macro_binding && table_name == macro_binding->alias) {

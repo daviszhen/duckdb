@@ -1,3 +1,4 @@
+#include <iostream>
 #include "duckdb/execution/executor.hpp"
 
 #include "duckdb/execution/execution_context.hpp"
@@ -158,9 +159,13 @@ void Executor::ScheduleEventsInternal(ScheduleEventData &event_data) {
 	auto &event_map = event_data.event_map;
 	for (auto &entry : event_map) {
 		auto &pipeline = entry.first.get();
+		std::cerr << "event:" << std::endl;
+		pipeline.Print();
 		for (auto &dependency : pipeline.dependencies) {
 			auto dep = dependency.lock();
 			D_ASSERT(dep);
+			std::cerr << "dependency:" << std::endl;
+            dep->Print();
 			auto event_map_entry = event_map.find(*dep);
 			D_ASSERT(event_map_entry != event_map.end());
 			auto &dep_entry = event_map_entry->second;
@@ -334,6 +339,17 @@ void Executor::InitializeInternal(PhysicalOperator &plan) {
 		// collect all pipelines from the root pipelines (recursively) for the progress bar and verify them
 		root_pipeline->GetPipelines(pipelines, true);
 
+
+		std::cerr << "root_pipelines:" << std::endl;
+		for (auto &pipeline : root_pipelines) {
+            pipeline->Print();
+        }
+
+		std::cerr << "pipelines:" << std::endl;
+		for (auto &pipeline : pipelines) {
+            pipeline->Print();
+        }
+
 		// finally, verify and schedule
 		VerifyPipelines();
 		ScheduleEvents(to_schedule);
@@ -425,6 +441,8 @@ PendingExecutionResult Executor::ExecuteTask() {
 	// check if there are any incomplete pipelines
 	auto &scheduler = TaskScheduler::GetScheduler(context);
 	while (completed_pipelines < total_pipelines) {
+//		std::cerr << "completed_pipelines: " << completed_pipelines << " total_pipelines: " << total_pipelines
+//                  << std::endl;
 		// there are! if we don't already have a task, fetch one
 		if (!task) {
 			scheduler.GetTaskFromProducer(*producer, task);

@@ -1,3 +1,4 @@
+#include <iostream>
 #include "duckdb/catalog/catalog_entry/aggregate_function_catalog_entry.hpp"
 #include "duckdb/common/pair.hpp"
 #include "duckdb/common/operator/cast_operators.hpp"
@@ -82,6 +83,7 @@ static void NegatePercentileFractions(ClientContext &context, unique_ptr<ParsedE
 }
 
 BindResult BaseSelectBinder::BindAggregate(FunctionExpression &aggr, AggregateFunctionCatalogEntry &func, idx_t depth) {
+	std::cerr << "+++BindResult BaseSelectBinder::BindAggregate(FunctionExpression &aggr, AggregateFunctionCatalogEntry &func, idx_t depth) " << aggr.ToString() << " depth " << depth << std::endl;
 	// first bind the child of the aggregate expression (if any)
 	this->bound_aggregate = true;
 	unique_ptr<Expression> bound_filter;
@@ -235,7 +237,7 @@ BindResult BaseSelectBinder::BindAggregate(FunctionExpression &aggr, AggregateFu
 		aggregate = ExportAggregateFunction::Bind(std::move(aggregate));
 	}
 	aggregate->order_bys = std::move(order_bys);
-
+    std::cerr << "BindResult BaseSelectBinder::BindAggregate(FunctionExpression &aggr, AggregateFunctionCatalogEntry &func, idx_t depth)|A| " << aggregate->ToString() << std::endl;
 	// check for all the aggregates if this aggregate already exists
 	idx_t aggr_index;
 	auto entry = node.aggregate_map.find(*aggregate);
@@ -244,15 +246,18 @@ BindResult BaseSelectBinder::BindAggregate(FunctionExpression &aggr, AggregateFu
 		aggr_index = node.aggregates.size();
 		node.aggregate_map[*aggregate] = aggr_index;
 		node.aggregates.push_back(std::move(aggregate));
+        std::cerr << "BindResult BaseSelectBinder::BindAggregate(FunctionExpression &aggr, AggregateFunctionCatalogEntry &func, idx_t depth)|B| " << aggr_index << std::endl;
 	} else {
 		// duplicate aggregate: simplify refer to this aggregate
 		aggr_index = entry->second;
+        std::cerr << "BindResult BaseSelectBinder::BindAggregate(FunctionExpression &aggr, AggregateFunctionCatalogEntry &func, idx_t depth)|C| " << aggr_index << std::endl;
 	}
 
 	// now create a column reference referring to the aggregate
 	auto colref = make_uniq<BoundColumnRefExpression>(
 	    aggr.alias.empty() ? node.aggregates[aggr_index]->ToString() : aggr.alias,
 	    node.aggregates[aggr_index]->return_type, ColumnBinding(node.aggregate_index, aggr_index), depth);
+    std::cerr << "BindResult BaseSelectBinder::BindAggregate(FunctionExpression &aggr, AggregateFunctionCatalogEntry &func, idx_t depth)|C| " << colref->ToString() << std::endl;
 	// move the aggregate expression into the set of bound aggregates
 	return BindResult(std::move(colref));
 }
