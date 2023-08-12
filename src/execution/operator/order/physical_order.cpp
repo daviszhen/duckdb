@@ -1,4 +1,3 @@
-#include <iostream>
 #include "duckdb/execution/operator/order/physical_order.hpp"
 
 #include "duckdb/common/sort/sort.hpp"
@@ -115,7 +114,6 @@ public:
 	}
 
 	TaskExecutionResult ExecuteTask(TaskExecutionMode mode) override {
-		std::cerr << "PhysicalOrderMergeTask" << std::endl;
 		// Initialize merge sorted and iterate until done
 		auto &global_sort_state = state.global_sort_state;
 		MergeSorter merge_sorter(global_sort_state, BufferManager::GetBufferManager(context));

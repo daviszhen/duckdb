@@ -90,7 +90,6 @@ public:
 	}
 
 	TaskExecutionResult ExecuteTask(TaskExecutionMode mode) override {
-		std::cerr << "RangeJoinMergeTask" << std::endl;
 		// Initialize iejoin sorted and iterate until done
 		auto &global_sort_state = table.global_sort_state;
 		MergeSorter merge_sorter(global_sort_state, BufferManager::GetBufferManager(context));

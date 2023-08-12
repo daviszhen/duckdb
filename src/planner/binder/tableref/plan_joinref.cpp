@@ -229,7 +229,6 @@ unique_ptr<LogicalOperator> LogicalComparisonJoin::CreateJoin(JoinType type, Joi
 }
 
 unique_ptr<LogicalOperator> Binder::CreatePlan(BoundJoinRef &ref) {
-	std::cerr << "+++unique_ptr<LogicalOperator> Binder::CreatePlan(BoundJoinRef &ref) " << std::endl;
 	auto left = CreatePlan(*ref.left);
 	auto right = CreatePlan(*ref.right);
 	if (!ref.lateral && !ref.correlated_columns.empty()) {
@@ -242,31 +241,26 @@ unique_ptr<LogicalOperator> Binder::CreatePlan(BoundJoinRef &ref) {
 	}
 	if (ref.type == JoinType::RIGHT && ref.ref_type != JoinRefType::ASOF &&
 	    ClientConfig::GetConfig(context).enable_optimizer) {
-        std::cerr << "unique_ptr<LogicalOperator> Binder::CreatePlan(BoundJoinRef &ref)|A| " << std::endl;
 		// we turn any right outer joins into left outer joins for optimization purposes
 		// they are the same but with sides flipped, so treating them the same simplifies life
 		ref.type = JoinType::LEFT;
 		std::swap(left, right);
 	}
 	if (ref.lateral) {
-        std::cerr << "unique_ptr<LogicalOperator> Binder::CreatePlan(BoundJoinRef &ref)|B| " << std::endl;
 		// lateral join
 		return PlanLateralJoin(std::move(left), std::move(right), ref.correlated_columns, ref.type,
 		                       std::move(ref.condition));
 	}
 	switch (ref.ref_type) {
 	case JoinRefType::CROSS:
-        std::cerr << "unique_ptr<LogicalOperator> Binder::CreatePlan(BoundJoinRef &ref)|C| " << std::endl;
 		return LogicalCrossProduct::Create(std::move(left), std::move(right));
 	case JoinRefType::POSITIONAL:
-        std::cerr << "unique_ptr<LogicalOperator> Binder::CreatePlan(BoundJoinRef &ref)|D| " << std::endl;
 		return LogicalPositionalJoin::Create(std::move(left), std::move(right));
 	default:
 		break;
 	}
 	if (ref.type == JoinType::INNER && (ref.condition->HasSubquery() || HasCorrelatedColumns(*ref.condition)) &&
 	    ref.ref_type == JoinRefType::REGULAR) {
-        std::cerr << "unique_ptr<LogicalOperator> Binder::CreatePlan(BoundJoinRef &ref)|E| " << std::endl;
 		// inner join, generate a cross product + filter
 		// this will be later turned into a proper join by the join order optimizer
 		auto root = LogicalCrossProduct::Create(std::move(left), std::move(right));
@@ -280,7 +274,6 @@ unique_ptr<LogicalOperator> Binder::CreatePlan(BoundJoinRef &ref) {
 		return std::move(filter);
 	}
 
-    std::cerr << "unique_ptr<LogicalOperator> Binder::CreatePlan(BoundJoinRef &ref)|F| " << std::endl;
 	// now create the join operator from the join condition
 	auto result = LogicalComparisonJoin::CreateJoin(ref.type, ref.ref_type, std::move(left), std::move(right),
 	                                                std::move(ref.condition));
@@ -325,7 +318,6 @@ unique_ptr<LogicalOperator> Binder::CreatePlan(BoundJoinRef &ref) {
 	default:
 		break;
 	}
-	result->Print();
 	return result;
 }
 

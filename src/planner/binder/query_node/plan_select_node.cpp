@@ -9,7 +9,6 @@
 namespace duckdb {
 
 unique_ptr<LogicalOperator> Binder::PlanFilter(unique_ptr<Expression> condition, unique_ptr<LogicalOperator> root) {
-	std::cerr << "unique_ptr<LogicalOperator> Binder::PlanFilter(unique_ptr<Expression> condition, unique_ptr<LogicalOperator> root) " << condition->ToString() << std::endl;
 	PlanSubqueries(condition, root);
 	auto filter = make_uniq<LogicalFilter>(std::move(condition));
 	filter->AddChild(std::move(root));
@@ -17,10 +16,8 @@ unique_ptr<LogicalOperator> Binder::PlanFilter(unique_ptr<Expression> condition,
 }
 
 unique_ptr<LogicalOperator> Binder::CreatePlan(BoundSelectNode &statement) {
-	std::cerr << "unique_ptr<LogicalOperator> Binder::CreatePlan(BoundSelectNode &statement)"  << std::endl;
 	unique_ptr<LogicalOperator> root;
 	D_ASSERT(statement.from_table);
-    std::cerr << "unique_ptr<LogicalOperator> Binder::CreatePlan(BoundSelectNode &statement)|plan|statement.from_table"  << std::endl;
 	root = CreatePlan(*statement.from_table);
 	D_ASSERT(root);
 
@@ -30,24 +27,18 @@ unique_ptr<LogicalOperator> Binder::CreatePlan(BoundSelectNode &statement) {
 	}
 
 	if (statement.where_clause) {
-        std::cerr << "unique_ptr<LogicalOperator> Binder::CreatePlan(BoundSelectNode &statement)|plan|statement.where_clause"  << std::endl;
 		root = PlanFilter(std::move(statement.where_clause), std::move(root));
 	}
 
 	if (!statement.aggregates.empty() || !statement.groups.group_expressions.empty()) {
-        std::cerr << "unique_ptr<LogicalOperator> Binder::CreatePlan(BoundSelectNode &statement)|plan|statement.(aggregates & groups.group_expressions)| " <<
-		    !statement.aggregates.empty() << " , " <<
-		    !statement.groups.group_expressions.empty()  << std::endl;
 		if (!statement.groups.group_expressions.empty()) {
 			// visit the groups
 			for (auto &group : statement.groups.group_expressions) {
-                std::cerr << "unique_ptr<LogicalOperator> Binder::CreatePlan(BoundSelectNode &statement)|plan|statement.groups.group_expressions| " << group->ToString() << std::endl;
 				PlanSubqueries(group, root);
 			}
 		}
 		// now visit all aggregate expressions
 		for (auto &expr : statement.aggregates) {
-            std::cerr << "unique_ptr<LogicalOperator> Binder::CreatePlan(BoundSelectNode &statement)|plan|statement.aggregates| " << expr->ToString() << std::endl;
 			PlanSubqueries(expr, root);
 		}
 		// finally create the aggregate node with the group_index and aggregate_index as obtained from the binder
@@ -61,7 +52,6 @@ unique_ptr<LogicalOperator> Binder::CreatePlan(BoundSelectNode &statement) {
 		aggregate->AddChild(std::move(root));
 		root = std::move(aggregate);
 	} else if (!statement.groups.grouping_sets.empty()) {
-        std::cerr << "unique_ptr<LogicalOperator> Binder::CreatePlan(BoundSelectNode &statement)|plan|statement.groups.grouping_sets.empty()| " << std::endl;
 		// edge case: we have grouping sets but no groups or aggregates
 		// this can only happen if we have e.g. select 1 from tbl group by ();
 		// just output a dummy scan
@@ -69,7 +59,6 @@ unique_ptr<LogicalOperator> Binder::CreatePlan(BoundSelectNode &statement) {
 	}
 
 	if (statement.having) {
-        std::cerr << "unique_ptr<LogicalOperator> Binder::CreatePlan(BoundSelectNode &statement)|plan|statement.having| " << std::endl;
 		PlanSubqueries(statement.having, root);
 		auto having = make_uniq<LogicalFilter>(std::move(statement.having));
 
@@ -78,7 +67,6 @@ unique_ptr<LogicalOperator> Binder::CreatePlan(BoundSelectNode &statement) {
 	}
 
 	if (!statement.windows.empty()) {
-        std::cerr << "unique_ptr<LogicalOperator> Binder::CreatePlan(BoundSelectNode &statement)|plan|statement.windows| " << std::endl;
 		auto win = make_uniq<LogicalWindow>(statement.window_index);
 		win->expressions = std::move(statement.windows);
 		// visit the window expressions
@@ -117,13 +105,11 @@ unique_ptr<LogicalOperator> Binder::CreatePlan(BoundSelectNode &statement) {
 	}
 
 	for (auto &expr : statement.select_list) {
-        std::cerr << "unique_ptr<LogicalOperator> Binder::CreatePlan(BoundSelectNode &statement)|plan|statement.select_list| " << expr->ToString() << std::endl;
 		PlanSubqueries(expr, root);
 	}
 
 	auto proj = make_uniq<LogicalProjection>(statement.projection_index, std::move(statement.select_list));
 	auto &projection = *proj;
-    std::cerr << "unique_ptr<LogicalOperator> Binder::CreatePlan(BoundSelectNode &statement)|plan|proj| "  << proj->ToString() << std::endl;
 	proj->AddChild(std::move(root));
 	root = std::move(proj);
 
@@ -133,18 +119,15 @@ unique_ptr<LogicalOperator> Binder::CreatePlan(BoundSelectNode &statement) {
 	// add a prune node if necessary
 	if (statement.need_prune) {
 		D_ASSERT(root);
-        std::cerr << "unique_ptr<LogicalOperator> Binder::CreatePlan(BoundSelectNode &statement)|plan|statement.need_prune| " << std::endl;
 		vector<unique_ptr<Expression>> prune_expressions;
 		for (idx_t i = 0; i < statement.column_count; i++) {
 			prune_expressions.push_back(make_uniq<BoundColumnRefExpression>(
 			    projection.expressions[i]->return_type, ColumnBinding(statement.projection_index, i)));
 		}
 		auto prune = make_uniq<LogicalProjection>(statement.prune_index, std::move(prune_expressions));
-        std::cerr << "unique_ptr<LogicalOperator> Binder::CreatePlan(BoundSelectNode &statement)|plan|statement.need_prune|prune " << prune->ToString() << std::endl;
 		prune->AddChild(std::move(root));
 		root = std::move(prune);
 	}
-    std::cerr << "unique_ptr<LogicalOperator> Binder::CreatePlan(BoundSelectNode &statement)|plan|result| " << std::endl;
 	return root;
 }
 

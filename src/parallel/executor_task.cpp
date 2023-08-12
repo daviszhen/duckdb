@@ -1,8 +1,6 @@
+#include "duckdb/parallel/task.hpp"
 #include "duckdb/execution/executor.hpp"
 #include "duckdb/main/client_context.hpp"
-#include "duckdb/parallel/task.hpp"
-
-#include <iostream>
 
 namespace duckdb {
 
@@ -27,7 +25,6 @@ void ExecutorTask::Reschedule() {
 
 TaskExecutionResult ExecutorTask::Execute(TaskExecutionMode mode) {
 	try {
-		std::cerr << "ExecutorTask::Execute" << std::endl;
 		return ExecuteTask(mode);
 	} catch (Exception &ex) {
 		executor.PushError(PreservedError(ex));

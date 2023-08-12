@@ -55,13 +55,11 @@ PendingExecutionResult PendingQueryResult::ExecuteTaskInternal(ClientContextLock
 
 unique_ptr<QueryResult> PendingQueryResult::ExecuteInternal(ClientContextLock &lock) {
 	CheckExecutableInternal(lock);
-	std::cerr << "PendingQueryResult::ExecuteInternal.ExecuteTaskInternal" << std::endl;
 	while (ExecuteTaskInternal(lock) == PendingExecutionResult::RESULT_NOT_READY) {
 	}
 	if (HasError()) {
 		return make_uniq<MaterializedQueryResult>(error);
 	}
-	std::cerr << "PendingQueryResult::ExecuteInternal.FetchResultInternal" << std::endl;
 	auto result = context->FetchResultInternal(lock, *this);
 	Close();
 	return result;

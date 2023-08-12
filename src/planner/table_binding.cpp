@@ -1,4 +1,3 @@
-#include <iostream>
 #include "duckdb/planner/table_binding.hpp"
 
 #include "duckdb/common/string_util.hpp"
@@ -31,14 +30,12 @@ Binding::Binding(BindingType binding_type, const string &alias, vector<LogicalTy
 }
 
 bool Binding::TryGetBindingIndex(const string &column_name, column_t &result) {
-	std::cerr << "bool Binding::TryGetBindingIndex(const string &column_name, column_t &result) " << column_name << std::endl;
 	auto entry = name_map.find(column_name);
 	if (entry == name_map.end()) {
 		return false;
 	}
 	auto column_info = entry->second;
 	result = column_info;
-    std::cerr << "bool Binding::TryGetBindingIndex(const string &column_name, column_t &result) " << column_name << " , " << result << std::endl;
 	return true;
 }
 
@@ -51,7 +48,6 @@ column_t Binding::GetBindingIndex(const string &column_name) {
 }
 
 bool Binding::HasMatchingBinding(const string &column_name) {
-	std::cerr << "bool Binding::HasMatchingBinding(const string &column_name) " << column_name << std::endl;
 	column_t result;
 	return TryGetBindingIndex(column_name, result);
 }
@@ -61,7 +57,6 @@ string Binding::ColumnNotFoundError(const string &column_name) const {
 }
 
 BindResult Binding::Bind(ColumnRefExpression &colref, idx_t depth) {
-	std::cerr << "BindResult Binding::Bind(ColumnRefExpression &colref, idx_t depth) " << colref.ToString() << " depth " << depth << std::endl;
 	column_t column_index;
 	bool success = false;
 	success = TryGetBindingIndex(colref.GetColumnName(), column_index);
@@ -75,12 +70,6 @@ BindResult Binding::Bind(ColumnRefExpression &colref, idx_t depth) {
 	if (colref.alias.empty()) {
 		colref.alias = names[column_index];
 	}
-	std::cerr << "BindResult Binding::Bind(ColumnRefExpression &colref, idx_t depth) " << " ***** "
-	    " table_index " << binding.table_index <<
-	    " column_index " << binding.column_index <<
-	    " sql_type " << sql_type.ToString() <<
-	    " alias " << colref.alias <<
-	    " depth "<< depth << std::endl;
 	return BindResult(make_uniq<BoundColumnRefExpression>(colref.GetName(), sql_type, binding, depth));
 }
 
@@ -192,11 +181,9 @@ ColumnBinding TableBinding::GetColumnBinding(column_t column_index) {
 }
 
 BindResult TableBinding::Bind(ColumnRefExpression &colref, idx_t depth) {
-	std::cerr << "BindResult TableBinding::Bind(ColumnRefExpression &colref, idx_t depth) A| " << colref.ToString() << " depth " << depth << std::endl;
 	auto &column_name = colref.GetColumnName();
 	column_t column_index;
 	bool success = false;
-    std::cerr << "BindResult TableBinding::Bind(ColumnRefExpression &colref, idx_t depth) B|TryGetBindingIndex| " << column_name << std::endl;
 	success = TryGetBindingIndex(column_name, column_index);
 	if (!success) {
 		return BindResult(ColumnNotFoundError(column_name));
@@ -223,13 +210,7 @@ BindResult TableBinding::Bind(ColumnRefExpression &colref, idx_t depth) {
 			colref.alias = names[column_index];
 		}
 	}
-    std::cerr << "BindResult TableBinding::Bind(ColumnRefExpression &colref, idx_t depth) C|GetColumnBinding| " << column_name << std::endl;
 	ColumnBinding binding = GetColumnBinding(column_index);
-    std::cerr << "BindResult TableBinding::Bind(ColumnRefExpression &colref, idx_t depth) D| " <<
-	    colref.GetName() <<
-	    " col_type " << col_type.ToString() <<
-	    " column_binding " << binding.ToString() <<
-	    " depth " << depth << std::endl;
 	return BindResult(make_uniq<BoundColumnRefExpression>(colref.GetName(), col_type, binding, depth));
 }
 

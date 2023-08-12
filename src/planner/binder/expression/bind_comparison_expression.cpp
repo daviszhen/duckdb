@@ -112,7 +112,6 @@ LogicalType BoundComparisonExpression::BindComparison(LogicalType left_type, Log
 }
 
 BindResult ExpressionBinder::BindExpression(ComparisonExpression &expr, idx_t depth) {
-	std::cerr << "BindResult ExpressionBinder::BindExpression(ComparisonExpression &expr, idx_t depth) | " << expr.ToString() << std::endl;
 	// first try to bind the children of the case expression
 	string error;
 	BindChild(expr.left, depth, error);

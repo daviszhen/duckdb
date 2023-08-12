@@ -107,7 +107,6 @@ bool PipelineExecutor::TryFlushCachingOperators() {
 }
 
 PipelineExecuteResult PipelineExecutor::Execute(idx_t max_chunks) {
-	std::cerr << "PipelineExecutor::Execute(" << max_chunks << ")" << std::endl;
 	D_ASSERT(pipeline.sink);
 	auto &source_chunk = pipeline.operators.empty() ? final_chunk : *intermediate_chunks[0];
 	for (idx_t i = 0; i < max_chunks; i++) {
@@ -120,7 +119,6 @@ PipelineExecuteResult PipelineExecutor::Execute(idx_t max_chunks) {
 			break;
 		} else if (remaining_sink_chunk) {
 			// The pipeline was interrupted by the Sink. We should retry sinking the final chunk.
-			std::cerr << "PipelineExecutor::Execute.ExecutePushInternal 1" << std::endl;
 			result = ExecutePushInternal(final_chunk);
 			remaining_sink_chunk = false;
 		} else if (!in_process_operators.empty() && !started_flushing) {
@@ -128,7 +126,6 @@ PipelineExecuteResult PipelineExecutor::Execute(idx_t max_chunks) {
 			// re-push the same source chunk through the pipeline because there are in_process operators, meaning that
 			// the result for the pipeline
 			D_ASSERT(source_chunk.size() > 0);
-            std::cerr << "PipelineExecutor::Execute.ExecutePushInternal 2" << std::endl;
 			result = ExecutePushInternal(source_chunk);
 		} else if (exhausted_source && !done_flushing) {
 			// The source was exhausted, try flushing all operators
@@ -154,7 +151,6 @@ PipelineExecuteResult PipelineExecutor::Execute(idx_t max_chunks) {
 					continue;
 				}
 			}
-            std::cerr << "PipelineExecutor::Execute.ExecutePushInternal 3" << std::endl;
 			result = ExecutePushInternal(source_chunk);
 		} else {
 			throw InternalException("Unexpected state reached in pipeline executor");

@@ -5,7 +5,6 @@
 namespace duckdb {
 
 unique_ptr<PhysicalOperator> PhysicalPlanGenerator::CreatePlan(LogicalAnyJoin &op) {
-	std::cerr << "+++unique_ptr<PhysicalOperator> PhysicalPlanGenerator::CreatePlan(LogicalAnyJoin &op) " << op.ToString() << std::endl;
 	// first visit the child nodes
 	D_ASSERT(op.children.size() == 2);
 	D_ASSERT(op.condition);

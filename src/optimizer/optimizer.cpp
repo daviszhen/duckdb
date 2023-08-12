@@ -1,4 +1,3 @@
-#include <iostream>
 #include "duckdb/optimizer/optimizer.hpp"
 
 #include "duckdb/execution/column_binding_resolver.hpp"
@@ -73,37 +72,30 @@ void Optimizer::Verify(LogicalOperator &op) {
 }
 
 unique_ptr<LogicalOperator> Optimizer::Optimize(unique_ptr<LogicalOperator> plan_p) {
-	std::cerr << "+++unique_ptr<LogicalOperator> Optimizer::Optimize(unique_ptr<LogicalOperator> plan_p)" << std::endl;
 	Verify(*plan_p);
 	this->plan = std::move(plan_p);
 	// first we perform expression rewrites using the ExpressionRewriter
 	// this does not change the logical plan structure, but only simplifies the expression trees
-	RunOptimizer(OptimizerType::EXPRESSION_REWRITER, [&]() {
-        std::cerr << "unique_ptr<LogicalOperator> Optimizer::Optimize(unique_ptr<LogicalOperator> plan_p)|EXPRESSION_REWRITER " <<std::endl;
-		rewriter.VisitOperator(*plan); });
+	RunOptimizer(OptimizerType::EXPRESSION_REWRITER, [&]() { rewriter.VisitOperator(*plan); });
 
 	// perform filter pullup
 	RunOptimizer(OptimizerType::FILTER_PULLUP, [&]() {
-      std::cerr << "unique_ptr<LogicalOperator> Optimizer::Optimize(unique_ptr<LogicalOperator> plan_p)|FILTER_PULLUP " <<std::endl;
 		FilterPullup filter_pullup;
 		plan = filter_pullup.Rewrite(std::move(plan));
 	});
 
 	// perform filter pushdown
 	RunOptimizer(OptimizerType::FILTER_PUSHDOWN, [&]() {
-      std::cerr << "unique_ptr<LogicalOperator> Optimizer::Optimize(unique_ptr<LogicalOperator> plan_p)|FILTER_PUSHDOWN " <<std::endl;
 		FilterPushdown filter_pushdown(*this);
 		plan = filter_pushdown.Rewrite(std::move(plan));
 	});
 
 	RunOptimizer(OptimizerType::REGEX_RANGE, [&]() {
-      std::cerr << "unique_ptr<LogicalOperator> Optimizer::Optimize(unique_ptr<LogicalOperator> plan_p)|REGEX_RANGE " <<std::endl;
 		RegexRangeFilter regex_opt;
 		plan = regex_opt.Rewrite(std::move(plan));
 	});
 
 	RunOptimizer(OptimizerType::IN_CLAUSE, [&]() {
-      std::cerr << "unique_ptr<LogicalOperator> Optimizer::Optimize(unique_ptr<LogicalOperator> plan_p)|IN_CLAUSE " <<std::endl;
 		InClauseRewriter rewriter(context, *this);
 		plan = rewriter.Rewrite(std::move(plan));
 	});
@@ -111,75 +103,64 @@ unique_ptr<LogicalOperator> Optimizer::Optimize(unique_ptr<LogicalOperator> plan
 	// then we perform the join ordering optimization
 	// this also rewrites cross products + filters into joins and performs filter pushdowns
 	RunOptimizer(OptimizerType::JOIN_ORDER, [&]() {
-      std::cerr << "unique_ptr<LogicalOperator> Optimizer::Optimize(unique_ptr<LogicalOperator> plan_p)|JOIN_ORDER " <<std::endl;
 		JoinOrderOptimizer optimizer(context);
 		plan = optimizer.Optimize(std::move(plan));
 	});
 
 	// removes any redundant DelimGets/DelimJoins
 	RunOptimizer(OptimizerType::DELIMINATOR, [&]() {
-      std::cerr << "unique_ptr<LogicalOperator> Optimizer::Optimize(unique_ptr<LogicalOperator> plan_p)|DELIMINATOR " <<std::endl;
 		Deliminator deliminator(context);
 		plan = deliminator.Optimize(std::move(plan));
 	});
 
 	// rewrites UNNESTs in DelimJoins by moving them to the projection
 	RunOptimizer(OptimizerType::UNNEST_REWRITER, [&]() {
-      std::cerr << "unique_ptr<LogicalOperator> Optimizer::Optimize(unique_ptr<LogicalOperator> plan_p)|UNNEST_REWRITER " <<std::endl;
 		UnnestRewriter unnest_rewriter;
 		plan = unnest_rewriter.Optimize(std::move(plan));
 	});
 
 	// removes unused columns
 	RunOptimizer(OptimizerType::UNUSED_COLUMNS, [&]() {
-      std::cerr << "unique_ptr<LogicalOperator> Optimizer::Optimize(unique_ptr<LogicalOperator> plan_p)|UNUSED_COLUMNS " <<std::endl;
 		RemoveUnusedColumns unused(binder, context, true);
 		unused.VisitOperator(*plan);
 	});
 
 	// perform statistics propagation
 	RunOptimizer(OptimizerType::STATISTICS_PROPAGATION, [&]() {
-      std::cerr << "unique_ptr<LogicalOperator> Optimizer::Optimize(unique_ptr<LogicalOperator> plan_p)|STATISTICS_PROPAGATION " <<std::endl;
 		StatisticsPropagator propagator(context);
 		propagator.PropagateStatistics(plan);
 	});
 
 	// then we extract common subexpressions inside the different operators
 	RunOptimizer(OptimizerType::COMMON_SUBEXPRESSIONS, [&]() {
-      std::cerr << "unique_ptr<LogicalOperator> Optimizer::Optimize(unique_ptr<LogicalOperator> plan_p)|COMMON_SUBEXPRESSIONS " <<std::endl;
 		CommonSubExpressionOptimizer cse_optimizer(binder);
 		cse_optimizer.VisitOperator(*plan);
 	});
 
 	RunOptimizer(OptimizerType::COMMON_AGGREGATE, [&]() {
-      std::cerr << "unique_ptr<LogicalOperator> Optimizer::Optimize(unique_ptr<LogicalOperator> plan_p)|COMMON_AGGREGATE " <<std::endl;
 		CommonAggregateOptimizer common_aggregate;
 		common_aggregate.VisitOperator(*plan);
 	});
 
 	RunOptimizer(OptimizerType::COLUMN_LIFETIME, [&]() {
-      std::cerr << "unique_ptr<LogicalOperator> Optimizer::Optimize(unique_ptr<LogicalOperator> plan_p)|COLUMN_LIFETIME " <<std::endl;
 		ColumnLifetimeAnalyzer column_lifetime(true);
 		column_lifetime.VisitOperator(*plan);
 	});
 
 	// transform ORDER BY + LIMIT to TopN
 	RunOptimizer(OptimizerType::TOP_N, [&]() {
-      std::cerr << "unique_ptr<LogicalOperator> Optimizer::Optimize(unique_ptr<LogicalOperator> plan_p)|TOP_N " <<std::endl;
 		TopN topn;
 		plan = topn.Optimize(std::move(plan));
 	});
 
 	// apply simple expression heuristics to get an initial reordering
 	RunOptimizer(OptimizerType::REORDER_FILTER, [&]() {
-      std::cerr << "unique_ptr<LogicalOperator> Optimizer::Optimize(unique_ptr<LogicalOperator> plan_p)|REORDER_FILTER " <<std::endl;
 		ExpressionHeuristics expression_heuristics(*this);
 		plan = expression_heuristics.Rewrite(std::move(plan));
 	});
 
 	for (auto &optimizer_extension : DBConfig::GetConfig(context).optimizer_extensions) {
 		RunOptimizer(OptimizerType::EXTENSION, [&]() {
-          std::cerr << "unique_ptr<LogicalOperator> Optimizer::Optimize(unique_ptr<LogicalOperator> plan_p)|EXTENSION " <<std::endl;
 			optimizer_extension.optimize_function(context, optimizer_extension.optimizer_info.get(), plan);
 		});
 	}

@@ -1,4 +1,3 @@
-#include <iostream>
 #include "duckdb/planner/planner.hpp"
 
 #include "duckdb/common/serializer.hpp"
@@ -28,7 +27,6 @@ static void CheckTreeDepth(const LogicalOperator &op, idx_t max_depth, idx_t dep
 }
 
 void Planner::CreatePlan(SQLStatement &statement) {
-	std::cerr << "+++Planner::CreatePlan(SQLStatement &statement)" << std::endl;
 	auto &profiler = QueryProfiler::Get(context);
 	auto parameter_count = statement.n_param;
 
@@ -111,7 +109,6 @@ shared_ptr<PreparedStatementData> Planner::PrepareSQLStatement(unique_ptr<SQLSta
 }
 
 void Planner::CreatePlan(unique_ptr<SQLStatement> statement) {
-	std::cerr << "+++Planner::CreatePlan(unique_ptr<SQLStatement> statement)" << std::endl;
 	D_ASSERT(statement);
 	switch (statement->type) {
 	case StatementType::SELECT_STATEMENT:

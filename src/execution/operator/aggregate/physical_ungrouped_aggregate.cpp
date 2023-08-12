@@ -432,7 +432,6 @@ public:
 	}
 
 	TaskExecutionResult ExecuteTask(TaskExecutionMode mode) override {
-		std::cerr << "UngroupedDistinctAggregateFinalizeTask" << std::endl;
 		AggregateDistinct();
 		event->FinishTask();
 		return TaskExecutionResult::TASK_FINISHED;

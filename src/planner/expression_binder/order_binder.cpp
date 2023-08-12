@@ -26,7 +26,6 @@ OrderBinder::OrderBinder(vector<Binder *> binders, idx_t projection_index, Selec
 }
 
 unique_ptr<Expression> OrderBinder::CreateProjectionReference(ParsedExpression &expr, idx_t index) {
-	std::cerr <<  "+++unique_ptr<Expression> OrderBinder::CreateProjectionReference(ParsedExpression &expr, idx_t index) A| " << expr.ToString() << std::endl;
 	string alias;
 	if (extra_list && index < extra_list->size()) {
 		alias = extra_list->at(index)->ToString();
@@ -35,19 +34,16 @@ unique_ptr<Expression> OrderBinder::CreateProjectionReference(ParsedExpression &
 			alias = expr.alias;
 		}
 	}
-	std::cerr << "unique_ptr<Expression> OrderBinder::CreateProjectionReference(ParsedExpression &expr, idx_t index) B| " << alias << " [ " << projection_index << " , " << index << " ] " << std::endl;
 	return make_uniq<BoundColumnRefExpression>(std::move(alias), LogicalType::INVALID,
 	                                           ColumnBinding(projection_index, index));
 }
 
 unique_ptr<Expression> OrderBinder::CreateExtraReference(unique_ptr<ParsedExpression> expr) {
-	std::cerr <<  "+++unique_ptr<Expression> OrderBinder::CreateExtraReference(unique_ptr<ParsedExpression> expr) A| " << expr->ToString() << std::endl;
 	if (!extra_list) {
 		throw InternalException("CreateExtraReference called without extra_list");
 	}
 	auto result = CreateProjectionReference(*expr, extra_list->size());
 	extra_list->push_back(std::move(expr));
-	std::cerr <<  "unique_ptr<Expression> OrderBinder::CreateExtraReference(unique_ptr<ParsedExpression> expr) B| " << result->ToString() << std::endl;
 	return result;
 }
 
@@ -68,7 +64,6 @@ unique_ptr<Expression> OrderBinder::BindConstant(ParsedExpression &expr, const V
 }
 
 unique_ptr<Expression> OrderBinder::Bind(unique_ptr<ParsedExpression> expr) {
-	std::cerr <<  "+++unique_ptr<Expression> OrderBinder::Bind(unique_ptr<ParsedExpression> expr) A| " << expr->ToString() << std::endl;
 	// in the ORDER BY clause we do not bind children
 	// we bind ONLY to the select list
 	// if there is no matching entry in the SELECT list already, we add the expression to the SELECT list and refer the
@@ -79,7 +74,6 @@ unique_ptr<Expression> OrderBinder::Bind(unique_ptr<ParsedExpression> expr) {
 		// ORDER BY constant
 		// is the ORDER BY expression a constant integer? (e.g. ORDER BY 1)
 		auto &constant = expr->Cast<ConstantExpression>();
-        std::cerr <<  "unique_ptr<Expression> OrderBinder::Bind(unique_ptr<ParsedExpression> expr) B|Constant| " << constant.ToString() << std::endl;
 		return BindConstant(*expr, constant.value);
 	}
 	case ExpressionClass::COLUMN_REF: {
@@ -90,15 +84,11 @@ unique_ptr<Expression> OrderBinder::Bind(unique_ptr<ParsedExpression> expr) {
 		if (colref.IsQualified()) {
 			break;
 		}
-        std::cerr <<  "unique_ptr<Expression> OrderBinder::Bind(unique_ptr<ParsedExpression> expr) C|ColumnRef| " << colref.ToString() << std::endl;
 		// check the alias list
 		auto entry = alias_map.find(colref.column_names[0]);
 		if (entry != alias_map.end()) {
-            std::cerr <<  "unique_ptr<Expression> OrderBinder::Bind(unique_ptr<ParsedExpression> expr) C1|ColumnRef| " << colref.ToString() << std::endl;
 			// it does! point it to that entry
-			auto ret =  CreateProjectionReference(*expr, entry->second);
-            std::cerr <<  "unique_ptr<Expression> OrderBinder::Bind(unique_ptr<ParsedExpression> expr) C2|ColumnRef|entry->second " << entry->second << " , "<< ret->ToString() << std::endl;
-			return ret;
+			return CreateProjectionReference(*expr, entry->second);
 		}
 		break;
 	}
@@ -107,7 +97,6 @@ unique_ptr<Expression> OrderBinder::Bind(unique_ptr<ParsedExpression> expr) {
 		if (posref.index < 1 || posref.index > max_count) {
 			throw BinderException("ORDER term out of range - should be between 1 and %lld", (idx_t)max_count);
 		}
-        std::cerr <<  "unique_ptr<Expression> OrderBinder::Bind(unique_ptr<ParsedExpression> expr) D|POSITIONAL_REFERENCE| " << posref.ToString() << std::endl;
 		return CreateProjectionReference(*expr, posref.index - 1);
 	}
 	case ExpressionClass::PARAMETER: {
@@ -119,7 +108,6 @@ unique_ptr<Expression> OrderBinder::Bind(unique_ptr<ParsedExpression> expr) {
 	// general case
 	// first bind the table names of this entry
 	for (auto &binder : binders) {
-		std::cerr << "unique_ptr<Expression> OrderBinder::Bind(unique_ptr<ParsedExpression> expr) E| " << expr->ToString() << std::endl;
 		ExpressionBinder::QualifyColumnNames(*binder, expr);
 	}
 	// first check if the ORDER BY clause already points to an entry in the projection list
@@ -130,10 +118,7 @@ unique_ptr<Expression> OrderBinder::Bind(unique_ptr<ParsedExpression> expr) {
 		}
 		// there is a matching entry in the projection list
 		// just point to that entry
-		std::cerr <<  "unique_ptr<Expression> OrderBinder::Bind(unique_ptr<ParsedExpression> expr) F|entry->second " << entry->second << " , " << expr->ToString() << std::endl;
-		auto ret = CreateProjectionReference(*expr, entry->second);
-		std::cerr <<  "unique_ptr<Expression> OrderBinder::Bind(unique_ptr<ParsedExpression> expr) F1| " << ret->ToString() << std::endl;
-        return ret;
+		return CreateProjectionReference(*expr, entry->second);
 	}
 	if (!extra_list) {
 		// no extra list specified: we cannot push an extra ORDER BY clause
@@ -141,7 +126,6 @@ unique_ptr<Expression> OrderBinder::Bind(unique_ptr<ParsedExpression> expr) {
 		                      "the UNION into a FROM clause.",
 		                      expr->ToString());
 	}
-	std::cerr <<  "unique_ptr<Expression> OrderBinder::Bind(unique_ptr<ParsedExpression> expr) G| " << expr->ToString() << std::endl;
 	// otherwise we need to push the ORDER BY entry into the select list
 	return CreateExtraReference(std::move(expr));
 }

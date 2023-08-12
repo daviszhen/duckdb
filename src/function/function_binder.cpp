@@ -1,4 +1,3 @@
-#include <iostream>
 #include "duckdb/function/function_binder.hpp"
 #include "duckdb/common/limits.hpp"
 
@@ -156,7 +155,6 @@ idx_t FunctionBinder::BindFunction(const string &name, ScalarFunctionSet &functi
 
 idx_t FunctionBinder::BindFunction(const string &name, AggregateFunctionSet &functions,
                                    const vector<LogicalType> &arguments, string &error) {
-	std::cerr << "idx_t FunctionBinder::BindFunction(const string &name, AggregateFunctionSet &functions,| " << name << std::endl;
 	return BindFunctionFromArguments(name, functions, arguments, error);
 }
 

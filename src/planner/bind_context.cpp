@@ -21,7 +21,6 @@
 namespace duckdb {
 
 string BindContext::GetMatchingBinding(const string &column_name) {
-	std::cerr << "+++string BindContext::GetMatchingBinding(const string &column_name) | " << column_name << std::endl;
 	string result;
 	for (auto &kv : bindings) {
 		auto binding = kv.second.get();
@@ -38,7 +37,6 @@ string BindContext::GetMatchingBinding(const string &column_name) {
 			result = kv.first;
 		}
 	}
-    std::cerr << "+++string BindContext::GetMatchingBinding(const string &column_name) | " << column_name << " , " << result << std::endl;
 	return result;
 }
 
@@ -194,11 +192,6 @@ static bool ColumnIsGenerated(Binding &binding, column_t index) {
 
 unique_ptr<ParsedExpression> BindContext::CreateColumnReference(const string &catalog_name, const string &schema_name,
                                                                 const string &table_name, const string &column_name) {
-    std::cerr << "+++unique_ptr<ParsedExpression> BindContext::CreateColumnReference( A| " <<
-	    catalog_name << " " <<
-	    schema_name << " " <<
-	    table_name << " " <<
-	    column_name << " " << std::endl;
 	string error_message;
 	vector<string> names;
 	if (!catalog_name.empty()) {
@@ -211,12 +204,10 @@ unique_ptr<ParsedExpression> BindContext::CreateColumnReference(const string &ca
 	names.push_back(column_name);
 
 	auto result = make_uniq<ColumnRefExpression>(std::move(names));
-    std::cerr << "unique_ptr<ParsedExpression> BindContext::CreateColumnReference( B|GetBinding| " << table_name << std::endl;
 	auto binding = GetBinding(table_name, error_message);
 	if (!binding) {
 		return std::move(result);
 	}
-    std::cerr << "unique_ptr<ParsedExpression> BindContext::CreateColumnReference( C|GetBindingIndex| " << column_name << std::endl;
 	auto column_index = binding->GetBindingIndex(column_name);
 	if (ColumnIsGenerated(*binding, column_index)) {
 		return ExpandGeneratedColumn(table_name, column_name);
@@ -225,8 +216,6 @@ unique_ptr<ParsedExpression> BindContext::CreateColumnReference(const string &ca
 		// as it appears in the binding itself
 		result->alias = binding->names[column_index];
 	}
-    std::cerr << "unique_ptr<ParsedExpression> BindContext::CreateColumnReference( D| " <<
-	          result->ToString() << std::endl;
 	return std::move(result);
 }
 
@@ -245,7 +234,6 @@ optional_ptr<Binding> BindContext::GetCTEBinding(const string &ctename) {
 }
 
 optional_ptr<Binding> BindContext::GetBinding(const string &name, string &out_error) {
-	std::cerr << "optional_ptr<Binding> BindContext::GetBinding(const string &name, " << name << std::endl;
 	auto match = bindings.find(name);
 	if (match == bindings.end()) {
 		// alias not found in this BindContext
@@ -258,12 +246,10 @@ optional_ptr<Binding> BindContext::GetBinding(const string &name, string &out_er
 		out_error = StringUtil::Format("Referenced table \"%s\" not found!%s", name, candidate_str);
 		return nullptr;
 	}
-	std::cerr << "optional_ptr<Binding> BindContext::GetBinding(const string &name, | found binding for table " << name << std::endl;
 	return match->second.get();
 }
 
 BindResult BindContext::BindColumn(ColumnRefExpression &colref, idx_t depth) {
-	std::cerr << "BindResult BindContext::BindColumn(ColumnRefExpression &colref, idx_t depth) A " << colref.ToString() << " depth " << depth << std::endl;
 	if (!colref.IsQualified()) {
 		throw InternalException("Could not bind alias \"%s\"!", colref.GetColumnName());
 	}
@@ -273,7 +259,6 @@ BindResult BindContext::BindColumn(ColumnRefExpression &colref, idx_t depth) {
 	if (!binding) {
 		return BindResult(error);
 	}
-    std::cerr << "BindResult BindContext::BindColumn(ColumnRefExpression &colref, idx_t depth) B " << colref.ToString() << " depth " << depth << std::endl;
 	return binding->Bind(colref, depth);
 }
 
@@ -331,7 +316,6 @@ bool BindContext::CheckExclusionList(StarExpression &expr, const string &column_
 
 void BindContext::GenerateAllColumnExpressions(StarExpression &expr,
                                                vector<unique_ptr<ParsedExpression>> &new_select_list) {
-	std::cerr << "void BindContext::GenerateAllColumnExpressions " << expr.ToString() << std::endl;
 	if (bindings_list.empty()) {
 		throw BinderException("* expression without FROM clause!");
 	}
@@ -445,20 +429,9 @@ void BindContext::GetTypesAndNames(vector<string> &result_names, vector<LogicalT
 }
 
 void BindContext::AddBinding(const string &alias, unique_ptr<Binding> binding) {
-	std::cerr << "+++void BindContext::AddBinding(const string &alias, unique_ptr<Binding> binding) " << std::endl;
 	if (bindings.find(alias) != bindings.end()) {
 		throw BinderException("Duplicate alias \"%s\" in query!", alias);
 	}
-    std::cerr << "AddBinding " << alias << " {";
-	auto cnt = binding->names.size();
-	for(auto i =0;i < cnt ;i++) {
-		if (i != cnt - 1 ){
-			std::cerr << ", ";
-		}
-		std::cerr << "[ " << binding->names[i] << "," << binding->types[i].ToString() << " ]";
-    }
-	std::cerr << "}" << std::endl;
-
 	bindings_list.push_back(*binding);
 	bindings[alias] = std::move(binding);
 }
@@ -466,7 +439,6 @@ void BindContext::AddBinding(const string &alias, unique_ptr<Binding> binding) {
 void BindContext::AddBaseTable(idx_t index, const string &alias, const vector<string> &names,
                                const vector<LogicalType> &types, vector<column_t> &bound_column_ids,
                                StandardEntry *entry, bool add_row_id) {
-	std::cerr << "+++void BindContext::AddBaseTable " << std::endl;
 	AddBinding(alias, make_uniq<TableBinding>(alias, types, names, bound_column_ids, entry, index, add_row_id));
 }
 
@@ -543,12 +515,10 @@ void BindContext::AddCTEBinding(idx_t index, const string &alias, const vector<s
 }
 
 void BindContext::AddContext(BindContext other) {
-	std::cerr << "+++void BindContext::AddContext(BindContext other) " << std::endl;
 	for (auto &binding : other.bindings) {
 		if (bindings.find(binding.first) != bindings.end()) {
 			throw BinderException("Duplicate alias \"%s\" in query!", binding.first);
 		}
-        std::cerr << "void BindContext::AddContext(BindContext other) | merge(binding)| " << binding.first << std::endl;
 		bindings[binding.first] = std::move(binding.second);
 	}
 	for (auto &binding : other.bindings_list) {

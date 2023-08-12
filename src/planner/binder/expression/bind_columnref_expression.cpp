@@ -1,4 +1,3 @@
-#include <iostream>
 #include "duckdb/catalog/catalog_entry/schema_catalog_entry.hpp"
 #include "duckdb/common/string_util.hpp"
 #include "duckdb/function/scalar/nested_functions.hpp"
@@ -57,7 +56,6 @@ unique_ptr<ParsedExpression> ExpressionBinder::GetSQLValueFunction(const string 
 }
 
 unique_ptr<ParsedExpression> ExpressionBinder::QualifyColumnName(const string &column_name, string &error_message) {
-	std::cerr << "+++unique_ptr<ParsedExpression> ExpressionBinder::QualifyColumnName(const string &column_name, string &error_message) A| " << column_name << std::endl;
 	auto using_binding = binder.bind_context.GetUsingBinding(column_name);
 	if (using_binding) {
 		// we are referencing a USING column
@@ -122,7 +120,6 @@ unique_ptr<ParsedExpression> ExpressionBinder::QualifyColumnName(const string &c
 		    StringUtil::Format("Referenced column \"%s\" not found in FROM clause!%s", column_name, candidate_str);
 		return nullptr;
 	}
-    std::cerr << "+++unique_ptr<ParsedExpression> ExpressionBinder::QualifyColumnName(const string &column_name, string &error_message) B| " << column_name << std::endl;
 	return binder.bind_context.CreateColumnReference(table_name, column_name);
 }
 
@@ -230,17 +227,7 @@ unique_ptr<ParsedExpression> ExpressionBinder::CreateStructPack(ColumnRefExpress
 }
 
 unique_ptr<ParsedExpression> ExpressionBinder::QualifyColumnName(ColumnRefExpression &colref, string &error_message) {
-	std::cerr << "unique_ptr<ParsedExpression> ExpressionBinder::QualifyColumnName(ColumnRefExpression &colref| " << colref.ToString();
 	idx_t column_parts = colref.column_names.size();
-	std::cerr << " | " << column_parts << " | ";
-    for (int i = 0; i < column_parts; ++i) {
-		std::cerr << colref.column_names[i];
-		if(i < column_parts - 1) {
-            std::cerr << ".";
-		}
-    }
-	std::cerr << std::endl;
-
 	// column names can have an arbitrary amount of dots
 	// here is how the resolution works:
 	if (column_parts == 1) {
@@ -340,7 +327,6 @@ unique_ptr<ParsedExpression> ExpressionBinder::QualifyColumnName(ColumnRefExpres
 }
 
 BindResult ExpressionBinder::BindExpression(ColumnRefExpression &colref_p, idx_t depth) {
-	std::cerr << "BindResult ExpressionBinder::BindExpression(ColumnRefExpression &colref_p, idx_t depth) 0 " << colref_p.ToString() << " depth " << depth << std::endl;
 	if (binder.GetBindingMode() == BindingMode::EXTRACT_NAMES) {
 		return BindResult(make_uniq<BoundConstantExpression>(Value(LogicalType::SQLNULL)));
 	}
@@ -350,8 +336,6 @@ BindResult ExpressionBinder::BindExpression(ColumnRefExpression &colref_p, idx_t
 		return BindResult(binder.FormatError(colref_p, error_message));
 	}
 	expr->query_location = colref_p.query_location;
-
-    std::cerr << "BindResult ExpressionBinder::BindExpression(ColumnRefExpression &colref_p, idx_t depth) 1 " << expr->ToString() << " depth " << depth << std::endl;
 
 	// a generated column returns a generated expression, a struct on a column returns a struct extract
 	if (expr->type != ExpressionType::COLUMN_REF) {
@@ -385,13 +369,10 @@ BindResult ExpressionBinder::BindExpression(ColumnRefExpression &colref_p, idx_t
 		}
 	}
 
-    std::cerr << "BindResult ExpressionBinder::BindExpression(ColumnRefExpression &colref_p, idx_t depth) 2 " << colref.ToString() << " depth " << depth << std::endl;
-
 	if (!found_lambda_binding) {
 		if (binder.macro_binding && table_name == binder.macro_binding->alias) {
 			result = binder.macro_binding->Bind(colref, depth);
 		} else {
-            std::cerr << "BindResult ExpressionBinder::BindExpression(ColumnRefExpression &colref_p, idx_t depth) 3 " << colref.ToString() << " depth " << depth << std::endl;
 			result = binder.bind_context.BindColumn(colref, depth);
 		}
 	}
@@ -400,11 +381,6 @@ BindResult ExpressionBinder::BindExpression(ColumnRefExpression &colref_p, idx_t
 		BoundColumnReferenceInfo ref;
 		ref.name = colref.column_names.back();
 		ref.query_location = colref.query_location;
-        std::cerr << "BindResult ExpressionBinder::BindExpression(ColumnRefExpression &colref_p, idx_t depth) 4 .set|bound_columns " <<
-		    " result " << result.expression->ToString() <<
-		    " ref.name " << ref.name <<
-		    " query_location(neglect) "<< ref.query_location <<
-		    " depth " << depth << std::endl;
 		bound_columns.push_back(std::move(ref));
 	} else {
 		result.error = binder.FormatError(colref_p, result.error);

@@ -160,7 +160,6 @@ public:
 	}
 
 	TaskExecutionResult ExecuteTask(TaskExecutionMode mode) override {
-		std::cerr << "ProcessRemainingBatchesTask" << std::endl;
 		while (op.ExecuteTask(context, gstate)) {
 			op.FlushBatchData(context, gstate, 0);
 		}

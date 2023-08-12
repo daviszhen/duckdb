@@ -20,7 +20,6 @@ static void GatherDelimScans(const PhysicalOperator &op, vector<const_reference<
 }
 
 unique_ptr<PhysicalOperator> PhysicalPlanGenerator::CreatePlan(LogicalDelimJoin &op) {
-	std::cerr << "+++unique_ptr<PhysicalOperator> PhysicalPlanGenerator::CreatePlan(LogicalDelimJoin &op) " << op.ToString() << std::endl;
 	// first create the underlying join
 	auto plan = CreatePlan(op.Cast<LogicalComparisonJoin>());
 	// this should create a join, not a cross product
