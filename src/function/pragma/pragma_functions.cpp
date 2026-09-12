@@ -17,6 +17,11 @@
 #include "duckdb/common/encryption_functions.hpp"
 #include "duckdb/logging/log_manager.hpp"
 #include "duckdb/transaction/duck_transaction_manager.hpp"
+#include "duckdb/catalog/catalog.hpp"
+#include "duckdb/catalog/catalog_entry/table_catalog_entry.hpp"
+#include "duckdb/storage/data_table.hpp"
+#include "duckdb/storage/table/row_group_collection.hpp"
+#include "duckdb/storage/table/scan_state.hpp"
 
 #include <cctype>
 
@@ -168,6 +173,72 @@ static string PragmaGit4DataState(ClientContext &context, const FunctionParamete
 	                          last_commit, pinned, retained ? "true" : "false");
 }
 
+//! Reads a table through the physical row groups, using the retention bound rather
+//! than a transaction's own snapshot. This is a measurement hook: with a snapshot
+//! pinned it reports the pre-image row count, so retention across a checkpoint can
+//! be observed directly.
+static string PragmaGit4DataProbe(ClientContext &context, const FunctionParameters &parameters) {
+	auto table_name = parameters.values[0].ToString();
+	auto &table = Catalog::GetEntry<TableCatalogEntry>(context, QualifiedName(Identifier(table_name)));
+	auto &storage = table.GetStorage();
+	auto &row_groups = *storage.GetRowGroupCollection();
+	auto &types = row_groups.GetTypes();
+
+	vector<StorageIndex> column_ids;
+	vector<LogicalType> scan_types;
+	for (idx_t i = 0; i < types.size(); i++) {
+		column_ids.emplace_back(i);
+		scan_types.push_back(types[i]);
+	}
+	column_ids.emplace_back(COLUMN_IDENTIFIER_ROW_ID);
+	scan_types.push_back(LogicalType::ROW_TYPE);
+
+	DataChunk scan_chunk;
+	scan_chunk.Initialize(Allocator::Get(context), scan_types);
+
+	CreateIndexScanState state;
+	state.Initialize(column_ids, nullptr);
+	QueryContext query_context;
+	row_groups.InitializeScan(query_context, state.table_state, column_ids, nullptr);
+	row_groups.InitializeCreateIndexScan(state);
+
+	idx_t count = 0;
+	int64_t min_value = 0;
+	int64_t max_value = 0;
+	bool have_value = false;
+	while (true) {
+		scan_chunk.Reset();
+		// The segment lock taken by InitializeCreateIndexScan has to be handed to the
+		// scan, otherwise lazily loading row groups from disk deadlocks
+		state.table_state.Scan(scan_chunk, TableScanType::TABLE_SCAN_OMIT_PERMANENTLY_DELETED, state.segment_lock);
+		if (scan_chunk.size() == 0) {
+			break;
+		}
+		count += scan_chunk.size();
+		// Track value extremes of the first column so tests can tell the pre-image
+		// apart from the post-image, not just count rows
+		if (have_value || scan_chunk.data.empty() || scan_chunk.data[0].GetType().id() != LogicalTypeId::BIGINT) {
+			continue;
+		}
+		for (auto entry : scan_chunk.data[0].Values<int64_t>()) {
+			if (!entry.IsValid()) {
+				continue;
+			}
+			auto value = entry.GetValue();
+			if (!have_value) {
+				min_value = max_value = value;
+				have_value = true;
+			} else {
+				min_value = MinValue(min_value, value);
+				max_value = MaxValue(max_value, value);
+			}
+		}
+	}
+	return StringUtil::Format("SELECT %llu::UBIGINT AS rows_at_retention_bound, %lld::BIGINT AS min_col0, "
+	                          "%lld::BIGINT AS max_col0",
+	                          count, min_value, max_value);
+}
+
 void PragmaFunctions::RegisterFunction(BuiltinFunctions &set) {
 	RegisterEnableProfiling(set);
 
@@ -198,6 +269,8 @@ void PragmaFunctions::RegisterFunction(BuiltinFunctions &set) {
 	    PragmaFunction::PragmaCall("git4data_drop_snapshot", PragmaGit4DataDropSnapshot, {LogicalType::VARCHAR}));
 	set.AddFunction(PragmaFunction::PragmaStatement("git4data_snapshots", PragmaGit4DataSnapshots));
 	set.AddFunction(PragmaFunction::PragmaStatement("git4data_state", PragmaGit4DataState));
+	set.AddFunction(
+	    PragmaFunction::PragmaCall("git4data_probe", PragmaGit4DataProbe, {LogicalType::VARCHAR}));
 
 	set.AddFunction(PragmaFunction::PragmaStatement("enable_progress_bar", PragmaEnableProgressBar));
 	set.AddFunction(PragmaFunction::PragmaStatement("disable_progress_bar", PragmaDisableProgressBar));

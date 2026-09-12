@@ -1,0 +1,47 @@
+# name: test/sql/git4data/retention.test
+# description: A pinned snapshot keeps deleted rows readable across CHECKPOINT
+# group: [git4data]
+
+statement ok
+CREATE TABLE u AS SELECT range AS i FROM range(1000);
+
+statement ok
+CHECKPOINT;
+
+statement ok
+PRAGMA git4data_create_snapshot('s1')
+
+statement ok
+DELETE FROM u WHERE i < 400;
+
+statement ok
+CHECKPOINT;
+
+statement ok
+CHECKPOINT;
+
+# The logical view still sees 600 rows
+query I
+SELECT count(*) FROM u
+----
+600
+
+# A pinned snapshot makes the physical scan retain the pre-image. The probe reads
+# through the retention bound, so it still sees all 1000 original rows and their
+# original values even after two checkpoints.
+query III
+PRAGMA git4data_probe('u')
+----
+1000	0	999
+
+statement ok
+PRAGMA git4data_drop_snapshot('s1')
+
+# Releasing the pin lets the next checkpoint reclaim the pre-image
+statement ok
+CHECKPOINT;
+
+query III
+PRAGMA git4data_probe('u')
+----
+600	400	999
