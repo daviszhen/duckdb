@@ -9474,6 +9474,12 @@ unique_ptr<TransformResultValue> PEGTransformerFactory::TransformVersionAtUnitIn
 	return make_uniq<TypedTransformResult<string>>(result);
 }
 
+unique_ptr<TransformResultValue> PEGTransformerFactory::TransformSnapshotAtUnitInternal(PEGTransformer &transformer,
+                                                                                        ParseResult &parse_result) {
+	auto result = TransformSnapshotAtUnit(transformer);
+	return make_uniq<TypedTransformResult<string>>(result);
+}
+
 unique_ptr<TransformResultValue> PEGTransformerFactory::TransformTimestampAtUnitInternal(PEGTransformer &transformer,
                                                                                          ParseResult &parse_result) {
 	auto result = TransformTimestampAtUnit(transformer);
@@ -11887,6 +11893,7 @@ void PEGTransformerFactory::RegisterGenerated() {
 	    {"AtSpecifier", &PEGTransformerFactory::TransformAtSpecifierInternal},
 	    {"AtUnit", &PEGTransformerFactory::TransformAtUnitInternal},
 	    {"VersionAtUnit", &PEGTransformerFactory::TransformVersionAtUnitInternal},
+	    {"SnapshotAtUnit", &PEGTransformerFactory::TransformSnapshotAtUnitInternal},
 	    {"TimestampAtUnit", &PEGTransformerFactory::TransformTimestampAtUnitInternal},
 	    {"JoinClause", &PEGTransformerFactory::TransformJoinClauseInternal},
 	    {"NearestJoinClause", &PEGTransformerFactory::TransformNearestJoinClauseInternal},

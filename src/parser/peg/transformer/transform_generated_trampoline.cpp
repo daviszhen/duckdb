@@ -2531,6 +2531,9 @@ static const TransformFrameOps AT_UNIT_OPS = {"AtUnit", &PEGTransformerFactory::
 static const TransformFrameOps VERSION_AT_UNIT_OPS = {"VersionAtUnit",
                                                       &PEGTransformerFactory::InitializeVersionAtUnitTrampoline,
                                                       &PEGTransformerFactory::FinalizeVersionAtUnitTrampoline};
+static const TransformFrameOps SNAPSHOT_AT_UNIT_OPS = {"SnapshotAtUnit",
+                                                       &PEGTransformerFactory::InitializeSnapshotAtUnitTrampoline,
+                                                       &PEGTransformerFactory::FinalizeSnapshotAtUnitTrampoline};
 static const TransformFrameOps TIMESTAMP_AT_UNIT_OPS = {"TimestampAtUnit",
                                                         &PEGTransformerFactory::InitializeTimestampAtUnitTrampoline,
                                                         &PEGTransformerFactory::FinalizeTimestampAtUnitTrampoline};
@@ -3832,6 +3835,7 @@ const case_insensitive_map_t<const TransformFrameOps *> &PEGTransformerFactory::
 	    {"AtSpecifier", &AT_SPECIFIER_OPS},
 	    {"AtUnit", &AT_UNIT_OPS},
 	    {"VersionAtUnit", &VERSION_AT_UNIT_OPS},
+	    {"SnapshotAtUnit", &SNAPSHOT_AT_UNIT_OPS},
 	    {"TimestampAtUnit", &TIMESTAMP_AT_UNIT_OPS},
 	    {"JoinClause", &JOIN_CLAUSE_OPS},
 	    {"NearestJoinClause", &NEAREST_JOIN_CLAUSE_OPS},
@@ -21795,6 +21799,18 @@ unique_ptr<TransformResultValue>
 PEGTransformerFactory::FinalizeVersionAtUnitTrampoline(PEGTransformer &transformer,
                                                        GeneratedTransformProcess &process) {
 	auto result = TransformVersionAtUnit(transformer);
+	return make_uniq<TypedTransformResult<string>>(result);
+}
+
+void PEGTransformerFactory::InitializeSnapshotAtUnitTrampoline(PEGTransformer &transformer,
+                                                               GeneratedTransformProcess &process) {
+	process.ReserveChildSlots(0);
+}
+
+unique_ptr<TransformResultValue>
+PEGTransformerFactory::FinalizeSnapshotAtUnitTrampoline(PEGTransformer &transformer,
+                                                        GeneratedTransformProcess &process) {
+	auto result = TransformSnapshotAtUnit(transformer);
 	return make_uniq<TypedTransformResult<string>>(result);
 }
 

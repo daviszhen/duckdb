@@ -889,6 +889,10 @@ string PEGTransformerFactory::TransformVersionAtUnit(PEGTransformer &transformer
 	return "VERSION";
 }
 
+string PEGTransformerFactory::TransformSnapshotAtUnit(PEGTransformer &transformer) {
+	return "SNAPSHOT";
+}
+
 string PEGTransformerFactory::TransformTimestampAtUnit(PEGTransformer &transformer) {
 	return "TIMESTAMP";
 }

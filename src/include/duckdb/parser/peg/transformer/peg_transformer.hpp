@@ -3543,6 +3543,9 @@ public:
 	static void InitializeVersionAtUnitTrampoline(PEGTransformer &transformer, GeneratedTransformProcess &process);
 	static unique_ptr<TransformResultValue> FinalizeVersionAtUnitTrampoline(PEGTransformer &transformer,
 	                                                                        GeneratedTransformProcess &process);
+	static void InitializeSnapshotAtUnitTrampoline(PEGTransformer &transformer, GeneratedTransformProcess &process);
+	static unique_ptr<TransformResultValue> FinalizeSnapshotAtUnitTrampoline(PEGTransformer &transformer,
+	                                                                         GeneratedTransformProcess &process);
 	static void InitializeTimestampAtUnitTrampoline(PEGTransformer &transformer, GeneratedTransformProcess &process);
 	static unique_ptr<TransformResultValue> FinalizeTimestampAtUnitTrampoline(PEGTransformer &transformer,
 	                                                                          GeneratedTransformProcess &process);
@@ -7276,6 +7279,9 @@ public:
 	static unique_ptr<TransformResultValue> TransformVersionAtUnitInternal(PEGTransformer &transformer,
 	                                                                       ParseResult &parse_result);
 	static string TransformVersionAtUnit(PEGTransformer &transformer);
+	static unique_ptr<TransformResultValue> TransformSnapshotAtUnitInternal(PEGTransformer &transformer,
+	                                                                        ParseResult &parse_result);
+	static string TransformSnapshotAtUnit(PEGTransformer &transformer);
 	static unique_ptr<TransformResultValue> TransformTimestampAtUnitInternal(PEGTransformer &transformer,
 	                                                                         ParseResult &parse_result);
 	static string TransformTimestampAtUnit(PEGTransformer &transformer);
