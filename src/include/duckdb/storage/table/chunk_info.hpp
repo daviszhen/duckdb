@@ -30,11 +30,11 @@ enum class ChunkInfoType : uint8_t {
 	CONSTANT_INFO,
 	VECTOR_INFO,
 	EMPTY_INFO,
-	//! Fully deleted, carrying the delete id. Used when a pinned snapshot still has to
-	//! distinguish this delete from "gone for everyone".
-	CONSTANT_INFO_WITH_ID,
-	//! Partially deleted: the mask plus the delete id of every deleted row, in row order.
-	VECTOR_INFO_WITH_IDS
+	//! The full insert and delete state, ids included. Written when a pinned snapshot still
+	//! has to tell "this row existed when I look" and "this row was already deleted when I
+	//! look" apart from "this row came later" and "this row is gone for everyone". The
+	//! compact forms above assume every id is visible to everyone, which a pin breaks.
+	CHUNK_INFO_WITH_IDS
 };
 
 //! ChunkVectorInfo holds the version information (the insert and delete ids) of the rows of a single vector within
@@ -114,6 +114,10 @@ public:
 	void Write(WriteStream &writer, VisibilityBound visibility_bound, VisibilityBound retention_bound) const;
 	//! The delete id of the given row, NOT_DELETED_ID when the row is alive
 	transaction_t GetDeleteId(idx_t row) const;
+	//! Whether any insert id is at or after the given bound, so a reader pinned there still
+	//! needs the insert side written out. Without this the checkpoint would skip a vector that
+	//! holds only freshly inserted rows and they would read as visible to everyone on reload.
+	bool HasPendingInserts(VisibilityBound retention_bound) const;
 	static unique_ptr<ChunkVectorInfo> Read(FixedSizeAllocator &allocator, ReadStream &reader);
 
 private:

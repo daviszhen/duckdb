@@ -244,7 +244,16 @@ vector<MetaBlockPointer> RowVersionManager::Checkpoint(RowGroupWriter &writer) {
 	lock_guard<mutex> lock(version_lock);
 	auto &manager = *writer.GetMetadataManager();
 	auto options = writer.GetCheckpointOptions();
-	if (!uncheckpointed_delete_commit.IsValid()) {
+	// A vector can also need writing without any delete: an insert at or after the retention
+	// bound has to keep its id, or a pinned reader would see it as visible to everyone.
+	bool pending_inserts = false;
+	for (auto &info : vector_info) {
+		if (info && info->HasPendingInserts(options.retention_bound)) {
+			pending_inserts = true;
+			break;
+		}
+	}
+	if (!uncheckpointed_delete_commit.IsValid() && !pending_inserts) {
 		// we can write the current pointer as-is
 		// ensure the blocks we are pointing to are not marked as free
 		manager.ClearModifiedBlocks(storage_pointers);
@@ -258,7 +267,9 @@ vector<MetaBlockPointer> RowVersionManager::Checkpoint(RowGroupWriter &writer) {
 		if (!chunk_info) {
 			continue;
 		}
-		if (!chunk_info->HasDeletes(options.visibility_bound)) {
+		if (!chunk_info->HasDeletes(options.visibility_bound) &&
+		    !chunk_info->HasPendingInserts(options.retention_bound)) {
+			// nothing here matters to any reader
 			continue;
 		}
 		to_serialize.emplace_back(vector_idx, *chunk_info);

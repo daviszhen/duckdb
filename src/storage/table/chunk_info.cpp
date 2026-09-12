@@ -822,47 +822,72 @@ transaction_t ChunkVectorInfo::GetDeleteId(idx_t row) const {
 	}
 }
 
+bool ChunkVectorInfo::HasPendingInserts(VisibilityBound retention_bound) const {
+	if (HasConstantInsertionId()) {
+		return ConstantInsertId() >= retention_bound;
+	}
+	auto insert_segment = allocator.GetHandle(GetInsertedPointer());
+	auto inserted = insert_segment.GetPtr<transaction_t>();
+	for (idx_t i = 0; i < STANDARD_VECTOR_SIZE; i++) {
+		if (inserted[i] >= retention_bound) {
+			return true;
+		}
+	}
+	return false;
+}
+
 void ChunkVectorInfo::Write(WriteStream &writer, VisibilityBound visibility_bound,
                             VisibilityBound retention_bound) const {
 	SelectionVector sel(STANDARD_VECTOR_SIZE);
 	transaction_t transaction_id = DConstants::INVALID_INDEX;
 	idx_t count = GetSelVector(TransactionData(transaction_id, visibility_bound), sel, STANDARD_VECTOR_SIZE);
-	if (count == STANDARD_VECTOR_SIZE) {
-		// nothing is deleted: skip writing anything
-		writer.Write<ChunkInfoType>(ChunkInfoType::EMPTY_INFO);
-		return;
-	}
-	// The mask below marks survivors invalid, so a valid bit means "deleted". Matches the
-	// on-disk VECTOR_INFO orientation.
+	// count == STANDARD_VECTOR_SIZE means nothing is deleted, and in that case GetSelVector does
+	// not fill sel at all - so sel must never be read in that case.
+	bool nothing_deleted = count == STANDARD_VECTOR_SIZE;
+
+	// The mask marks survivors invalid, so a valid bit means "deleted". Matches the on-disk
+	// VECTOR_INFO orientation.
 	ValidityMask mask(STANDARD_VECTOR_SIZE);
-	mask.Initialize(STANDARD_VECTOR_SIZE);
-	for (idx_t i = 0; i < count; i++) {
-		mask.SetInvalid(sel.get_index(i));
-	}
-	// A reader pinned at retention_bound has to tell "this row was already deleted when I
-	// look" apart from "this row is gone for everyone", which needs the delete id itself.
-	// With no pin the bound is AllCommitted(), every id is below it, and the compact
-	// mask-only forms stay in use.
-	bool keep_ids = false;
-	bool ids_equal = true;
-	transaction_t shared_id = NOT_DELETED_ID;
 	idx_t deleted_count = 0;
-	for (idx_t row = 0; row < STANDARD_VECTOR_SIZE; row++) {
+	if (!nothing_deleted) {
+		mask.Initialize(STANDARD_VECTOR_SIZE);
+		for (idx_t i = 0; i < count; i++) {
+			mask.SetInvalid(sel.get_index(i));
+		}
+		deleted_count = STANDARD_VECTOR_SIZE - count;
+	}
+
+	bool deletes_uniform = true;
+	transaction_t first_delete_id = NOT_DELETED_ID;
+	bool delete_matters = false;
+	idx_t seen = 0;
+	for (idx_t row = 0; row < STANDARD_VECTOR_SIZE && !nothing_deleted; row++) {
 		if (!mask.RowIsValid(row)) {
 			continue;
 		}
 		auto delete_id = GetDeleteId(row);
-		deleted_count++;
-		if (delete_id >= retention_bound) {
-			keep_ids = true;
+		if (seen++ == 0) {
+			first_delete_id = delete_id;
+		} else if (first_delete_id != delete_id) {
+			deletes_uniform = false;
 		}
-		if (deleted_count == 1) {
-			shared_id = delete_id;
-		} else if (shared_id != delete_id) {
-			ids_equal = false;
+		if (delete_id >= retention_bound) {
+			delete_matters = true;
 		}
 	}
-	if (!keep_ids) {
+
+	// Ids have to survive the round trip exactly when a reader pinned at retention_bound can
+	// still see the difference. With no pin the bound is AllCommitted(), every id falls below
+	// it, and the compact id-free forms stay in use.
+	bool constant_insert = HasConstantInsertionId();
+	bool insert_matters = HasPendingInserts(retention_bound);
+
+	if (!insert_matters && !delete_matters) {
+		if (nothing_deleted) {
+			// nothing is deleted: skip writing anything
+			writer.Write<ChunkInfoType>(ChunkInfoType::EMPTY_INFO);
+			return;
+		}
 		if (count == 0) {
 			// everything is deleted: write a constant vector
 			writer.Write<ChunkInfoType>(ChunkInfoType::CONSTANT_INFO);
@@ -875,22 +900,35 @@ void ChunkVectorInfo::Write(WriteStream &writer, VisibilityBound visibility_boun
 		mask.Write(writer, STANDARD_VECTOR_SIZE);
 		return;
 	}
-	if (deleted_count == STANDARD_VECTOR_SIZE && ids_equal) {
-		// whole vector deleted by one transaction that a pin still separates
-		writer.Write<ChunkInfoType>(ChunkInfoType::CONSTANT_INFO_WITH_ID);
-		writer.Write<idx_t>(start);
-		writer.Write<transaction_t>(shared_id);
+
+	writer.Write<ChunkInfoType>(ChunkInfoType::CHUNK_INFO_WITH_IDS);
+	writer.Write<idx_t>(start);
+	writer.Write<uint8_t>(constant_insert ? 1 : 0);
+	if (constant_insert) {
+		writer.Write<transaction_t>(ConstantInsertId());
+	} else {
+		auto insert_segment = allocator.GetHandle(GetInsertedPointer());
+		auto inserted = insert_segment.GetPtr<transaction_t>();
+		for (idx_t i = 0; i < STANDARD_VECTOR_SIZE; i++) {
+			writer.Write<transaction_t>(inserted[i]);
+		}
+	}
+	if (deleted_count == 0) {
+		writer.Write<uint8_t>(0);
 		return;
 	}
-	writer.Write<ChunkInfoType>(ChunkInfoType::VECTOR_INFO_WITH_IDS);
-	writer.Write<idx_t>(start);
+	if (deleted_count == STANDARD_VECTOR_SIZE && deletes_uniform) {
+		writer.Write<uint8_t>(1);
+		writer.Write<transaction_t>(first_delete_id);
+		return;
+	}
+	writer.Write<uint8_t>(2);
 	mask.Write(writer, STANDARD_VECTOR_SIZE);
 	writer.Write<idx_t>(deleted_count);
 	for (idx_t row = 0; row < STANDARD_VECTOR_SIZE; row++) {
-		if (!mask.RowIsValid(row)) {
-			continue;
+		if (mask.RowIsValid(row)) {
+			writer.Write<transaction_t>(GetDeleteId(row));
 		}
-		writer.Write<transaction_t>(GetDeleteId(row));
 	}
 }
 
@@ -908,37 +946,47 @@ unique_ptr<ChunkVectorInfo> ChunkVectorInfo::Read(FixedSizeAllocator &allocator,
 		result->recheck_compression = false;
 		return result;
 	}
-	case ChunkInfoType::CONSTANT_INFO_WITH_ID: {
-		// fully deleted, and the delete id is still meaningful to a pinned reader
-		auto start = reader.Read<idx_t>();
-		auto delete_id = reader.Read<transaction_t>();
-		auto result = make_uniq<ChunkVectorInfo>(allocator, start, transaction_t(0), delete_id);
-		// a later pass may be able to collapse it once the bound moves past this id
-		result->recheck_compression = true;
-		return result;
-	}
-	case ChunkInfoType::VECTOR_INFO_WITH_IDS: {
-		// partially deleted with the delete ids preserved
+	case ChunkInfoType::CHUNK_INFO_WITH_IDS: {
 		auto start = reader.Read<idx_t>();
 		auto result = make_uniq<ChunkVectorInfo>(allocator, start);
-		result->deleted_mask.Read(reader, STANDARD_VECTOR_SIZE);
-		auto deleted_count = reader.Read<idx_t>();
-		result->deleted_data = allocator.New();
-		result->deleted_data.SetMetadata(1);
-		auto segment = allocator.GetHandle(result->deleted_data);
-		auto ids = segment.GetPtr<transaction_t>();
-		for (idx_t i = 0; i < STANDARD_VECTOR_SIZE; i++) {
-			ids[i] = NOT_DELETED_ID;
-		}
-		idx_t seen = 0;
-		for (idx_t i = 0; i < STANDARD_VECTOR_SIZE && seen < deleted_count; i++) {
-			if (!result->deleted_mask.RowIsValid(i)) {
-				continue;
+		auto constant_insert = reader.Read<uint8_t>() != 0;
+		if (constant_insert) {
+			result->constant_insert_id = reader.Read<transaction_t>();
+		} else {
+			result->inserted_data = allocator.New();
+			result->inserted_data.SetMetadata(1);
+			auto insert_segment = allocator.GetHandle(result->inserted_data);
+			auto inserted = insert_segment.GetPtr<transaction_t>();
+			for (idx_t i = 0; i < STANDARD_VECTOR_SIZE; i++) {
+				inserted[i] = reader.Read<transaction_t>();
 			}
-			ids[i] = reader.Read<transaction_t>();
-			seen++;
 		}
-		result->delete_state = DeleteIdState::ARRAY;
+		auto delete_kind = reader.Read<uint8_t>();
+		if (delete_kind == 0) {
+			result->constant_delete_id = NOT_DELETED_ID;
+		} else if (delete_kind == 1) {
+			result->constant_delete_id = reader.Read<transaction_t>();
+		} else {
+			result->deleted_mask.Read(reader, STANDARD_VECTOR_SIZE);
+			auto deleted_count = reader.Read<idx_t>();
+			result->deleted_data = allocator.New();
+			result->deleted_data.SetMetadata(1);
+			auto delete_segment = allocator.GetHandle(result->deleted_data);
+			auto ids = delete_segment.GetPtr<transaction_t>();
+			for (idx_t i = 0; i < STANDARD_VECTOR_SIZE; i++) {
+				ids[i] = NOT_DELETED_ID;
+			}
+			idx_t seen = 0;
+			for (idx_t i = 0; i < STANDARD_VECTOR_SIZE && seen < deleted_count; i++) {
+				if (!result->deleted_mask.RowIsValid(i)) {
+					continue;
+				}
+				ids[i] = reader.Read<transaction_t>();
+				seen++;
+			}
+			result->delete_state = DeleteIdState::ARRAY;
+		}
+		// a later pass may collapse this once the bound moves past these ids
 		result->recheck_compression = true;
 		return result;
 	}

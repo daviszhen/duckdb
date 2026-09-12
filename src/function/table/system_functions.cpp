@@ -19,6 +19,7 @@ void BuiltinFunctions::RegisterSQLiteFunctions() {
 	PragmaUserAgent::RegisterFunction(*this);
 
 	DuckDBConnectionCountFun::RegisterFunction(*this);
+	Git4DataSnapshotScanFun::RegisterFunction(*this);
 	DuckDBApproxDatabaseCountFun::RegisterFunction(*this);
 	DuckDBColumnsFun::RegisterFunction(*this);
 	DuckDBConstraintsFun::RegisterFunction(*this);

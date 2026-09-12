@@ -57,6 +57,15 @@ vector<Git4DataSnapshot> SnapshotRegistry::List() const {
 	return result;
 }
 
+optional_idx SnapshotRegistry::GetPin(const string &name) const {
+	lock_guard<mutex> guard(lock);
+	auto entry = snapshots.find(name);
+	if (entry == snapshots.end()) {
+		return optional_idx();
+	}
+	return optional_idx(entry->second);
+}
+
 idx_t SnapshotRegistry::Count() const {
 	lock_guard<mutex> guard(lock);
 	return snapshots.size();
@@ -506,6 +515,9 @@ ErrorData DuckTransactionManager::CommitTransaction(ClientContext &context, Tran
 		CheckpointOptions options;
 		options.action = CheckpointAction::ALWAYS_CHECKPOINT;
 		options.type = checkpoint_decision.type;
+		// every checkpoint has to know what a pinned snapshot still needs, not just the ones
+		// an explicit CHECKPOINT triggers - an automatic one writes the same state to disk
+		options.retention_bound = LowestRetentionBound();
 		options.wal_lock = held_wal_lock.owns_lock() ? &held_wal_lock : nullptr;
 		auto &storage_manager = db.GetStorageManager();
 		try {

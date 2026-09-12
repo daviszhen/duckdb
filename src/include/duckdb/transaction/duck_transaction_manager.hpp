@@ -47,6 +47,8 @@ public:
 	bool Drop(const string &name);
 	vector<Git4DataSnapshot> List() const;
 	idx_t Count() const;
+	//! The commit id pinned under this name, or an invalid optional when there is none
+	optional_idx GetPin(const string &name) const;
 	//! The lowest pinned commit id, or MAX_COMMIT_ID when nothing is pinned.
 	//! Reads a single atomic so it is safe to call from noexcept contexts.
 	transaction_t LowestPin() const noexcept {
