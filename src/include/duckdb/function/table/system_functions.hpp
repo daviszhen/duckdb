@@ -54,6 +54,12 @@ struct DuckDBConnectionCountFun {
 
 struct Git4DataSnapshotScanFun {
 	static void RegisterFunction(BuiltinFunctions &set);
+	//! The table function itself, so a binder can put it on a LogicalGet directly
+	static TableFunction GetFunction();
+	//! Bind data for reading a table as of a pinned snapshot. Throws when the snapshot is
+	//! unknown. Used by the binder for a table reference carrying AT (SNAPSHOT => 'name').
+	static unique_ptr<FunctionData> CreateBindData(ClientContext &context, const string &table_name,
+	                                               const string &snapshot_name);
 };
 
 struct DuckDBApproxDatabaseCountFun {

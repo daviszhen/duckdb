@@ -21,7 +21,7 @@ struct Git4DataSnapshotScanBindData : public TableFunctionData {
 };
 
 struct Git4DataSnapshotScanState : public GlobalTableFunctionState {
-	CreateIndexScanState scan_state;
+	TableScanState scan_state;
 	DataChunk scan_chunk;
 	vector<StorageIndex> column_ids;
 	VisibilityBound bound;
@@ -32,28 +32,36 @@ struct Git4DataSnapshotScanState : public GlobalTableFunctionState {
 	}
 };
 
-static unique_ptr<FunctionData> Git4DataSnapshotScanBind(ClientContext &context, TableFunctionBindInput &input,
-                                                         vector<LogicalType> &return_types,
-                                                         vector<Identifier> &names) {
+unique_ptr<FunctionData> Git4DataSnapshotScanFun::CreateBindData(ClientContext &context, const string &table_name,
+                                                                 const string &snapshot_name) {
 	auto result = make_uniq<Git4DataSnapshotScanBindData>();
-	result->table_name = input.inputs[0].GetValue<string>();
-	result->snapshot_name = input.inputs[1].GetValue<string>();
+	result->table_name = table_name;
+	result->snapshot_name = snapshot_name;
 
 	auto &db_manager = DatabaseManager::Get(context);
 	auto attached = db_manager.GetDatabase(context, DatabaseManager::GetDefaultDatabase(context));
 	auto &transaction_manager = DuckTransactionManager::Get(*attached);
-	auto pin = transaction_manager.snapshots.GetPin(result->snapshot_name);
+	auto pin = transaction_manager.snapshots.GetPin(snapshot_name);
 	if (!pin.IsValid()) {
-		throw InvalidInputException("Snapshot \"%s\" does not exist", result->snapshot_name);
+		throw InvalidInputException("Snapshot \"%s\" does not exist", snapshot_name);
 	}
 	result->bound = VisibilityBound::Through(pin.GetIndex());
+	return std::move(result);
+}
 
-	auto &table = Catalog::GetEntry<TableCatalogEntry>(context, QualifiedName(Identifier(result->table_name)));
+static unique_ptr<FunctionData> Git4DataSnapshotScanBind(ClientContext &context, TableFunctionBindInput &input,
+                                                         vector<LogicalType> &return_types,
+                                                         vector<Identifier> &names) {
+	auto result = Git4DataSnapshotScanFun::CreateBindData(context, input.inputs[0].GetValue<string>(),
+	                                                      input.inputs[1].GetValue<string>());
+
+	auto &bind_data = result->Cast<Git4DataSnapshotScanBindData>();
+	auto &table = Catalog::GetEntry<TableCatalogEntry>(context, QualifiedName(Identifier(bind_data.table_name)));
 	for (auto &column : table.GetColumns().Logical()) {
 		names.emplace_back(column.Name());
 		return_types.emplace_back(column.Type());
 	}
-	return std::move(result);
+	return result;
 }
 
 static unique_ptr<GlobalTableFunctionState> Git4DataSnapshotScanInit(ClientContext &context,
@@ -81,7 +89,6 @@ static unique_ptr<GlobalTableFunctionState> Git4DataSnapshotScanInit(ClientConte
 	result->scan_state.Initialize(result->column_ids, nullptr);
 	QueryContext query_context;
 	row_groups.InitializeScan(query_context, result->scan_state.table_state, result->column_ids, nullptr);
-	row_groups.InitializeCreateIndexScan(result->scan_state);
 	return std::move(result);
 }
 
@@ -93,7 +100,7 @@ static void Git4DataSnapshotScanFunction(ClientContext &context, TableFunctionIn
 	state.scan_chunk.Reset();
 	// no transaction of our own writes to see, and the pinned bound in place of "now"
 	ScanOptions options(TransactionData(MAX_TRANSACTION_ID, state.bound));
-	state.scan_state.table_state.Scan(options, state.scan_chunk, state.scan_state.segment_lock);
+	state.scan_state.table_state.Scan(options, state.scan_chunk);
 	if (state.scan_chunk.size() == 0) {
 		state.finished = true;
 		return;
@@ -104,10 +111,17 @@ static void Git4DataSnapshotScanFunction(ClientContext &context, TableFunctionIn
 	output.SetCardinality(state.scan_chunk.size());
 }
 
-void Git4DataSnapshotScanFun::RegisterFunction(BuiltinFunctions &set) {
+TableFunction Git4DataSnapshotScanFun::GetFunction() {
 	TableFunction fun("git4data_snapshot_scan", {LogicalType::VARCHAR, LogicalType::VARCHAR},
 	                  Git4DataSnapshotScanFunction, Git4DataSnapshotScanBind, Git4DataSnapshotScanInit);
-	set.AddFunction(fun);
+	// always produce every column and let the projection happen above, so a LogicalGet built
+	// from this function by the binder does not have to translate column ids
+	fun.projection_pushdown = false;
+	return fun;
+}
+
+void Git4DataSnapshotScanFun::RegisterFunction(BuiltinFunctions &set) {
+	set.AddFunction(GetFunction());
 }
 
 } // namespace duckdb

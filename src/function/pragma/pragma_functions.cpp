@@ -198,11 +198,10 @@ static string Git4DataProbe(ClientContext &context, const string &table_name, Ta
 	DataChunk scan_chunk;
 	scan_chunk.Initialize(Allocator::Get(context), scan_types);
 
-	CreateIndexScanState state;
+	TableScanState state;
 	state.Initialize(column_ids, nullptr);
 	QueryContext query_context;
 	row_groups.InitializeScan(query_context, state.table_state, column_ids, nullptr);
-	row_groups.InitializeCreateIndexScan(state);
 
 	idx_t count = 0;
 	int64_t min_value = 0;
@@ -210,9 +209,7 @@ static string Git4DataProbe(ClientContext &context, const string &table_name, Ta
 	bool have_value = false;
 	while (true) {
 		scan_chunk.Reset();
-		// The segment lock taken by InitializeCreateIndexScan has to be handed to the
-		// scan, otherwise lazily loading row groups from disk deadlocks
-		state.table_state.Scan(scan_chunk, scan_type, state.segment_lock);
+		state.table_state.Scan(scan_chunk, scan_type);
 		if (scan_chunk.size() == 0) {
 			break;
 		}

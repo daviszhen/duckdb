@@ -15,6 +15,7 @@
 #include "duckdb/planner/expression_binder/constant_binder.hpp"
 #include "duckdb/catalog/catalog_search_path.hpp"
 #include "duckdb/planner/tableref/bound_at_clause.hpp"
+#include "duckdb/function/table/system_functions.hpp"
 #include "duckdb/execution/expression_executor.hpp"
 #include "duckdb/parser/query_node/cte_node.hpp"
 #include "duckdb/planner/operator/logical_dummy_scan.hpp"
@@ -173,7 +174,11 @@ BoundStatement Binder::Bind(BaseTableRef &ref) {
 	// not a CTE
 	// extract a table or view from the catalog
 	auto at_clause = BindAtClause(ref.at_clause);
-	auto entry_at_clause = at_clause ? at_clause.get() : entry_retriever.GetAtClause();
+	// AT (SNAPSHOT => 'name') asks for the table as that snapshot saw it. A DuckCatalog has no
+	// time travel, so the clause must not reach the entry lookup; the read is served by a
+	// snapshot scan instead, wired up once the LogicalGet exists.
+	bool is_snapshot_at = at_clause && at_clause->Unit().GetIdentifierName() == "SNAPSHOT";
+	auto entry_at_clause = is_snapshot_at ? nullptr : (at_clause ? at_clause.get() : entry_retriever.GetAtClause());
 	EntryLookupInfo table_lookup(CatalogType::TABLE_ENTRY, QualifiedName(ref.Table()), entry_at_clause, error_context);
 	// resolve the catalog/schema qualification for the lookup only - the reference itself keeps the name as written,
 	// which is what name extraction and replacement scans report
@@ -287,6 +292,14 @@ BoundStatement Binder::Bind(BaseTableRef &ref) {
 		auto logical_get =
 		    make_uniq<LogicalGet>(table_index, scan_function, std::move(bind_data), std::move(return_types),
 		                          std::move(return_names), std::move(virtual_columns));
+		if (is_snapshot_at) {
+			logical_get->function = Git4DataSnapshotScanFun::GetFunction();
+			logical_get->bind_data = Git4DataSnapshotScanFun::CreateBindData(
+			    context, ref.Table().GetIdentifierName(), at_clause->GetValue().ToString());
+			// the underlying table declared virtual columns for the base scan; the snapshot
+			// scan has none, and keeping them would demand projection pushdown it does not do
+			logical_get->virtual_columns.clear();
+		}
 		auto table_entry = logical_get->GetTable();
 		auto &col_ids = logical_get->GetMutableColumnIds();
 		if (!table_entry) {
