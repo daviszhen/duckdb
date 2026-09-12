@@ -169,16 +169,18 @@ static string PragmaGit4DataState(ClientContext &context, const FunctionParamete
 	// Mirrors the decision made in DuckTransactionManager::Checkpoint
 	auto retained = last_commit >= transaction_manager.LowestRetentionBound();
 	return StringUtil::Format("SELECT %llu::UBIGINT AS last_commit_id, %llu::UBIGINT AS pinned_commit_id, "
-	                          "%s::BOOLEAN AS history_retained",
-	                          last_commit, pinned, retained ? "true" : "false");
+	                          "%s::BOOLEAN AS history_retained, %llu::UBIGINT AS retention_bound_value, "
+	                          "%llu::UBIGINT AS start_timestamp_counter",
+	                          last_commit, pinned, retained ? "true" : "false",
+	                          transaction_manager.LowestRetentionBound().Value(),
+	                          transaction_manager.GetStartTimestampCounter());
 }
 
 //! Reads a table through the physical row groups, using the retention bound rather
 //! than a transaction's own snapshot. This is a measurement hook: with a snapshot
 //! pinned it reports the pre-image row count, so retention across a checkpoint can
 //! be observed directly.
-static string PragmaGit4DataProbe(ClientContext &context, const FunctionParameters &parameters) {
-	auto table_name = parameters.values[0].ToString();
+static string Git4DataProbe(ClientContext &context, const string &table_name, TableScanType scan_type) {
 	auto &table = Catalog::GetEntry<TableCatalogEntry>(context, QualifiedName(Identifier(table_name)));
 	auto &storage = table.GetStorage();
 	auto &row_groups = *storage.GetRowGroupCollection();
@@ -210,7 +212,7 @@ static string PragmaGit4DataProbe(ClientContext &context, const FunctionParamete
 		scan_chunk.Reset();
 		// The segment lock taken by InitializeCreateIndexScan has to be handed to the
 		// scan, otherwise lazily loading row groups from disk deadlocks
-		state.table_state.Scan(scan_chunk, TableScanType::TABLE_SCAN_BASE_ROWS, state.segment_lock);
+		state.table_state.Scan(scan_chunk, scan_type, state.segment_lock);
 		if (scan_chunk.size() == 0) {
 			break;
 		}
@@ -237,6 +239,17 @@ static string PragmaGit4DataProbe(ClientContext &context, const FunctionParamete
 	return StringUtil::Format("SELECT %llu::UBIGINT AS rows_at_retention_bound, %lld::BIGINT AS min_col0, "
 	                          "%lld::BIGINT AS max_col0",
 	                          count, min_value, max_value);
+}
+
+//! Base data with updates skipped: what a pinned snapshot needs kept
+static string PragmaGit4DataProbe(ClientContext &context, const FunctionParameters &parameters) {
+	return Git4DataProbe(context, parameters.values[0].ToString(), TableScanType::TABLE_SCAN_BASE_ROWS);
+}
+
+//! Every physical row including all deleted ones, to tell "the data is gone" apart from
+//! "the data is there but filtered out"
+static string PragmaGit4DataProbeAll(ClientContext &context, const FunctionParameters &parameters) {
+	return Git4DataProbe(context, parameters.values[0].ToString(), TableScanType::TABLE_SCAN_ALL_ROWS);
 }
 
 void PragmaFunctions::RegisterFunction(BuiltinFunctions &set) {
@@ -271,6 +284,8 @@ void PragmaFunctions::RegisterFunction(BuiltinFunctions &set) {
 	set.AddFunction(PragmaFunction::PragmaStatement("git4data_state", PragmaGit4DataState));
 	set.AddFunction(
 	    PragmaFunction::PragmaCall("git4data_probe", PragmaGit4DataProbe, {LogicalType::VARCHAR}));
+	set.AddFunction(
+	    PragmaFunction::PragmaCall("git4data_probe_all", PragmaGit4DataProbeAll, {LogicalType::VARCHAR}));
 
 	set.AddFunction(PragmaFunction::PragmaStatement("enable_progress_bar", PragmaEnableProgressBar));
 	set.AddFunction(PragmaFunction::PragmaStatement("disable_progress_bar", PragmaDisableProgressBar));

@@ -102,6 +102,19 @@ public:
 	transaction_t GetLastCommit() const {
 		return last_commit;
 	}
+	//! The counter that hands out commit ids. A pinned snapshot records one of these, so it
+	//! has to be persisted alongside the pins for the pin to still mean anything after a
+	//! restart - transaction ids restart from a fixed point in every process.
+	transaction_t GetStartTimestampCounter() const {
+		return current_start_timestamp;
+	}
+	//! Continue handing out commit ids above the given value. Called when loading a database
+	//! that has pinned snapshots, so their recorded ids stay below future commits.
+	void SetMinimumStartTimestamp(transaction_t timestamp) {
+		if (timestamp > current_start_timestamp) {
+			current_start_timestamp = timestamp;
+		}
+	}
 	optional_idx GetActiveCheckpoint() const {
 		auto id = active_checkpoint.load();
 		return id == 0 ? optional_idx() : optional_idx(id);

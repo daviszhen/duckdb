@@ -391,6 +391,17 @@ struct DatabaseHeader {
 	//! The storage compatibility version
 	StorageVersion storage_compatibility = StorageVersion::INVALID;
 
+	//! Guards the Git4Data snapshot registry pointer. A file written before these fields
+	//! existed has zeroes there, which read back as "no registry" instead of as a
+	//! dangling pointer.
+	static constexpr uint64_t SNAPSHOT_REGISTRY_MAGIC = 0x6769743464617461ULL;
+	//! Magic, set to SNAPSHOT_REGISTRY_MAGIC when the registry fields below are valid
+	uint64_t snapshot_registry_magic = 0;
+	//! The metadata block holding the pinned snapshot registry, 0 when there is none
+	idx_t snapshot_registry_block = 0;
+	//! Offset of the registry within that block
+	idx_t snapshot_registry_offset = 0;
+
 	void Write(WriteStream &ser);
 	static DatabaseHeader Read(const MainHeader &header, ReadStream &source);
 	static void SetStorageVersionInDatabaseHeader(DatabaseHeader &header, StorageVersion main_version,

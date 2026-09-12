@@ -66,6 +66,11 @@ public:
 	virtual void IncreaseBlockReferenceCount(block_id_t block_id) = 0;
 	//! Get the first meta block id
 	virtual idx_t GetMetaBlock() = 0;
+	//! The metadata block holding the pinned snapshot registry, as recorded by the last
+	//! checkpoint. Defaults to invalid, for block managers that persist no registry.
+	virtual MetaBlockPointer GetSnapshotRegistryPointer() {
+		return MetaBlockPointer();
+	}
 	//! Read the content of the block from disk
 	virtual void Read(QueryContext context, Block &block) = 0;
 

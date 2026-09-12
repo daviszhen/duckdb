@@ -289,11 +289,45 @@ void SingleFileCheckpointWriter::CreateCheckpoint() {
 		throw IOException("Checkpoint aborted before header write (non-fatal) because of PRAGMA checkpoint_abort flag");
 	}
 
+	// Persist the pinned snapshot registry in its own metadata block. It has to be durable,
+	// because a pin is the only thing keeping a checkpoint from reclaiming the history it
+	// protects; losing it across a restart would silently release that history. Writing it
+	// before the header makes the header write the commit point, so the block and the
+	// pointer to it become visible together.
+	idx_t registry_block = 0;
+	idx_t registry_offset = 0;
+	auto start_timestamp = transaction_manager.GetStartTimestampCounter();
+	auto pinned_snapshots = transaction_manager.snapshots.List();
+	if (!pinned_snapshots.empty()) {
+		auto registry_writer = make_uniq<MetadataWriter>(metadata_manager);
+		auto registry_pointer = registry_writer->GetMetaBlockPointer();
+		BinarySerializer registry_serializer(*registry_writer, SerializationOptions(db));
+		registry_serializer.Begin();
+		// the commit-id counter goes with the pins: the ids below are commit ids, and those
+		// restart from a fixed point in every process
+		registry_serializer.WriteProperty<uint64_t>(99, "start_timestamp", start_timestamp);
+		registry_serializer.WriteList(100, "snapshots", pinned_snapshots.size(), [&](Serializer::List &list, idx_t i) {
+			list.WriteObject([&](Serializer &obj) {
+				obj.WriteProperty<string>(100, "name", pinned_snapshots[i].name);
+				obj.WriteProperty<uint64_t>(101, "pin", pinned_snapshots[i].pin);
+			});
+		});
+		registry_serializer.End();
+		registry_writer->Flush();
+		registry_block = registry_pointer.block_pointer;
+		registry_offset = registry_pointer.offset;
+	}
+
 	// finally write the updated header
 	DatabaseHeader header;
 	header.meta_block = meta_block.block_pointer;
 	header.block_alloc_size = block_manager.GetBlockAllocSize();
 	header.vector_size = STANDARD_VECTOR_SIZE;
+	if (registry_block != 0) {
+		header.snapshot_registry_magic = DatabaseHeader::SNAPSHOT_REGISTRY_MAGIC;
+		header.snapshot_registry_block = registry_block;
+		header.snapshot_registry_offset = registry_offset;
+	}
 	block_manager.WriteHeader(context, header);
 
 	auto debug_verify_blocks = Settings::Get<DebugVerifyBlocksSetting>(db.GetDatabase());
@@ -408,6 +442,29 @@ void SingleFileCheckpointReader::LoadFromStorage() {
 	MetadataReader reader(metadata_manager, meta_block);
 	auto transaction = CatalogTransaction::GetSystemTransaction(catalog.GetDatabase());
 	LoadCheckpoint(transaction, reader);
+
+	// Restore the pinned snapshots recorded by the last checkpoint. They have to be in place
+	// before anything can run a checkpoint, otherwise that checkpoint would reclaim the
+	// history these pins are protecting.
+	auto registry_pointer = block_manager.GetSnapshotRegistryPointer();
+	if (registry_pointer.IsValid()) {
+		auto &transaction_manager = storage.GetAttached().GetTransactionManager().Cast<DuckTransactionManager>();
+		MetadataReader registry_reader(metadata_manager, registry_pointer);
+		BinaryDeserializer registry_deserializer(registry_reader);
+		registry_deserializer.Begin();
+		// restore the commit-id counter before the pins, so the ids they carry stay below
+		// every commit this process will make
+		auto start_timestamp = registry_deserializer.ReadProperty<uint64_t>(99, "start_timestamp");
+		transaction_manager.SetMinimumStartTimestamp(start_timestamp);
+		registry_deserializer.ReadList(100, "snapshots", [&](Deserializer::List &list, idx_t i) {
+			return list.ReadObject([&](Deserializer &obj) {
+				auto name = obj.ReadProperty<string>(100, "name");
+				auto pin = obj.ReadProperty<uint64_t>(101, "pin");
+				transaction_manager.snapshots.Create(name, pin);
+			});
+		});
+		registry_deserializer.End();
+	}
 }
 
 void CheckpointWriter::WriteEntry(CatalogEntry &entry, Serializer &serializer) {

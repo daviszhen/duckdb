@@ -75,6 +75,14 @@ public:
 
 	//! Creates a new database.
 	void CreateNewDatabase(QueryContext context);
+	//! The metadata block holding the pinned snapshot registry, as recorded by the last
+	//! checkpoint. Invalid when the file has no registry.
+	MetaBlockPointer GetSnapshotRegistryPointer() override {
+		if (snapshot_registry_block == 0) {
+			return MetaBlockPointer();
+		}
+		return MetaBlockPointer(snapshot_registry_block, NumericCast<uint32_t>(snapshot_registry_offset));
+	}
 	//! Loads an existing database. We pass the provided block allocation size as a parameter
 	//! to detect inconsistencies with the file header.
 	void LoadExistingDatabase(QueryContext context);
@@ -216,6 +224,10 @@ private:
 	unordered_map<block_id_t, uint32_t> multi_use_blocks;
 	//! The list of blocks that are no longer in-use, but cannot be re-used until the next checkpoint
 	unordered_set<block_id_t> modified_blocks;
+	//! The metadata block holding the pinned snapshot registry, 0 when the file has none
+	idx_t snapshot_registry_block = 0;
+	//! Offset of the registry within that block
+	idx_t snapshot_registry_offset = 0;
 	//! The current meta block id
 	idx_t meta_block;
 	//! The current maximum block id, this id will be given away first after the free_list runs out

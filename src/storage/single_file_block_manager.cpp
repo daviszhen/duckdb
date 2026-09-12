@@ -286,6 +286,10 @@ void DatabaseHeader::Write(WriteStream &ser) {
 	} else {
 		ser.Write<idx_t>(static_cast<idx_t>(storage_compatibility));
 	}
+	// Appended after the storage version so files written before it read back as zeroes
+	ser.Write<uint64_t>(snapshot_registry_magic);
+	ser.Write<idx_t>(snapshot_registry_block);
+	ser.Write<idx_t>(snapshot_registry_offset);
 }
 
 void DatabaseHeader::SetStorageVersionInDatabaseHeader(DatabaseHeader &header, StorageVersion main_version,
@@ -374,6 +378,16 @@ DatabaseHeader DatabaseHeader::Read(const MainHeader &main_header, ReadStream &s
 	auto database_header_storage_version = static_cast<StorageVersion>(h_storage_version);
 	SetStorageVersionInDatabaseHeader(header, static_cast<StorageVersion>(main_header.version_number),
 	                                  database_header_storage_version);
+
+	// the snapshot registry fields were appended after the storage version; a file written
+	// before that has zeroes here, which fails the magic check and reads as "no registry"
+	header.snapshot_registry_magic = source.Read<uint64_t>();
+	header.snapshot_registry_block = source.Read<idx_t>();
+	header.snapshot_registry_offset = source.Read<idx_t>();
+	if (header.snapshot_registry_magic != SNAPSHOT_REGISTRY_MAGIC) {
+		header.snapshot_registry_block = 0;
+		header.snapshot_registry_offset = 0;
+	}
 
 	return header;
 }
@@ -833,6 +847,8 @@ void SingleFileBlockManager::Initialize(const DatabaseHeader &header, const opti
 	meta_block = header.meta_block;
 	iteration_count = header.iteration;
 	max_block = NumericCast<block_id_t>(header.block_count);
+	snapshot_registry_block = header.snapshot_registry_block;
+	snapshot_registry_offset = header.snapshot_registry_offset;
 	if (options.storage_version != StorageVersion::INVALID) {
 		// storage version specified explicitly - use requested storage version
 		auto requested_compat_version = options.storage_version;
