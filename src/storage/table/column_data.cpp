@@ -303,6 +303,9 @@ void ColumnData::FetchUpdates(TransactionData transaction, idx_t vector_index, V
 	if (!updates) {
 		return;
 	}
+	if (update_type == UpdateScanType::SKIP_UPDATES) {
+		return;
+	}
 	if (update_type == UpdateScanType::DISALLOW_UPDATES && updates->HasUncommittedUpdates(vector_index)) {
 		throw TransactionException("Cannot create index with outstanding updates");
 	}

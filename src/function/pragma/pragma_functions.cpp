@@ -210,7 +210,7 @@ static string PragmaGit4DataProbe(ClientContext &context, const FunctionParamete
 		scan_chunk.Reset();
 		// The segment lock taken by InitializeCreateIndexScan has to be handed to the
 		// scan, otherwise lazily loading row groups from disk deadlocks
-		state.table_state.Scan(scan_chunk, TableScanType::TABLE_SCAN_OMIT_PERMANENTLY_DELETED, state.segment_lock);
+		state.table_state.Scan(scan_chunk, TableScanType::TABLE_SCAN_BASE_ROWS, state.segment_lock);
 		if (scan_chunk.size() == 0) {
 			break;
 		}

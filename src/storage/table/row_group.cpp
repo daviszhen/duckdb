@@ -1122,6 +1122,12 @@ void RowGroup::Scan(CollectionScanState &state, DataChunk &result, TableScanType
 		options.delete_type = DeletedScanType::OMIT_COMMITTED_DELETES;
 		options.update_type = UpdateScanType::DISALLOW_UPDATES;
 		break;
+	case TableScanType::TABLE_SCAN_BASE_ROWS:
+		// observe the base column data, so an update's pre-image can be told apart
+		// from the update itself
+		options.delete_type = DeletedScanType::OMIT_COMMITTED_DELETES;
+		options.update_type = UpdateScanType::SKIP_UPDATES;
+		break;
 	default:
 		throw InternalException("Unrecognized table scan type");
 	}
