@@ -28,6 +28,9 @@ struct CheckpointOptions {
 	optional_idx checkpoint_id;
 	//! What this checkpoint sees: timestamps below this bound are written
 	VisibilityBound visibility_bound;
+	//! Deletes at or after this bound still have to stay distinguishable, so their ids are
+	//! written to disk. Held down by a pinned snapshot; AllCommitted() when nothing is pinned.
+	VisibilityBound retention_bound = VisibilityBound::AllCommitted();
 	//! The WAL lock - in case we are holding it during the entire checkpoint.
 	//! This is only required if we are doing a checkpoint instead of writing to the WAL
 	optional_ptr<unique_lock<mutex>> wal_lock;

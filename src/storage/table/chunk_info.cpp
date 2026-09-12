@@ -807,7 +807,23 @@ transaction_t ChunkVectorInfo::ConstantDeleteId() const {
 	return constant_delete_id;
 }
 
-void ChunkVectorInfo::Write(WriteStream &writer, VisibilityBound visibility_bound) const {
+transaction_t ChunkVectorInfo::GetDeleteId(idx_t row) const {
+	switch (delete_state) {
+	case DeleteIdState::CONSTANT:
+		return ConstantDeleteId();
+	case DeleteIdState::MASKED:
+		return deleted_mask.RowIsValid(row) ? mask_delete_id : NOT_DELETED_ID;
+	case DeleteIdState::ARRAY: {
+		auto delete_segment = allocator.GetHandle(GetDeletedPointer());
+		return delete_segment.GetPtr<transaction_t>()[row];
+	}
+	default:
+		throw InternalException("Unknown DeleteIdState in GetDeleteId");
+	}
+}
+
+void ChunkVectorInfo::Write(WriteStream &writer, VisibilityBound visibility_bound,
+                            VisibilityBound retention_bound) const {
 	SelectionVector sel(STANDARD_VECTOR_SIZE);
 	transaction_t transaction_id = DConstants::INVALID_INDEX;
 	idx_t count = GetSelVector(TransactionData(transaction_id, visibility_bound), sel, STANDARD_VECTOR_SIZE);
@@ -816,21 +832,66 @@ void ChunkVectorInfo::Write(WriteStream &writer, VisibilityBound visibility_boun
 		writer.Write<ChunkInfoType>(ChunkInfoType::EMPTY_INFO);
 		return;
 	}
-	if (count == 0) {
-		// everything is deleted: write a constant vector
-		writer.Write<ChunkInfoType>(ChunkInfoType::CONSTANT_INFO);
-		writer.Write<idx_t>(start);
-		return;
-	}
-	// write a boolean vector
-	writer.Write<ChunkInfoType>(ChunkInfoType::VECTOR_INFO);
-	writer.Write<idx_t>(start);
+	// The mask below marks survivors invalid, so a valid bit means "deleted". Matches the
+	// on-disk VECTOR_INFO orientation.
 	ValidityMask mask(STANDARD_VECTOR_SIZE);
 	mask.Initialize(STANDARD_VECTOR_SIZE);
 	for (idx_t i = 0; i < count; i++) {
 		mask.SetInvalid(sel.get_index(i));
 	}
+	// A reader pinned at retention_bound has to tell "this row was already deleted when I
+	// look" apart from "this row is gone for everyone", which needs the delete id itself.
+	// With no pin the bound is AllCommitted(), every id is below it, and the compact
+	// mask-only forms stay in use.
+	bool keep_ids = false;
+	bool ids_equal = true;
+	transaction_t shared_id = NOT_DELETED_ID;
+	idx_t deleted_count = 0;
+	for (idx_t row = 0; row < STANDARD_VECTOR_SIZE; row++) {
+		if (!mask.RowIsValid(row)) {
+			continue;
+		}
+		auto delete_id = GetDeleteId(row);
+		deleted_count++;
+		if (delete_id >= retention_bound) {
+			keep_ids = true;
+		}
+		if (deleted_count == 1) {
+			shared_id = delete_id;
+		} else if (shared_id != delete_id) {
+			ids_equal = false;
+		}
+	}
+	if (!keep_ids) {
+		if (count == 0) {
+			// everything is deleted: write a constant vector
+			writer.Write<ChunkInfoType>(ChunkInfoType::CONSTANT_INFO);
+			writer.Write<idx_t>(start);
+			return;
+		}
+		// write a boolean vector
+		writer.Write<ChunkInfoType>(ChunkInfoType::VECTOR_INFO);
+		writer.Write<idx_t>(start);
+		mask.Write(writer, STANDARD_VECTOR_SIZE);
+		return;
+	}
+	if (deleted_count == STANDARD_VECTOR_SIZE && ids_equal) {
+		// whole vector deleted by one transaction that a pin still separates
+		writer.Write<ChunkInfoType>(ChunkInfoType::CONSTANT_INFO_WITH_ID);
+		writer.Write<idx_t>(start);
+		writer.Write<transaction_t>(shared_id);
+		return;
+	}
+	writer.Write<ChunkInfoType>(ChunkInfoType::VECTOR_INFO_WITH_IDS);
+	writer.Write<idx_t>(start);
 	mask.Write(writer, STANDARD_VECTOR_SIZE);
+	writer.Write<idx_t>(deleted_count);
+	for (idx_t row = 0; row < STANDARD_VECTOR_SIZE; row++) {
+		if (!mask.RowIsValid(row)) {
+			continue;
+		}
+		writer.Write<transaction_t>(GetDeleteId(row));
+	}
 }
 
 unique_ptr<ChunkVectorInfo> ChunkVectorInfo::Read(FixedSizeAllocator &allocator, ReadStream &reader) {
@@ -845,6 +906,40 @@ unique_ptr<ChunkVectorInfo> ChunkVectorInfo::Read(FixedSizeAllocator &allocator,
 		auto result = make_uniq<ChunkVectorInfo>(allocator, start, transaction_t(0), transaction_t(0));
 		// both ids are constant - there is nothing left to compress
 		result->recheck_compression = false;
+		return result;
+	}
+	case ChunkInfoType::CONSTANT_INFO_WITH_ID: {
+		// fully deleted, and the delete id is still meaningful to a pinned reader
+		auto start = reader.Read<idx_t>();
+		auto delete_id = reader.Read<transaction_t>();
+		auto result = make_uniq<ChunkVectorInfo>(allocator, start, transaction_t(0), delete_id);
+		// a later pass may be able to collapse it once the bound moves past this id
+		result->recheck_compression = true;
+		return result;
+	}
+	case ChunkInfoType::VECTOR_INFO_WITH_IDS: {
+		// partially deleted with the delete ids preserved
+		auto start = reader.Read<idx_t>();
+		auto result = make_uniq<ChunkVectorInfo>(allocator, start);
+		result->deleted_mask.Read(reader, STANDARD_VECTOR_SIZE);
+		auto deleted_count = reader.Read<idx_t>();
+		result->deleted_data = allocator.New();
+		result->deleted_data.SetMetadata(1);
+		auto segment = allocator.GetHandle(result->deleted_data);
+		auto ids = segment.GetPtr<transaction_t>();
+		for (idx_t i = 0; i < STANDARD_VECTOR_SIZE; i++) {
+			ids[i] = NOT_DELETED_ID;
+		}
+		idx_t seen = 0;
+		for (idx_t i = 0; i < STANDARD_VECTOR_SIZE && seen < deleted_count; i++) {
+			if (!result->deleted_mask.RowIsValid(i)) {
+				continue;
+			}
+			ids[i] = reader.Read<transaction_t>();
+			seen++;
+		}
+		result->delete_state = DeleteIdState::ARRAY;
+		result->recheck_compression = true;
 		return result;
 	}
 	case ChunkInfoType::VECTOR_INFO: {

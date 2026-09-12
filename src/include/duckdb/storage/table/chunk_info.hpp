@@ -26,7 +26,16 @@ class FixedSizeAllocator;
 //! The type of a serialized chunk info entry
 //! In-memory all chunk infos are represented by ChunkVectorInfo - CONSTANT_INFO (a fully deleted vector) and
 //! EMPTY_INFO (no deletes) only exist as tags in the serialized format
-enum class ChunkInfoType : uint8_t { CONSTANT_INFO, VECTOR_INFO, EMPTY_INFO };
+enum class ChunkInfoType : uint8_t {
+	CONSTANT_INFO,
+	VECTOR_INFO,
+	EMPTY_INFO,
+	//! Fully deleted, carrying the delete id. Used when a pinned snapshot still has to
+	//! distinguish this delete from "gone for everyone".
+	CONSTANT_INFO_WITH_ID,
+	//! Partially deleted: the mask plus the delete id of every deleted row, in row order.
+	VECTOR_INFO_WITH_IDS
+};
 
 //! ChunkVectorInfo holds the version information (the insert and delete ids) of the rows of a single vector within
 //! a row group. The insert and delete ids are stored as constants when all rows share the same id, and as per-row
@@ -100,7 +109,11 @@ public:
 	bool HasConstantDeleteId() const;
 	transaction_t ConstantDeleteId() const;
 
-	void Write(WriteStream &writer, VisibilityBound visibility_bound) const;
+	//! Serialize the delete side. Deletes at or after retention_bound keep their ids, so a
+	//! reader pinned there can still tell them from deletes visible to everyone.
+	void Write(WriteStream &writer, VisibilityBound visibility_bound, VisibilityBound retention_bound) const;
+	//! The delete id of the given row, NOT_DELETED_ID when the row is alive
+	transaction_t GetDeleteId(idx_t row) const;
 	static unique_ptr<ChunkVectorInfo> Read(FixedSizeAllocator &allocator, ReadStream &reader);
 
 private:

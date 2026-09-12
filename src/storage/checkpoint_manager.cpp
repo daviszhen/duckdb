@@ -329,6 +329,8 @@ void SingleFileCheckpointWriter::CreateCheckpoint() {
 		header.snapshot_registry_offset = registry_offset;
 	}
 	block_manager.WriteHeader(context, header);
+	// the registry is on disk now (or was empty), so the next checkpoint need not force itself
+	transaction_manager.snapshots.MarkClean();
 
 	auto debug_verify_blocks = Settings::Get<DebugVerifyBlocksSetting>(db.GetDatabase());
 	if (debug_verify_blocks) {

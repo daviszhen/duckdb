@@ -31,6 +31,7 @@ bool SnapshotRegistry::Create(const string &name, transaction_t pin) {
 	}
 	snapshots.emplace(name, pin);
 	RecomputeLowest();
+	dirty.store(true);
 	return true;
 }
 
@@ -42,6 +43,7 @@ bool SnapshotRegistry::Drop(const string &name) {
 	}
 	snapshots.erase(entry);
 	RecomputeLowest();
+	dirty.store(true);
 	return true;
 }
 
@@ -292,6 +294,12 @@ void DuckTransactionManager::Checkpoint(ClientContext &context, bool force) {
 		}
 	}
 	CheckpointOptions options;
+	options.retention_bound = LowestRetentionBound();
+	if (snapshots.IsDirty()) {
+		// the registry changed and is not on disk yet; a checkpoint that skips its body
+		// because the WAL is empty would leave it there
+		options.action = CheckpointAction::ALWAYS_CHECKPOINT;
+	}
 	if (GetLastCommit() >= LowestRetentionBound()) {
 		// we cannot do a full checkpoint if any transaction needs to read old data
 		options.type = CheckpointType::CONCURRENT_CHECKPOINT;

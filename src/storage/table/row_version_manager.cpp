@@ -274,7 +274,7 @@ vector<MetaBlockPointer> RowVersionManager::Checkpoint(RowGroupWriter &writer) {
 			auto &vector_idx = entry.first;
 			auto &chunk_info = entry.second.get();
 			metadata_writer.Write<idx_t>(vector_idx);
-			chunk_info.Write(metadata_writer, options.visibility_bound);
+			chunk_info.Write(metadata_writer, options.visibility_bound, options.retention_bound);
 		}
 		metadata_writer.Flush();
 	}

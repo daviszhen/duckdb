@@ -52,6 +52,13 @@ public:
 	transaction_t LowestPin() const noexcept {
 		return lowest_pin.load();
 	}
+	//! Whether the registry changed since the last checkpoint wrote it
+	bool IsDirty() const noexcept {
+		return dirty.load();
+	}
+	void MarkClean() noexcept {
+		dirty.store(false);
+	}
 
 private:
 	//! Recompute the cached minimum pin. Caller must hold the lock.
@@ -61,6 +68,10 @@ private:
 	mutable mutex lock;
 	unordered_map<string, transaction_t> snapshots;
 	std::atomic<transaction_t> lowest_pin {MAX_COMMIT_ID};
+	//! Set by Create/Drop, cleared once a checkpoint has written the registry. A checkpoint
+	//! with nothing in the WAL skips its body entirely, so without this a snapshot taken on
+	//! an otherwise unchanged database would never reach disk.
+	std::atomic<bool> dirty {false};
 };
 
 //! The Transaction Manager is responsible for creating and managing
