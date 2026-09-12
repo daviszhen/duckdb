@@ -217,7 +217,7 @@ static string PragmaGit4DataProbe(ClientContext &context, const FunctionParamete
 		count += scan_chunk.size();
 		// Track value extremes of the first column so tests can tell the pre-image
 		// apart from the post-image, not just count rows
-		if (have_value || scan_chunk.data.empty() || scan_chunk.data[0].GetType().id() != LogicalTypeId::BIGINT) {
+		if (scan_chunk.data.empty() || scan_chunk.data[0].GetType().id() != LogicalTypeId::BIGINT) {
 			continue;
 		}
 		for (auto entry : scan_chunk.data[0].Values<int64_t>()) {
