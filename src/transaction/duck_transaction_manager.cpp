@@ -292,7 +292,7 @@ void DuckTransactionManager::Checkpoint(ClientContext &context, bool force) {
 		}
 	}
 	CheckpointOptions options;
-	if (GetLastCommit() >= LowestVisibilityBound()) {
+	if (GetLastCommit() >= LowestRetentionBound()) {
 		// we cannot do a full checkpoint if any transaction needs to read old data
 		options.type = CheckpointType::CONCURRENT_CHECKPOINT;
 	}

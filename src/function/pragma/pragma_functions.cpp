@@ -162,7 +162,7 @@ static string PragmaGit4DataState(ClientContext &context, const FunctionParamete
 	auto last_commit = transaction_manager.GetLastCommit();
 	auto pinned = transaction_manager.snapshots.LowestPin();
 	// Mirrors the decision made in DuckTransactionManager::Checkpoint
-	auto retained = last_commit >= transaction_manager.LowestVisibilityBound();
+	auto retained = last_commit >= transaction_manager.LowestRetentionBound();
 	return StringUtil::Format("SELECT %llu::UBIGINT AS last_commit_id, %llu::UBIGINT AS pinned_commit_id, "
 	                          "%s::BOOLEAN AS history_retained",
 	                          last_commit, pinned, retained ? "true" : "false");

@@ -1106,7 +1106,7 @@ void RowGroup::Scan(CollectionScanState &state, DataChunk &result, TableScanType
 	if (type == TableScanType::TABLE_SCAN_COMMITTED_ROWS) {
 		visibility_bound = VisibilityBound::Through(transaction_manager.GetLastCommit());
 	} else {
-		visibility_bound = transaction_manager.LowestVisibilityBound();
+		visibility_bound = transaction_manager.LowestRetentionBound();
 	}
 	// a scan on behalf of no transaction: there are no writes of its own to see
 	TransactionData transaction(MAX_TRANSACTION_ID, visibility_bound);

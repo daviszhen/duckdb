@@ -1718,7 +1718,7 @@ void RowGroupCollection::Checkpoint(TableDataWriter &writer, TableStatistics &gl
 	InitializeVacuumState(checkpoint_state, vacuum_state, writer.GetRowGroupCount());
 
 	auto &transaction_manager = DuckTransactionManager::Get(GetAttached());
-	auto lowest_visibility_bound = transaction_manager.LowestVisibilityBound();
+	auto lowest_visibility_bound = transaction_manager.LowestRetentionBound();
 	try {
 		// schedule tasks
 		idx_t total_vacuum_tasks = 0;

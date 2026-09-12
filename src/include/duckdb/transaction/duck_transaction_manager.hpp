@@ -82,7 +82,15 @@ public:
 
 	void Checkpoint(ClientContext &context, bool force = false) override;
 
+	//! Bound below which row versions may be discarded. Tracks active transactions only,
+	//! and also gates releasing committed transactions, so it must not be held back by
+	//! anything else - a lower bound delays lock release and stalls CHECKPOINT.
 	VisibilityBound LowestVisibilityBound() const {
+		return lowest_visibility_bound;
+	}
+	//! Bound below which row versions must stay readable. Like LowestVisibilityBound but
+	//! also covers pinned snapshots, which have no transaction to hold the bound down.
+	VisibilityBound LowestRetentionBound() const {
 		return VisibilityBound::Min(lowest_visibility_bound, PinnedBound());
 	}
 	//! Bound imposed by pinned snapshots, independent of active transactions
