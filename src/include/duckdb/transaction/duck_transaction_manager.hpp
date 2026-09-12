@@ -12,6 +12,7 @@
 #include "duckdb/storage/storage_lock.hpp"
 #include "duckdb/common/enums/checkpoint_type.hpp"
 #include "duckdb/common/queue.hpp"
+#include "duckdb/common/unordered_map.hpp"
 
 namespace duckdb {
 class DuckTransactionManager;
@@ -27,6 +28,39 @@ struct DuckCleanupInfo {
 
 	void Cleanup();
 	bool ScheduleCleanup() noexcept;
+};
+
+//! A pinned snapshot: a named point on the commit timeline that must stay readable.
+struct Git4DataSnapshot {
+	string name;
+	//! Everything committed up to and including this commit id stays visible
+	transaction_t pin;
+};
+
+//! Registry of pinned snapshots. Pinned bounds fold into the transaction manager's
+//! lowest visibility bound, which is what keeps superseded versions alive.
+class SnapshotRegistry {
+public:
+	//! Pin a new snapshot at the given commit id. Returns false if the name exists.
+	bool Create(const string &name, transaction_t pin);
+	//! Release a pinned snapshot. Returns false if the name is unknown.
+	bool Drop(const string &name);
+	vector<Git4DataSnapshot> List() const;
+	idx_t Count() const;
+	//! The lowest pinned commit id, or MAX_COMMIT_ID when nothing is pinned.
+	//! Reads a single atomic so it is safe to call from noexcept contexts.
+	transaction_t LowestPin() const noexcept {
+		return lowest_pin.load();
+	}
+
+private:
+	//! Recompute the cached minimum pin. Caller must hold the lock.
+	void RecomputeLowest();
+
+private:
+	mutable mutex lock;
+	unordered_map<string, transaction_t> snapshots;
+	std::atomic<transaction_t> lowest_pin {MAX_COMMIT_ID};
 };
 
 //! The Transaction Manager is responsible for creating and managing
@@ -49,8 +83,14 @@ public:
 	void Checkpoint(ClientContext &context, bool force = false) override;
 
 	VisibilityBound LowestVisibilityBound() const {
-		return lowest_visibility_bound;
+		return VisibilityBound::Min(lowest_visibility_bound, PinnedBound());
 	}
+	//! Bound imposed by pinned snapshots, independent of active transactions
+	VisibilityBound PinnedBound() const noexcept {
+		return VisibilityBound::Through(snapshots.LowestPin());
+	}
+	//! Pinned snapshots keep superseded versions readable
+	SnapshotRegistry snapshots;
 	transaction_t GetLastCommit() const {
 		return last_commit;
 	}

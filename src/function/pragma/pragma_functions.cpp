@@ -2,9 +2,11 @@
 
 #include "duckdb/common/enums/output_type.hpp"
 #include "duckdb/common/operator/cast_operators.hpp"
+#include "duckdb/common/string_util.hpp"
 #include "duckdb/function/function_set.hpp"
 #include "duckdb/main/client_context.hpp"
 #include "duckdb/main/database.hpp"
+#include "duckdb/main/database_manager.hpp"
 #include "duckdb/main/query_profiler.hpp"
 #include "duckdb/main/secret/secret_manager.hpp"
 #include "duckdb/parallel/task_scheduler.hpp"
@@ -14,6 +16,7 @@
 #include "duckdb/main/settings.hpp"
 #include "duckdb/common/encryption_functions.hpp"
 #include "duckdb/logging/log_manager.hpp"
+#include "duckdb/transaction/duck_transaction_manager.hpp"
 
 #include <cctype>
 
@@ -106,6 +109,65 @@ static void PragmaDisableOptimizer(ClientContext &context, const FunctionParamet
 	Settings::Set<EnableOptimizerSetting>(context, SetScope::SESSION, Value::BOOLEAN(false));
 }
 
+//===----------------------------------------------------------------------===//
+// Git4Data snapshots
+//===----------------------------------------------------------------------===//
+
+static DuckTransactionManager &GetGit4DataTransactionManager(ClientContext &context) {
+	auto &db_manager = DatabaseManager::Get(context);
+	auto attached = db_manager.GetDatabase(context, DatabaseManager::GetDefaultDatabase(context));
+	if (!attached) {
+		throw InvalidInputException("Git4Data snapshots require an attached database");
+	}
+	return DuckTransactionManager::Get(*attached);
+}
+
+static void PragmaGit4DataCreateSnapshot(ClientContext &context, const FunctionParameters &parameters) {
+	auto name = parameters.values[0].ToString();
+	auto &transaction_manager = GetGit4DataTransactionManager(context);
+	// Pin at the newest commit, keep everything committed so far readable
+	if (!transaction_manager.snapshots.Create(name, transaction_manager.GetLastCommit())) {
+		throw InvalidInputException("Snapshot \"%s\" already exists", name);
+	}
+}
+
+static void PragmaGit4DataDropSnapshot(ClientContext &context, const FunctionParameters &parameters) {
+	auto name = parameters.values[0].ToString();
+	auto &transaction_manager = GetGit4DataTransactionManager(context);
+	if (!transaction_manager.snapshots.Drop(name)) {
+		throw InvalidInputException("Snapshot \"%s\" does not exist", name);
+	}
+}
+
+static string PragmaGit4DataSnapshots(ClientContext &context, const FunctionParameters &parameters) {
+	auto entries = GetGit4DataTransactionManager(context).snapshots.List();
+	if (entries.empty()) {
+		return "SELECT NULL::VARCHAR AS snapshot_name, NULL::UBIGINT AS pinned_commit_id WHERE false";
+	}
+	string query = "SELECT * FROM (VALUES ";
+	for (idx_t i = 0; i < entries.size(); i++) {
+		if (i > 0) {
+			query += ", ";
+		}
+		// Snapshot names are user input, escape them before splicing into SQL
+		auto name = StringUtil::Replace(entries[i].name, "'", "''");
+		query += StringUtil::Format("('%s'::VARCHAR, %llu::UBIGINT)", name, entries[i].pin);
+	}
+	query += ") t(snapshot_name, pinned_commit_id) ORDER BY pinned_commit_id";
+	return query;
+}
+
+static string PragmaGit4DataState(ClientContext &context, const FunctionParameters &parameters) {
+	auto &transaction_manager = GetGit4DataTransactionManager(context);
+	auto last_commit = transaction_manager.GetLastCommit();
+	auto pinned = transaction_manager.snapshots.LowestPin();
+	// Mirrors the decision made in DuckTransactionManager::Checkpoint
+	auto retained = last_commit >= transaction_manager.LowestVisibilityBound();
+	return StringUtil::Format("SELECT %llu::UBIGINT AS last_commit_id, %llu::UBIGINT AS pinned_commit_id, "
+	                          "%s::BOOLEAN AS history_retained",
+	                          last_commit, pinned, retained ? "true" : "false");
+}
+
 void PragmaFunctions::RegisterFunction(BuiltinFunctions &set) {
 	RegisterEnableProfiling(set);
 
@@ -129,6 +191,13 @@ void PragmaFunctions::RegisterFunction(BuiltinFunctions &set) {
 	set.AddFunction(PragmaFunction::PragmaStatement("disable_optimizer", PragmaDisableOptimizer));
 
 	set.AddFunction(PragmaFunction::PragmaStatement("force_checkpoint", PragmaForceCheckpoint));
+
+	set.AddFunction(
+	    PragmaFunction::PragmaCall("git4data_create_snapshot", PragmaGit4DataCreateSnapshot, {LogicalType::VARCHAR}));
+	set.AddFunction(
+	    PragmaFunction::PragmaCall("git4data_drop_snapshot", PragmaGit4DataDropSnapshot, {LogicalType::VARCHAR}));
+	set.AddFunction(PragmaFunction::PragmaStatement("git4data_snapshots", PragmaGit4DataSnapshots));
+	set.AddFunction(PragmaFunction::PragmaStatement("git4data_state", PragmaGit4DataState));
 
 	set.AddFunction(PragmaFunction::PragmaStatement("enable_progress_bar", PragmaEnableProgressBar));
 	set.AddFunction(PragmaFunction::PragmaStatement("disable_progress_bar", PragmaDisableProgressBar));

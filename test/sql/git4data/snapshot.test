@@ -1,0 +1,69 @@
+# name: test/sql/git4data/snapshot.test
+# description: Git4Data snapshot registry lifecycle
+# group: [git4data]
+
+statement ok
+CREATE TABLE t(i INTEGER);
+
+statement ok
+INSERT INTO t VALUES (1), (2), (3);
+
+# Creating a snapshot pins the current commit id
+statement ok
+PRAGMA git4data_create_snapshot('s1')
+
+# Names must be unique
+statement error
+PRAGMA git4data_create_snapshot('s1')
+----
+<REGEX>:.*Snapshot "s1" already exists.*
+
+# A pinned snapshot is listed
+statement ok
+PRAGMA git4data_snapshots
+
+# Dropping releases the pin
+statement ok
+PRAGMA git4data_drop_snapshot('s1')
+
+# Dropping an unknown snapshot fails
+statement error
+PRAGMA git4data_drop_snapshot('s1')
+----
+<REGEX>:.*Snapshot "s1" does not exist.*
+
+# An empty name is a legal name and must still be unique
+statement ok
+PRAGMA git4data_create_snapshot('')
+statement error
+PRAGMA git4data_create_snapshot('')
+----
+<REGEX>:.*Snapshot "" already exists.*
+statement ok
+PRAGMA git4data_drop_snapshot('')
+
+# Quotes in a name must not break the generated listing query
+statement ok
+PRAGMA git4data_create_snapshot('weird''name')
+statement ok
+PRAGMA git4data_snapshots
+statement ok
+PRAGMA git4data_drop_snapshot('weird''name')
+
+# Independent snapshots coexist and release independently
+statement ok
+PRAGMA git4data_create_snapshot('s2')
+statement ok
+PRAGMA git4data_create_snapshot('s3')
+statement ok
+PRAGMA git4data_drop_snapshot('s2')
+statement ok
+PRAGMA git4data_snapshots
+statement ok
+PRAGMA git4data_drop_snapshot('s3')
+
+# With no snapshot pinned the watermark is not held back
+query II
+PRAGMA git4data_state
+----
+<REGEX>:.*false.*

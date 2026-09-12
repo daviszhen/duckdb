@@ -24,6 +24,52 @@
 
 namespace duckdb {
 
+bool SnapshotRegistry::Create(const string &name, transaction_t pin) {
+	lock_guard<mutex> guard(lock);
+	if (snapshots.find(name) != snapshots.end()) {
+		return false;
+	}
+	snapshots.emplace(name, pin);
+	RecomputeLowest();
+	return true;
+}
+
+bool SnapshotRegistry::Drop(const string &name) {
+	lock_guard<mutex> guard(lock);
+	auto entry = snapshots.find(name);
+	if (entry == snapshots.end()) {
+		return false;
+	}
+	snapshots.erase(entry);
+	RecomputeLowest();
+	return true;
+}
+
+vector<Git4DataSnapshot> SnapshotRegistry::List() const {
+	lock_guard<mutex> guard(lock);
+	vector<Git4DataSnapshot> result;
+	result.reserve(snapshots.size());
+	for (auto &entry : snapshots) {
+		result.push_back(Git4DataSnapshot {entry.first, entry.second});
+	}
+	return result;
+}
+
+idx_t SnapshotRegistry::Count() const {
+	lock_guard<mutex> guard(lock);
+	return snapshots.size();
+}
+
+void SnapshotRegistry::RecomputeLowest() {
+	transaction_t lowest = MAX_COMMIT_ID;
+	for (auto &entry : snapshots) {
+		if (entry.second < lowest) {
+			lowest = entry.second;
+		}
+	}
+	lowest_pin.store(lowest);
+}
+
 static ErrorData BuildAutocheckpointError(AttachedDatabase &db, const std::exception &ex) {
 	ErrorData original(ex);
 	string recovery = db.IsInitialDatabase() ? "Reopen the database instance to recover."
