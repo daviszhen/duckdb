@@ -1,0 +1,78 @@
+# name: test/sql/git4data/multi_pin.test
+# description: Independent pins, and dropping one does not release another's history
+# group: [git4data]
+
+load {TEST_DIR}/multi_pin.db
+
+statement ok
+CREATE TABLE t AS SELECT range AS i FROM range(1000)
+
+statement ok
+CHECKPOINT
+
+statement ok
+PRAGMA git4data_create_snapshot('s1')
+
+statement ok
+DELETE FROM t WHERE i < 100
+
+statement ok
+PRAGMA git4data_create_snapshot('s2')
+
+statement ok
+DELETE FROM t WHERE i < 200
+
+statement ok
+CHECKPOINT
+
+# three distinct images at once: the live table and both pins
+query I
+SELECT count(*) FROM t
+----
+800
+
+query I
+SELECT count(*) FROM t AT (SNAPSHOT => 's1')
+----
+1000
+
+query I
+SELECT count(*) FROM t AT (SNAPSHOT => 's2')
+----
+900
+
+# dropping the older pin must not release the history the newer one still needs
+statement ok
+PRAGMA git4data_drop_snapshot('s1')
+
+statement ok
+CHECKPOINT
+
+query I
+SELECT count(*) FROM t
+----
+800
+
+query I
+SELECT count(*) FROM t AT (SNAPSHOT => 's2')
+----
+900
+
+# and the dropped one is really gone
+statement error
+SELECT count(*) FROM t AT (SNAPSHOT => 's1')
+----
+<REGEX>:.*s1.*
+
+# both the pin and its history come back with the file
+restart
+
+query I
+SELECT count(*) FROM t
+----
+800
+
+query I
+SELECT count(*) FROM t AT (SNAPSHOT => 's2')
+----
+900

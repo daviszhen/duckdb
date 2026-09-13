@@ -1,0 +1,67 @@
+# name: test/sql/git4data/concurrent_pin.test
+# description: A pin and an active transaction at once, then the pin alone across a restart
+# group: [git4data]
+
+load {TEST_DIR}/concurrent_pin.db
+
+statement ok
+CREATE TABLE t AS SELECT range AS i FROM range(5000)
+
+statement ok
+CHECKPOINT
+
+statement ok
+SET immediate_transaction_mode=true
+
+# the pin is taken with the table still whole, so it must keep seeing all 5000 rows
+statement ok con2
+PRAGMA git4data_create_snapshot('s1')
+
+# a second reader that started before the delete
+statement ok con1
+BEGIN
+
+statement ok con2
+DELETE FROM t WHERE i % 2 = 0
+
+# this checkpoint runs with both a pin and an active transaction holding the bound down
+statement ok con2
+CHECKPOINT
+
+query I con1
+SELECT count(*) FROM t
+----
+5000
+
+query I con2
+SELECT count(*) FROM t AT (SNAPSHOT => 's1')
+----
+5000
+
+statement ok con1
+COMMIT
+
+# now only the pin holds the bound down
+statement ok con2
+CHECKPOINT
+
+query I SELECT count(*) FROM t
+----
+2500
+
+query I
+SELECT count(*) FROM t AT (SNAPSHOT => 's1')
+----
+5000
+
+# the pin is durable, so it and its history survive the file being reopened
+restart
+
+query I SELECT count(*) FROM t
+----
+2500
+
+query I
+SELECT count(*) FROM t AT (SNAPSHOT => 's1')
+----
+5000
