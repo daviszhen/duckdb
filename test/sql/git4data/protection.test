@@ -1,0 +1,101 @@
+# name: test/sql/git4data/protection.test
+# description: Snapshot protection and reclaim, matching MatrixOne's branch/protect cases
+# group: [git4data]
+
+# Two snapshots over the same rows. MatrixOne tracks protection per branch edge and
+# requires that releasing one does not disturb the others; the same has to hold for
+# pinned snapshots, and the older pin must keep governing after the newer one goes.
+statement ok
+CREATE TABLE u AS SELECT range AS i FROM range(1000)
+
+statement ok
+CHECKPOINT
+
+statement ok
+PRAGMA git4data_create_snapshot('s1')
+
+statement ok
+DELETE FROM u WHERE i < 400
+
+statement ok
+PRAGMA git4data_create_snapshot('s2')
+
+statement ok
+DELETE FROM u WHERE i >= 600
+
+statement ok
+CHECKPOINT
+
+# s1 predates both deletes, so its pin keeps every original row
+query III
+PRAGMA git4data_probe('u')
+----
+1000	0	999
+
+statement ok
+PRAGMA git4data_drop_snapshot('s2')
+
+statement ok
+CHECKPOINT
+
+# s2 is gone but s1 still needs the same rows, so nothing is reclaimed
+query III
+PRAGMA git4data_probe('u')
+----
+1000	0	999
+
+# and s1 still reads its own state
+query I
+SELECT count(*) FROM u AT (SNAPSHOT => 's1')
+----
+1000
+
+statement ok
+PRAGMA git4data_drop_snapshot('s1')
+
+statement ok
+CHECKPOINT
+
+# with every pin released the next checkpoint reclaims what both deletes removed
+query III
+PRAGMA git4data_probe('u')
+----
+200	400	599
+
+# protection is not weakened by repeated checkpoints
+statement ok
+CREATE TABLE v AS SELECT range AS i FROM range(1000)
+
+statement ok
+CHECKPOINT
+
+statement ok
+PRAGMA git4data_create_snapshot('p1')
+
+statement ok
+DELETE FROM v WHERE i < 400
+
+statement ok
+CHECKPOINT
+
+statement ok
+CHECKPOINT
+
+statement ok
+CHECKPOINT
+
+query III
+PRAGMA git4data_probe('v')
+----
+1000	0	999
+
+statement ok
+PRAGMA git4data_drop_snapshot('p1')
+
+statement ok
+CHECKPOINT
+
+query III
+PRAGMA git4data_probe('v')
+----
+600	400	999

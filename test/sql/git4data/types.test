@@ -1,0 +1,75 @@
+# name: test/sql/git4data/types.test
+# description: A snapshot read preserves column type families, per branch_matrix_coverage
+# group: [git4data]
+
+statement ok
+CREATE TABLE ty(
+  ti TINYINT, si SMALLINT, i INTEGER, bi BIGINT, h HUGEINT,
+  f FLOAT, d DOUBLE, dec DECIMAL(18,4),
+  s VARCHAR, b BOOLEAN, dt DATE, ts TIMESTAMP, l INTEGER[]
+)
+
+statement ok
+INSERT INTO ty VALUES
+  (1, 2, 3, 4, 5, 1.5, 2.5, 3.5, 'text', true, DATE '2024-01-01', TIMESTAMP '2024-01-01 10:00:00', [1,2,3]),
+  (-1, -2, -3, -4, -5, -1.5, -2.5, -3.5, 'more', false, DATE '2025-06-15', TIMESTAMP '2025-06-15 23:59:59', [4,5])
+
+statement ok
+CHECKPOINT
+
+statement ok
+PRAGMA git4data_create_snapshot('ty_snap')
+
+statement ok
+DELETE FROM ty WHERE ti = 1
+
+statement ok
+UPDATE ty SET s = 'changed' WHERE ti = -1
+
+statement ok
+CHECKPOINT
+
+# the current state lost one row and the surviving row was updated
+query II
+SELECT count(*), min(s) FROM ty
+----
+1	changed
+
+# the snapshot still has both rows and the pre-update value
+query III
+SELECT count(*), min(ti), max(s) FROM ty AT (SNAPSHOT => 'ty_snap')
+----
+2	-1	text
+
+# every column family round-trips through a snapshot read
+query IIIII
+SELECT ti, s, b, dt, l FROM ty AT (SNAPSHOT => 'ty_snap') WHERE ti = 1
+----
+1	text	true	2024-01-01	[1, 2, 3]
+
+# numeric families
+query IIIII
+SELECT ti, si, i, bi, h FROM ty AT (SNAPSHOT => 'ty_snap') WHERE ti = 1
+----
+1	2	3	4	5
+
+query II
+SELECT f, d FROM ty AT (SNAPSHOT => 'ty_snap') WHERE ti = 1
+----
+1.5	2.5
+
+query I
+SELECT dec FROM ty AT (SNAPSHOT => 'ty_snap') WHERE ti = 1
+----
+3.5000
+
+query I
+SELECT ts FROM ty AT (SNAPSHOT => 'ty_snap') WHERE ti = 1
+----
+2024-01-01 10:00:00
+
+# negative values survive too
+query IIIII
+SELECT ti, si, i, bi, h FROM ty AT (SNAPSHOT => 'ty_snap') WHERE ti = -1
+----
+-1	-2	-3	-4	-5
