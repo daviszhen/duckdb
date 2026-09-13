@@ -1468,6 +1468,16 @@ void RowGroupCollection::InitializeVacuumState(CollectionCheckpointState &checkp
 	auto options = checkpoint_state.writer.GetCheckpointOptions();
 	// currently we can only vacuum deletes if we are doing a full checkpoint
 	state.can_vacuum_deletes = options.type != CheckpointType::CONCURRENT_CHECKPOINT;
+	if (state.can_vacuum_deletes) {
+		// a pinned snapshot still needs the rows deleted at or after its bound, and vacuuming them
+		// away would leave that snapshot unreadable. The condition that forces a concurrent
+		// checkpoint has to hold vacuum back too, because the type alone does not carry it: an
+		// in-memory table checkpoints as VACUUM_ONLY, which reclaims deletes like a full one does.
+		auto &transaction_manager = DuckTransactionManager::Get(checkpoint_state.writer.GetAttached());
+		if (transaction_manager.GetLastCommit() >= options.retention_bound) {
+			state.can_vacuum_deletes = false;
+		}
+	}
 	if (!state.can_vacuum_deletes) {
 		return;
 	}

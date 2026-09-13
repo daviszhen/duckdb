@@ -1,0 +1,44 @@
+# name: test/sql/git4data/pinned_checkpoint.test
+# description: A checkpoint must not reclaim rows a pinned snapshot still needs
+# group: [git4data]
+
+statement ok
+CREATE TABLE t AS SELECT range AS i FROM range(100)
+
+statement ok
+CHECKPOINT
+
+statement ok
+PRAGMA git4data_create_snapshot('snap_01')
+
+statement ok
+DELETE FROM t WHERE i <= 50
+
+# Every checkpoint below runs with the pin held. Vacuuming the deleted rows away here would
+# leave the pinned image unreadable, which is what this guards.
+statement ok
+CHECKPOINT
+
+statement ok
+INSERT INTO t SELECT range FROM range(40)
+
+statement ok
+CHECKPOINT
+
+# The pinned image is the table as it was, so all 100 rows are still visible through it.
+query I
+SELECT count(*) FROM t AT (SNAPSHOT => 'snap_01')
+----
+100
+
+# The current state has the 51 deletes and the 40 inserts applied.
+query I
+SELECT count(*) FROM t
+----
+89
+
+# The deletes keep their ids, so a read at a bound past them sees them disappear.
+query I
+SELECT count(*) FROM git4data_snapshot_scan('t', 'snap_01')
+----
+100
