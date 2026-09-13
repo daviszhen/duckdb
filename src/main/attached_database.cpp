@@ -390,6 +390,11 @@ void AttachedDatabase::Close(const DatabaseCloseAction action) {
 			if (should_checkpoint) {
 				CheckpointOptions options;
 				options.wal_action = CheckpointWALAction::DELETE_WAL;
+				// a pin outlives this process through the registry, so the ids its history needs
+				// still have to reach disk here
+				auto &tm = DuckTransactionManager::Get(*this);
+				options.retention_bound = tm.LowestRetentionBound();
+				options.id_retention_bound = tm.PinnedBound();
 				storage->CreateCheckpoint(QueryContext(), options);
 			}
 		}

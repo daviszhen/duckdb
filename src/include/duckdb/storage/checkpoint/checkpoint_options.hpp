@@ -31,6 +31,12 @@ struct CheckpointOptions {
 	//! Deletes at or after this bound still have to stay distinguishable, so their ids are
 	//! written to disk. Held down by a pinned snapshot; AllCommitted() when nothing is pinned.
 	VisibilityBound retention_bound = VisibilityBound::AllCommitted();
+	//! The bound below which a delete or insert id has to be written to disk. Only a pinned
+	//! snapshot outlives the file, and only it can need an id the reloaded timeline cannot
+	//! otherwise reconstruct, so active transactions are deliberately not part of this bound.
+	//! Keeping it AllCommitted() while nothing is pinned leaves the compact id-free forms in
+	//! use, which is what an unpinned database writes.
+	VisibilityBound id_retention_bound = VisibilityBound::AllCommitted();
 	//! The WAL lock - in case we are holding it during the entire checkpoint.
 	//! This is only required if we are doing a checkpoint instead of writing to the WAL
 	optional_ptr<unique_lock<mutex>> wal_lock;

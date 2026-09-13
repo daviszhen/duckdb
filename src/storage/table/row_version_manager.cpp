@@ -248,7 +248,7 @@ vector<MetaBlockPointer> RowVersionManager::Checkpoint(RowGroupWriter &writer) {
 	// bound has to keep its id, or a pinned reader would see it as visible to everyone.
 	bool pending_inserts = false;
 	for (auto &info : vector_info) {
-		if (info && info->HasPendingInserts(options.retention_bound)) {
+		if (info && info->HasPendingInserts(options.id_retention_bound)) {
 			pending_inserts = true;
 			break;
 		}
@@ -268,7 +268,7 @@ vector<MetaBlockPointer> RowVersionManager::Checkpoint(RowGroupWriter &writer) {
 			continue;
 		}
 		if (!chunk_info->HasDeletes(options.visibility_bound) &&
-		    !chunk_info->HasPendingInserts(options.retention_bound)) {
+		    !chunk_info->HasPendingInserts(options.id_retention_bound)) {
 			// nothing here matters to any reader
 			continue;
 		}
@@ -285,7 +285,7 @@ vector<MetaBlockPointer> RowVersionManager::Checkpoint(RowGroupWriter &writer) {
 			auto &vector_idx = entry.first;
 			auto &chunk_info = entry.second.get();
 			metadata_writer.Write<idx_t>(vector_idx);
-			chunk_info.Write(metadata_writer, options.visibility_bound, options.retention_bound);
+			chunk_info.Write(metadata_writer, options.visibility_bound, options.id_retention_bound);
 		}
 		metadata_writer.Flush();
 	}

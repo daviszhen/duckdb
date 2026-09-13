@@ -304,6 +304,7 @@ void DuckTransactionManager::Checkpoint(ClientContext &context, bool force) {
 	}
 	CheckpointOptions options;
 	options.retention_bound = LowestRetentionBound();
+	options.id_retention_bound = PinnedBound();
 	if (snapshots.IsDirty()) {
 		// the registry changed and is not on disk yet; a checkpoint that skips its body
 		// because the WAL is empty would leave it there
@@ -518,6 +519,7 @@ ErrorData DuckTransactionManager::CommitTransaction(ClientContext &context, Tran
 		// every checkpoint has to know what a pinned snapshot still needs, not just the ones
 		// an explicit CHECKPOINT triggers - an automatic one writes the same state to disk
 		options.retention_bound = LowestRetentionBound();
+		options.id_retention_bound = PinnedBound();
 		options.wal_lock = held_wal_lock.owns_lock() ? &held_wal_lock : nullptr;
 		auto &storage_manager = db.GetStorageManager();
 		try {

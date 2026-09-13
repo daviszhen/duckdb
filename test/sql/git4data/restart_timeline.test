@@ -11,37 +11,33 @@ statement ok
 CHECKPOINT
 
 statement ok
-SET immediate_transaction_mode=true
+PRAGMA git4data_create_snapshot('s1')
 
-# con1 stays open, so it holds the retention bound down while con2 commits and checkpoints.
-# That is what makes the row groups keep their delete ids on disk instead of the id-free
-# forms - the ids are a commit id from this process's timeline.
-statement ok con1
-BEGIN
-
-statement ok con2
+# The pin holds the id bound down, so this delete's ids reach the disk instead of the
+# compact id-free forms.
+statement ok
 DELETE FROM t WHERE i < 400
 
-statement ok con2
+statement ok
 CHECKPOINT
 
-query I con1
-SELECT count(*) FROM t
-----
-1000
+# Dropping the pin leaves those ids on disk with no pin left to carry the counter that
+# produced them, which is the case that regressed.
+statement ok
+PRAGMA git4data_drop_snapshot('s1')
 
-statement ok con1
-COMMIT
+statement ok
+CHECKPOINT
 
 query I
 SELECT count(*) FROM t
 ----
 600
 
-# The delete has to still apply after the restart. The counter that produced those ids
-# starts from a fixed point in every process, so a restart that does not restore it hands
-# out bounds below ids already in the file, the delete compares as not yet committed, and
-# the rows come back. No pin is held here, which is what makes this the case that regressed.
+# The ids on disk are commit ids from the previous process's timeline. The counter starts
+# from a fixed point in every process, so a restart that does not restore it hands out
+# bounds below ids already in the file: the delete compares as not yet committed and the
+# rows come back.
 restart
 
 query I
