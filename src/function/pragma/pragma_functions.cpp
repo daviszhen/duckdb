@@ -243,6 +243,50 @@ static string PragmaGit4DataProbe(ClientContext &context, const FunctionParamete
 	return Git4DataProbe(context, parameters.values[0].ToString(), TableScanType::TABLE_SCAN_BASE_ROWS);
 }
 
+//! Base data with updates skipped, read at an explicitly given visibility bound. Sweeping
+//! the bound reveals the effective delete and insert ids: the count changes where the bound
+//! crosses an id, which is what tells the two runners apart.
+static string PragmaGit4DataProbeAt(ClientContext &context, const FunctionParameters &parameters) {
+	auto table_name = parameters.values[0].ToString();
+	auto bound_value = parameters.values[1].GetValue<int64_t>();
+
+	auto &table = Catalog::GetEntry<TableCatalogEntry>(context, QualifiedName(Identifier(table_name)));
+	auto &storage = table.GetStorage();
+	auto &row_groups = *storage.GetRowGroupCollection();
+
+	vector<StorageIndex> column_ids;
+	vector<LogicalType> scan_types;
+	for (auto &column : table.GetColumns().Logical()) {
+		column_ids.emplace_back(column.Physical().index);
+		scan_types.push_back(column.Type());
+	}
+	column_ids.emplace_back(COLUMN_IDENTIFIER_ROW_ID);
+	scan_types.push_back(LogicalType::ROW_TYPE);
+
+	DataChunk scan_chunk;
+	scan_chunk.Initialize(Allocator::Get(context), scan_types);
+
+	TableScanState state;
+	state.Initialize(column_ids, nullptr);
+	QueryContext query_context;
+	row_groups.InitializeScan(query_context, state.table_state, column_ids, nullptr);
+
+	idx_t count = 0;
+	while (true) {
+		scan_chunk.Reset();
+		ScanOptions options(TransactionData(MAX_TRANSACTION_ID, VisibilityBound::Before(NumericCast<transaction_t>(bound_value))));
+		options.insert_type = InsertedScanType::ALL_ROWS;
+		options.delete_type = DeletedScanType::OMIT_COMMITTED_DELETES;
+		options.update_type = UpdateScanType::SKIP_UPDATES;
+		state.table_state.Scan(options, scan_chunk);
+		if (scan_chunk.size() == 0) {
+			break;
+		}
+		count += scan_chunk.size();
+	}
+	return StringUtil::Format("SELECT %llu::UBIGINT AS rows_visible_at_bound", count);
+}
+
 //! Every physical row including all deleted ones, to tell "the data is gone" apart from
 //! "the data is there but filtered out"
 static string PragmaGit4DataProbeAll(ClientContext &context, const FunctionParameters &parameters) {
@@ -283,6 +327,8 @@ void PragmaFunctions::RegisterFunction(BuiltinFunctions &set) {
 	    PragmaFunction::PragmaCall("git4data_probe", PragmaGit4DataProbe, {LogicalType::VARCHAR}));
 	set.AddFunction(
 	    PragmaFunction::PragmaCall("git4data_probe_all", PragmaGit4DataProbeAll, {LogicalType::VARCHAR}));
+	set.AddFunction(PragmaFunction::PragmaCall("git4data_probe_at", PragmaGit4DataProbeAt,
+	                                           {LogicalType::VARCHAR, LogicalType::BIGINT}));
 
 	set.AddFunction(PragmaFunction::PragmaStatement("enable_progress_bar", PragmaEnableProgressBar));
 	set.AddFunction(PragmaFunction::PragmaStatement("disable_progress_bar", PragmaDisableProgressBar));
