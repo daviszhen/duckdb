@@ -294,17 +294,21 @@ void SingleFileCheckpointWriter::CreateCheckpoint() {
 	// protects; losing it across a restart would silently release that history. Writing it
 	// before the header makes the header write the commit point, so the block and the
 	// pointer to it become visible together.
+	//
+	// The block is written even with no pins, because it is also where the commit-id counter
+	// is recorded. Row groups on disk carry commit ids, and those ids only mean anything
+	// against the timeline that produced them: the counter starts from a fixed point in every
+	// process, so without restoring it a counter that restarts below an id already in the file
+	// makes that deletion compare as not yet committed, and the deleted rows come back.
 	idx_t registry_block = 0;
 	idx_t registry_offset = 0;
 	auto start_timestamp = transaction_manager.GetStartTimestampCounter();
 	auto pinned_snapshots = transaction_manager.snapshots.List();
-	if (!pinned_snapshots.empty()) {
+	{
 		auto registry_writer = make_uniq<MetadataWriter>(metadata_manager);
 		auto registry_pointer = registry_writer->GetMetaBlockPointer();
 		BinarySerializer registry_serializer(*registry_writer, SerializationOptions(db));
 		registry_serializer.Begin();
-		// the commit-id counter goes with the pins: the ids below are commit ids, and those
-		// restart from a fixed point in every process
 		registry_serializer.WriteProperty<uint64_t>(99, "start_timestamp", start_timestamp);
 		registry_serializer.WriteList(100, "snapshots", pinned_snapshots.size(), [&](Serializer::List &list, idx_t i) {
 			list.WriteObject([&](Serializer &obj) {

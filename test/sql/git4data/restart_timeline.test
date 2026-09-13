@@ -1,0 +1,50 @@
+# name: test/sql/git4data/restart_timeline.test
+# description: Commit ids written to disk stay meaningful across a restart
+# group: [git4data]
+
+load {TEST_DIR}/restart_timeline.db
+
+statement ok
+CREATE TABLE t AS SELECT range AS i FROM range(1000)
+
+statement ok
+CHECKPOINT
+
+statement ok
+SET immediate_transaction_mode=true
+
+# con1 stays open, so it holds the retention bound down while con2 commits and checkpoints.
+# That is what makes the row groups keep their delete ids on disk instead of the id-free
+# forms - the ids are a commit id from this process's timeline.
+statement ok con1
+BEGIN
+
+statement ok con2
+DELETE FROM t WHERE i < 400
+
+statement ok con2
+CHECKPOINT
+
+query I con1
+SELECT count(*) FROM t
+----
+1000
+
+statement ok con1
+COMMIT
+
+query I
+SELECT count(*) FROM t
+----
+600
+
+# The delete has to still apply after the restart. The counter that produced those ids
+# starts from a fixed point in every process, so a restart that does not restore it hands
+# out bounds below ids already in the file, the delete compares as not yet committed, and
+# the rows come back. No pin is held here, which is what makes this the case that regressed.
+restart
+
+query I
+SELECT count(*) FROM t
+----
+600
