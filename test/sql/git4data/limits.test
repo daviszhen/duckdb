@@ -1,0 +1,180 @@
+# name: test/sql/git4data/limits.test
+# description: Quotas bound how many snapshots and branches one database keeps
+# group: [git4data]
+
+load {TEST_DIR}/limits.db
+
+statement ok
+CREATE TABLE t(i INTEGER);
+
+statement ok
+INSERT INTO t SELECT range FROM range(10);
+
+# Without a quota both kinds of reference are unlimited.
+query IIII
+PRAGMA git4data_limits
+----
+-1	0	-1	0
+
+# A quota counts the references that exist, not the commits they pin.
+statement ok
+PRAGMA git4data_limit('snapshot', 2);
+
+statement ok
+PRAGMA git4data_create_snapshot('s1');
+
+statement ok
+PRAGMA git4data_create_snapshot('s2');
+
+query IIII
+PRAGMA git4data_limits
+----
+2	2	-1	0
+
+# The next reference is refused while the quota is full.
+statement error
+PRAGMA git4data_create_snapshot('s3')
+----
+<REGEX>:.*At most 2 snapshots are allowed for this database, and 2 already exist.*
+
+# Dropping a reference frees its slot again.
+statement ok
+PRAGMA git4data_drop_snapshot('s1');
+
+statement ok
+PRAGMA git4data_create_snapshot('s3');
+
+query IIII
+PRAGMA git4data_limits
+----
+2	2	-1	0
+
+# The references that already exist keep working; it is only new ones that are refused.
+query I
+SELECT count(*) FROM t AT (SNAPSHOT => 's2')
+----
+10
+
+# Zero disables new references of that kind without taking the existing ones away.
+statement ok
+PRAGMA git4data_limit('snapshot', 0);
+
+statement error
+PRAGMA git4data_create_snapshot('s4')
+----
+<REGEX>:.*snapshots are disabled for this database.*
+
+query I
+SELECT count(*) FROM t AT (SNAPSHOT => 's2')
+----
+10
+
+# The recovery window holds a reference of its own that the user never asked for, so it does not
+# consume the quota.
+statement ok
+PRAGMA git4data_pitr(3650);
+
+query IIII
+PRAGMA git4data_limits
+----
+0	2	-1	0
+
+statement ok
+PRAGMA git4data_pitr_off;
+
+# -1 restores unlimited creation.
+statement ok
+PRAGMA git4data_limit('snapshot', -1);
+
+statement ok
+PRAGMA git4data_create_snapshot('s4');
+
+# Only -1, 0 and positive numbers mean anything.
+statement error
+PRAGMA git4data_limit('snapshot', -2)
+----
+<REGEX>:.*A limit is -1 for unlimited, 0 to disable, or a positive number.*
+
+# A limit may be lowered below the number of references that already exist; that only stops further
+# creation, and the excess has to be dropped by hand.
+statement ok
+PRAGMA git4data_limit('snapshot', 1);
+
+query IIII
+PRAGMA git4data_limits
+----
+1	3	-1	0
+
+statement ok
+PRAGMA git4data_limit('snapshot', -1);
+
+# Branches are bounded the same way.
+statement ok
+PRAGMA git4data_create_branch('b1', '');
+
+statement ok
+PRAGMA git4data_limit('branch', 1);
+
+statement error
+PRAGMA git4data_create_branch('b2', '')
+----
+<REGEX>:.*At most 1 branches are allowed for this database, and 1 already exist.*
+
+statement ok
+PRAGMA git4data_limit('branch', 0);
+
+statement error
+PRAGMA git4data_create_branch('b2', '')
+----
+<REGEX>:.*branches are disabled for this database.*
+
+statement ok
+PRAGMA git4data_limit('branch', -1);
+
+statement ok
+PRAGMA git4data_create_branch('b2', '');
+
+query IIII
+PRAGMA git4data_limits
+----
+-1	3	-1	2
+
+# The quota is part of the database, so a checkpoint carries it into the file.
+statement ok
+PRAGMA git4data_limit('snapshot', 3);
+
+statement ok
+PRAGMA git4data_limit('branch', 2);
+
+statement ok
+CHECKPOINT;
+
+restart
+
+query IIII
+PRAGMA git4data_limits
+----
+3	3	2	2
+
+# And it is still in force after the restart.
+statement error
+PRAGMA git4data_create_snapshot('s5')
+----
+<REGEX>:.*At most 3 snapshots are allowed for this database, and 3 already exist.*
+
+statement error
+PRAGMA git4data_create_branch('b3', '')
+----
+<REGEX>:.*At most 2 branches are allowed for this database, and 2 already exist.*
+
+# Raising it again works after the restart too.
+statement ok
+PRAGMA git4data_limit('snapshot', 4);
+
+statement ok
+PRAGMA git4data_create_snapshot('s5');
+
+query IIII
+PRAGMA git4data_limits
+----
+4	4	2	2

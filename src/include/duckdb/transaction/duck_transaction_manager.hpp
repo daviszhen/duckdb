@@ -192,6 +192,13 @@ public:
 	//! Pinned snapshots keep superseded versions readable
 	SnapshotRegistry snapshots;
 
+	//! Caps on how many references the database may hold: -1 unlimited, 0 disabled, positive is the
+	//! most. They bound how much history the reclamation has to keep. The window is not counted.
+	int64_t snapshot_limit = -1;
+	int64_t branch_limit = -1;
+	//! Snapshots the user asked for, which is every one but the recovery window's own
+	idx_t UserSnapshotCount() const;
+
 	//! A point-in-time recovery window: one reference that is moved forward as it falls out of the
 	//! window, so the last `window` of history stays reachable without anyone remembering to take a
 	//! reference. A window of zero moves it at every checkpoint, which keeps nothing.

@@ -412,6 +412,15 @@ DuckTransactionManager::GetCheckpointType(DuckTransaction &transaction, const Un
 	return CheckpointDecision(checkpoint_type);
 }
 
+idx_t DuckTransactionManager::UserSnapshotCount() const {
+	auto count = snapshots.Count();
+	if (pitr_enabled && count > 0) {
+		// the recovery window holds one reference of its own, which the user did not ask for
+		count--;
+	}
+	return count;
+}
+
 void DuckTransactionManager::SetPitr(timestamp_t window, timestamp_t now) {
 	pitr_enabled = true;
 	pitr_window = window;

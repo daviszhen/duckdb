@@ -1,0 +1,109 @@
+# name: test/sql/git4data/branch_drop_storage.test
+# description: Dropping a materialized branch reclaims the storage that branch owned
+# group: [git4data]
+
+load {TEST_DIR}/branch_drop_storage.db
+
+statement ok
+CREATE TABLE t(k INTEGER PRIMARY KEY, v INTEGER);
+
+statement ok
+INSERT INTO t SELECT range, range FROM range(100);
+
+statement ok
+PRAGMA git4data_create_branch('feature', '');
+
+statement ok
+PRAGMA git4data_materialize('t', 'feature', 't_feature');
+
+statement ok
+INSERT INTO t_feature SELECT 1000 + range, range FROM range(50);
+
+query I
+SELECT count(*) FROM t_feature
+----
+150
+
+# Materializing gave the branch its own table; the source is untouched.
+query I
+SELECT count(*) FROM t
+----
+100
+
+query I
+SELECT count(*) FROM duckdb_tables() WHERE table_name = 't_feature'
+----
+1
+
+# Dropping the branch takes that table with it. The table was the branch's own copy of the line, so
+# leaving it behind would leak one table per branch ever dropped.
+statement ok
+PRAGMA git4data_drop_branch('feature');
+
+query I
+SELECT count(*) FROM duckdb_tables() WHERE table_name = 't_feature'
+----
+0
+
+query I
+SELECT count(*) FROM t
+----
+100
+
+# The source survives the whole episode, and stays writable.
+statement ok
+INSERT INTO t VALUES (999, 999);
+
+query I
+SELECT count(*) FROM t
+----
+101
+
+# The branch is gone from the registry, not merely its storage.
+query I
+SELECT count(*) FROM duckdb_tables() WHERE table_name = 't_feature'
+----
+0
+
+statement ok
+CHECKPOINT
+
+restart
+
+query I
+SELECT count(*) FROM t
+----
+101
+
+query I
+SELECT count(*) FROM duckdb_tables() WHERE table_name = 't_feature'
+----
+0
+
+# A branch pinned before the drop still reads, because its rows were the source's rows.
+statement ok
+PRAGMA git4data_create_branch('keep', '');
+
+statement ok
+PRAGMA git4data_materialize('t', 'keep', 't_keep');
+
+statement ok
+INSERT INTO t_keep SELECT 2000 + range, range FROM range(5);
+
+query I
+SELECT count(*) FROM t AT (BRANCH => 'keep')
+----
+106
+
+statement ok
+PRAGMA git4data_drop_branch('keep');
+
+query I
+SELECT count(*) FROM t
+----
+101
+
+query I
+SELECT count(*) FROM duckdb_tables() WHERE table_name = 't_keep'
+----
+0

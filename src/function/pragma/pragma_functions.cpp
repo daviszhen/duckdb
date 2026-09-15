@@ -527,6 +527,48 @@ static string PragmaGit4DataMerge(ClientContext &context, const FunctionParamete
 	return result;
 }
 
+//! Refuse one more reference when the database is at its limit. An exceeded limit stops new
+//! references without dropping any: what exists was paid for already.
+static void CheckGit4DataReferenceLimit(const string &plural, idx_t count, int64_t limit) {
+	if (limit < 0) {
+		return;
+	}
+	if (limit == 0) {
+		throw InvalidInputException("%s are disabled for this database", plural);
+	}
+	if (NumericCast<int64_t>(count) >= limit) {
+		throw InvalidInputException("At most %lld %s are allowed for this database, and %llu already exist",
+		                            (long long)limit, plural, (unsigned long long)count);
+	}
+}
+
+//! Set how many snapshots or branches this database may hold: -1 unlimited, 0 disabled, a positive
+//! number is the most. The recovery window's own reference is not counted.
+static void PragmaGit4DataLimit(ClientContext &context, const FunctionParameters &parameters) {
+	auto kind = StringUtil::Lower(parameters.values[0].ToString());
+	auto limit = parameters.values[1].GetValue<int64_t>();
+	if (limit < -1) {
+		throw InvalidInputException("A limit is -1 for unlimited, 0 to disable, or a positive number");
+	}
+	auto &transaction_manager = GetGit4DataTransactionManager(context);
+	if (kind == "snapshot") {
+		transaction_manager.snapshot_limit = limit;
+	} else if (kind == "branch") {
+		transaction_manager.branch_limit = limit;
+	} else {
+		throw InvalidInputException("Limits are set for \"snapshot\" or \"branch\", not \"%s\"", kind);
+	}
+}
+
+static string PragmaGit4DataLimits(ClientContext &context, const FunctionParameters &parameters) {
+	auto &transaction_manager = GetGit4DataTransactionManager(context);
+	return StringUtil::Format(
+	    "SELECT %lld::BIGINT AS snapshot_limit, %llu::UBIGINT AS snapshots, "
+	    "%lld::BIGINT AS branch_limit, %llu::UBIGINT AS branches",
+	    (long long)transaction_manager.snapshot_limit, (unsigned long long)transaction_manager.UserSnapshotCount(),
+	    (long long)transaction_manager.branch_limit, (unsigned long long)transaction_manager.branches.Count());
+}
+
 static void PragmaGit4DataCreateBranch(ClientContext &context, const FunctionParameters &parameters) {
 	auto name = parameters.values[0].ToString();
 	auto parent = parameters.values[1].ToString();
@@ -544,12 +586,15 @@ static void PragmaGit4DataCreateBranch(ClientContext &context, const FunctionPar
 		}
 		pin = parent_branch.pin;
 	}
+	CheckGit4DataReferenceLimit("branches", transaction_manager.branches.Count(), transaction_manager.branch_limit);
 	if (!transaction_manager.branches.Create(name, pin, parent, Timestamp::GetCurrentTimestamp())) {
 		throw InvalidInputException("Branch \"%s\" already exists", name);
 	}
 }
 
-static void PragmaGit4DataDropBranch(ClientContext &context, const FunctionParameters &parameters) {
+//! Drop a branch and the storage it was materialized into: that table is the branch's own copy, so
+//! leaving it behind would leak a table per branch ever dropped.
+static string PragmaGit4DataDropBranch(ClientContext &context, const FunctionParameters &parameters) {
 	auto name = parameters.values[0].ToString();
 	auto &transaction_manager = GetGit4DataTransactionManager(context);
 	Git4DataBranch existing;
@@ -560,7 +605,16 @@ static void PragmaGit4DataDropBranch(ClientContext &context, const FunctionParam
 		// a descendant still walks through this name to reach its ancestors
 		throw InvalidInputException("Branch \"%s\" still has branches descending from it", name);
 	}
+	string result;
+	for (auto &entry : existing.storage_tables) {
+		result += StringUtil::Format("DROP TABLE IF EXISTS %s;\n", KeywordHelper::WriteOptionallyQuoted(entry.second));
+	}
 	transaction_manager.branches.Drop(name);
+	if (result.empty()) {
+		// a branch with no storage of its own still has to return something to execute
+		return "SELECT 1 WHERE false";
+	}
+	return result;
 }
 
 static string PragmaGit4DataBranches(ClientContext &context, const FunctionParameters &parameters) {
@@ -608,6 +662,8 @@ static void PragmaGit4DataCreateSnapshot(ClientContext &context, const FunctionP
 	auto name = parameters.values[0].ToString();
 	auto &transaction_manager = GetGit4DataTransactionManager(context);
 	// Pin at the newest commit, keep everything committed so far readable
+	CheckGit4DataReferenceLimit("snapshots", transaction_manager.UserSnapshotCount(),
+	                            transaction_manager.snapshot_limit);
 	if (!transaction_manager.snapshots.Create(name, transaction_manager.GetLastCommit(),
 	                                          Timestamp::GetCurrentTimestamp())) {
 		throw InvalidInputException("Snapshot \"%s\" already exists", name);
@@ -826,6 +882,9 @@ void PragmaFunctions::RegisterFunction(BuiltinFunctions &set) {
 	set.AddFunction(PragmaFunction::PragmaCall("git4data_pitr", PragmaGit4DataPitr, {LogicalType::BIGINT}));
 	set.AddFunction(PragmaFunction::PragmaStatement("git4data_pitr_off", PragmaGit4DataPitrOff));
 	set.AddFunction(PragmaFunction::PragmaStatement("git4data_pitr_state", PragmaGit4DataPitrState));
+	set.AddFunction(
+	    PragmaFunction::PragmaCall("git4data_limit", PragmaGit4DataLimit, {LogicalType::VARCHAR, LogicalType::BIGINT}));
+	set.AddFunction(PragmaFunction::PragmaStatement("git4data_limits", PragmaGit4DataLimits));
 	set.AddFunction(PragmaFunction::PragmaStatement("git4data_state", PragmaGit4DataState));
 	set.AddFunction(PragmaFunction::PragmaCall("git4data_probe", PragmaGit4DataProbe, {LogicalType::VARCHAR}));
 	set.AddFunction(PragmaFunction::PragmaCall("git4data_probe_all", PragmaGit4DataProbeAll, {LogicalType::VARCHAR}));

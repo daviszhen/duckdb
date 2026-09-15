@@ -315,6 +315,8 @@ void SingleFileCheckpointWriter::CreateCheckpoint() {
 		// reference behind and never move it again
 		registry_serializer.WriteProperty<bool>(103, "pitr_enabled", transaction_manager.PitrEnabled());
 		registry_serializer.WriteProperty<int64_t>(104, "pitr_window", transaction_manager.PitrWindow().value);
+		registry_serializer.WriteProperty<int64_t>(105, "snapshot_limit", transaction_manager.snapshot_limit);
+		registry_serializer.WriteProperty<int64_t>(106, "branch_limit", transaction_manager.branch_limit);
 		registry_serializer.WriteList(100, "snapshots", pinned_snapshots.size(), [&](Serializer::List &list, idx_t i) {
 			list.WriteObject([&](Serializer &obj) {
 				obj.WriteProperty<string>(100, "name", pinned_snapshots[i].name);
@@ -493,6 +495,10 @@ void SingleFileCheckpointReader::LoadFromStorage() {
 		if (pitr_enabled) {
 			transaction_manager.RestorePitr(timestamp_t(pitr_window));
 		}
+		transaction_manager.snapshot_limit =
+		    registry_deserializer.ReadPropertyWithExplicitDefault<int64_t>(105, "snapshot_limit", -1);
+		transaction_manager.branch_limit =
+		    registry_deserializer.ReadPropertyWithExplicitDefault<int64_t>(106, "branch_limit", -1);
 		registry_deserializer.ReadList(100, "snapshots", [&](Deserializer::List &list, idx_t i) {
 			return list.ReadObject([&](Deserializer &obj) {
 				auto name = obj.ReadProperty<string>(100, "name");
