@@ -1553,14 +1553,11 @@ idx_t RowGroup::GetCommittedRowCount() {
 	return vinfo->GetRowCount(options, count);
 }
 
-idx_t RowGroup::GetRowCountAtBound(VisibilityBound bound) {
+idx_t RowGroup::GetRowCountFor(ScanOptions options) {
 	auto vinfo = GetVersionInfo();
 	if (!vinfo) {
 		return count;
 	}
-	ScanOptions options(TransactionData(0, bound));
-	options.insert_type = InsertedScanType::ALL_ROWS;
-	options.delete_type = DeletedScanType::OMIT_COMMITTED_DELETES;
 	return vinfo->GetRowCount(options, count);
 }
 

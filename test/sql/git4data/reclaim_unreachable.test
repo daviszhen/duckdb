@@ -1,0 +1,121 @@
+# name: test/sql/git4data/reclaim_unreachable.test
+# description: A checkpoint reclaims the deleted rows no reference can reach, and keeps the ones one can
+# group: [git4data]
+
+load {TEST_DIR}/reclaim_unreachable.db
+
+statement ok
+CREATE TABLE t AS SELECT range AS i, range AS v FROM range(400000)
+
+statement ok
+CHECKPOINT
+
+# The reference is taken before round two exists, so none of round two is reachable from it: a row of
+# round two that is later deleted is reachable by nobody at all.
+statement ok
+PRAGMA git4data_create_snapshot('pin')
+
+statement ok
+INSERT INTO t SELECT 1000000 + range, 1000000 + range FROM range(400000)
+
+statement ok
+DELETE FROM t WHERE i % 2 = 1
+
+query III
+SELECT (SELECT count(*) FROM t), (SELECT count(*) FROM t AT (SNAPSHOT => 'pin')),
+       (SELECT sum("count") FROM pragma_storage_info('t') WHERE column_id = 0 AND segment_type <> 'VALIDITY')
+----
+400000	400000	615680
+
+statement ok
+CHECKPOINT
+
+query III
+SELECT (SELECT count(*) FROM t), (SELECT count(*) FROM t AT (SNAPSHOT => 'pin')),
+       (SELECT sum("count") FROM pragma_storage_info('t') WHERE column_id = 0 AND segment_type <> 'VALIDITY')
+----
+400000	400000	615680
+
+# What the reference reads is untouched: a row it can reach is never reclaimed, whatever the current
+# view says about it.
+query II
+SELECT count(*), sum(i) FROM t AT (SNAPSHOT => 'pin')
+----
+400000	79999800000
+
+query II
+SELECT count(*), sum(i) FROM t
+----
+400000	279999600000
+
+# A second reference taken after round two *can* reach those rows, so they have to stay.
+statement ok
+PRAGMA git4data_drop_snapshot('pin')
+
+statement ok
+CHECKPOINT
+
+statement ok
+PRAGMA git4data_create_snapshot('lo')
+
+statement ok
+INSERT INTO t SELECT 2000000 + range, 2000000 + range FROM range(400000)
+
+statement ok
+PRAGMA git4data_create_snapshot('hi')
+
+statement ok
+DELETE FROM t WHERE i >= 2000000
+
+query II
+SELECT (SELECT count(*) FROM t AT (SNAPSHOT => 'lo')), (SELECT count(*) FROM t AT (SNAPSHOT => 'hi'))
+----
+400000	800000
+
+statement ok
+CHECKPOINT
+
+# Round three's rows are deleted, but the reference taken after they were inserted still reads every
+# one of them, so the checkpoint has to keep them: reaching one reference is enough, and it is the
+# highest reference that decides whether a row was there early enough for anyone.
+query II
+SELECT (SELECT count(*) FROM t AT (SNAPSHOT => 'lo')), (SELECT count(*) FROM t AT (SNAPSHOT => 'hi'))
+----
+400000	800000
+
+query I
+SELECT sum("count") FROM pragma_storage_info('t') WHERE column_id = 0 AND segment_type <> 'VALIDITY'
+----
+800000
+
+# The current view lost all of round three, and neither reference lost anything.
+query II
+SELECT (SELECT count(*) FROM t),
+       (SELECT sum("count") FROM pragma_storage_info('t') WHERE column_id = 0 AND segment_type <> 'VALIDITY')
+----
+400000	800000
+
+# Nothing left to reclaim from round three while a reference can still reach it: a further checkpoint
+# only confirms the state.
+statement ok
+CHECKPOINT
+
+query III
+SELECT (SELECT count(*) FROM t), (SELECT count(*) FROM t AT (SNAPSHOT => 'lo')),
+       (SELECT count(*) FROM t AT (SNAPSHOT => 'hi'))
+----
+400000	400000	800000
+
+# Dropping the reference that was holding round three lets those rows go at last: the rows themselves,
+# not just the reference.
+statement ok
+PRAGMA git4data_drop_snapshot('hi')
+
+statement ok
+CHECKPOINT
+
+query III
+SELECT (SELECT count(*) FROM t), (SELECT count(*) FROM t AT (SNAPSHOT => 'lo')),
+       (SELECT sum("count") FROM pragma_storage_info('t') WHERE column_id = 0 AND segment_type <> 'VALIDITY')
+----
+400000	400000	400000

@@ -213,9 +213,9 @@ public:
 	RowGroupWriteData WriteToDisk(RowGroupWriteInfo &info) const;
 	//! Returns the number of committed rows (count - committed deletes)
 	idx_t GetCommittedRowCount();
-	//! The number of rows a reader pinned at the given bound still sees: the rows not deleted below it,
-	//! which includes rows deleted at or after it. GetCommittedRowCount is this at AllCommitted.
-	idx_t GetRowCountAtBound(VisibilityBound bound);
+	//! The number of rows a scan with these options would return. A vacuum pass plans with the options
+	//! it scans with, so the row groups it creates have room for exactly the rows that come.
+	idx_t GetRowCountFor(ScanOptions options);
 	//! Returns the number of rows visible to the given transaction
 	idx_t GetVisibleRowCount(TransactionData transaction);
 	//! Count visible rows in a scan assignment starting at a vector boundary

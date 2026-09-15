@@ -66,6 +66,49 @@ ChunkVectorInfo::~ChunkVectorInfo() {
 	}
 }
 
+//! Whether a retention pass has to keep a row. It keeps a row the scan's own bound still shows, and
+//! otherwise it keeps it when some reader's bound can fall inside (insert_id, delete_id]: at or above
+//! the highest reader bound the row came after every reader, and below the lowest one it was deleted
+//! before every reader. Both are invisible to all of them, and to the view the scan reads at.
+static bool KeepReachableRow(const ScanOptions &options, transaction_t insert_id, transaction_t delete_id) {
+	if (delete_id >= options.transaction.view.visibility_bound) {
+		// not deleted as far as the bound this scan reads at is concerned
+		return true;
+	}
+	if (insert_id >= options.retained_ceiling) {
+		// every reader reads from before this row existed
+		return false;
+	}
+	return delete_id >= options.retained_floor;
+}
+
+idx_t ChunkVectorInfo::GetReachableSelVector(const ScanOptions &options, optional_ptr<SelectionVector> sel_vector,
+                                             idx_t max_count) const {
+	if (HasConstantInsertionId() && HasConstantDeleteId()) {
+		// one decision for the whole vector - the bulk-loaded shape, and the common one
+		if (!KeepReachableRow(options, ConstantInsertId(), ConstantDeleteId())) {
+			return 0;
+		}
+		if (sel_vector) {
+			for (idx_t i = 0; i < max_count; i++) {
+				sel_vector->set_index(i, i);
+			}
+		}
+		return max_count;
+	}
+	idx_t count = 0;
+	for (idx_t i = 0; i < max_count; i++) {
+		if (!KeepReachableRow(options, GetInsertId(i), GetDeleteId(i))) {
+			continue;
+		}
+		if (sel_vector) {
+			sel_vector->set_index(count, i);
+		}
+		count++;
+	}
+	return count;
+}
+
 template <class INSERT_OP, class DELETE_OP>
 idx_t ChunkVectorInfo::TemplatedGetSelVector(const SnapshotView &view, optional_ptr<SelectionVector> sel_vector,
                                              idx_t max_count) const {
@@ -214,6 +257,11 @@ idx_t ChunkVectorInfo::TemplatedGetSelVector(const SnapshotView &view, optional_
 idx_t ChunkVectorInfo::GetSelVector(ScanOptions options, optional_ptr<SelectionVector> sel_vector,
                                     idx_t max_count) const {
 	auto &transaction = options.transaction;
+	if (options.delete_type == DeletedScanType::OMIT_UNREACHABLE_DELETES) {
+		// This one asks about a row's whole range of visibility rather than one threshold, so it reads
+		// both ids per row. Vacuum is what uses it, where a per-row read is not on any hot path.
+		return GetReachableSelVector(options, sel_vector, max_count);
+	}
 	if (options.insert_type == InsertedScanType::STANDARD) {
 		if (options.delete_type == DeletedScanType::STANDARD) {
 			return TemplatedGetSelVector<StandardInsertOperator, StandardDeleteOperator>(transaction.view, sel_vector,

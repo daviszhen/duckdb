@@ -130,6 +130,10 @@ public:
 	static unique_ptr<ChunkVectorInfo> Read(FixedSizeAllocator &allocator, ReadStream &reader);
 
 private:
+	//! The rows a retention pass has to keep, for DeletedScanType::OMIT_UNREACHABLE_DELETES
+	idx_t GetReachableSelVector(const ScanOptions &options, optional_ptr<SelectionVector> sel_vector,
+	                            idx_t max_count) const;
+
 	template <class INSERT_OP, class DELETE_OP>
 	idx_t TemplatedGetSelVector(const SnapshotView &view, optional_ptr<SelectionVector> sel_vector,
 	                            idx_t max_count) const;

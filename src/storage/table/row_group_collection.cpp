@@ -1290,6 +1290,15 @@ private:
 
 struct VacuumState {
 	bool can_vacuum_deletes = true;
+	//! Whether a deleted row can still be reached by a reference or an active transaction, in which
+	//! case the pass has to keep what they reach rather than only what the last commit left
+	bool reading_references = false;
+	//! The three bounds the pass plans and scans with: the commit the current view stops at, the lowest
+	//! bound any reader reads at, and the highest. Planning and scanning with the same three is what
+	//! keeps the rows it counts and the rows it moves the same rows.
+	VisibilityBound committed_bound = VisibilityBound::AllCommitted();
+	VisibilityBound retained_floor = VisibilityBound::AllCommitted();
+	VisibilityBound retained_ceiling = VisibilityBound::AllCommitted();
 	bool can_change_row_ids = false;
 	//! How vacuum handles the table's indexes when it changes rowids.
 	VacuumIndexStrategy index_strategy = VacuumIndexStrategy::KEEP_ROW_IDS;
@@ -1299,6 +1308,24 @@ struct VacuumState {
 	idx_t next_vacuum_idx = 0;
 	vector<optional_idx> row_group_counts;
 };
+
+//! The scan options a vacuum pass plans and scans with. A row a reference or an active transaction
+//! can still reach has to survive, and everything else may go - which is what the reachability mode
+//! asks, using the two outer reader bounds.
+static ScanOptions VacuumScanOptions(const VacuumState &state) {
+	ScanOptions options(TransactionData(MAX_TRANSACTION_ID, state.committed_bound));
+	options.insert_type = InsertedScanType::ALL_ROWS;
+	options.update_type = UpdateScanType::DISALLOW_UPDATES;
+	if (!state.reading_references) {
+		// nothing reads below the last commit: only the deletes it made are reclaimable
+		options.delete_type = DeletedScanType::OMIT_COMMITTED_DELETES;
+		return options;
+	}
+	options.delete_type = DeletedScanType::OMIT_UNREACHABLE_DELETES;
+	options.retained_floor = state.retained_floor;
+	options.retained_ceiling = state.retained_ceiling;
+	return options;
+}
 
 class VacuumTask : public BaseCheckpointTask {
 public:
@@ -1354,15 +1381,9 @@ public:
 		auto &initial_append_row_group = *new_row_groups[current_append_idx];
 		RowGroup::InitializeAppend(initial_append_row_group, append_state.row_group_append_state);
 
-		// Scan at the very bound this pass was planned with, so the rows the plan counted and the rows
-		// the scan hands over are the same rows even if a reference is dropped while it runs. A row
-		// deleted at or after that bound is still a row to a reference, so it has to move into the new
-		// row group instead of being reclaimed, and a row inserted after it moves with it.
-		ScanOptions vacuum_scan_options(
-		    TransactionData(MAX_TRANSACTION_ID, checkpoint_state.writer.GetCheckpointOptions().retention_bound));
-		vacuum_scan_options.insert_type = InsertedScanType::ALL_ROWS;
-		vacuum_scan_options.delete_type = DeletedScanType::OMIT_COMMITTED_DELETES;
-		vacuum_scan_options.update_type = UpdateScanType::DISALLOW_UPDATES;
+		// The very options this pass was planned with, so the rows the plan counted and the rows the
+		// scan hands over are the same rows.
+		auto vacuum_scan_options = VacuumScanOptions(vacuum_state);
 
 		TableScanState scan_state;
 		scan_state.Initialize(column_ids);
@@ -1499,6 +1520,20 @@ void RowGroupCollection::InitializeVacuumState(CollectionCheckpointState &checkp
 	if (!state.can_vacuum_deletes) {
 		return;
 	}
+	auto &transaction_manager = DuckTransactionManager::Get(checkpoint_state.writer.GetAttached());
+	// Whether a deleted row can still be reached by someone. It is exactly the condition that used to
+	// stop this pass from running at all, and it is what decides the scan: below the last commit the
+	// pass has to keep what the retention bound still reaches, and at it there is nothing to keep.
+	state.reading_references = transaction_manager.GetLastCommit() >= options.retention_bound;
+	state.committed_bound = VisibilityBound::Through(transaction_manager.GetLastCommit());
+	state.retained_floor = options.retention_bound;
+	state.retained_ceiling = VisibilityBound::IncludingUncommitted();
+	if (transaction_manager.NoTransactionBelowLastCommit()) {
+		// Every active transaction started after the last commit, so none of them can see a row the
+		// last commit deleted: for such a row the references are the only readers left, and a row
+		// inserted after all of them is one no reader can reach.
+		state.retained_ceiling = transaction_manager.HighestPinnedBound();
+	}
 
 	// Index state decides whether vacuum may change surviving rowids.
 	auto &attached = checkpoint_state.writer.GetAttached();
@@ -1526,10 +1561,10 @@ void RowGroupCollection::InitializeVacuumState(CollectionCheckpointState &checkp
 	vector<idx_t> committed_counts;
 	for (auto &entry : checkpoint_state.row_groups.SegmentNodes()) {
 		auto &row_group = entry.GetNode();
-		// Counting at the retention bound rather than at the last commit is what keeps this pass and the
-		// scan below in agreement: a row deleted at or after the bound is still a row here, because it is
-		// still a row for a reference and it is still a row the scan will hand to the new row group.
-		auto row_group_num_rows = row_group.GetRowCountAtBound(options.retention_bound);
+		// Counting with the options the scan will use is what keeps this pass and the scan in
+		// agreement: a row a reader can still reach is a row here, because it is a row the scan will
+		// hand to the new row group.
+		auto row_group_num_rows = row_group.GetRowCountFor(VacuumScanOptions(state));
 		if (legacy_vacuum_with_stable_row_ids) {
 			// In this legacy path, empty row groups in the middle must be kept because they would create a rowid gap
 			// that cannot be persisted or densely rewritten. Keep the counts at the retention bound so the pass

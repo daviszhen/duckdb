@@ -192,6 +192,17 @@ public:
 	//! Pinned snapshots keep superseded versions readable
 	SnapshotRegistry snapshots;
 
+	//! The highest bound any reference is pinned at, read from the registries rather than cached: a row
+	//! inserted at or after it came after every reference, so none of them sees it.
+	VisibilityBound HighestPinnedBound() const;
+	//! Whether no transaction that started before the last commit is still active. Such a transaction
+	//! reads rows the last commit has already deleted, so it is the one reader a reference's bounds say
+	//! nothing about; when there is none, a row the last commit deleted is reachable only by a
+	//! reference, and that is what lets a retention pass reclaim the rest.
+	bool NoTransactionBelowLastCommit() const {
+		return GetLastCommit() < lowest_visibility_bound.load();
+	}
+
 	//! Caps on how many references the database may hold: -1 unlimited, 0 disabled, positive is the
 	//! most. They bound how much history the reclamation has to keep. The window is not counted.
 	int64_t snapshot_limit = -1;

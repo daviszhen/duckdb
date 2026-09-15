@@ -84,6 +84,9 @@ struct VisibilityBound {
 	static VisibilityBound Min(VisibilityBound a, VisibilityBound b) {
 		return a.value < b.value ? a : b;
 	}
+	static VisibilityBound Max(VisibilityBound a, VisibilityBound b) {
+		return a.value > b.value ? a : b;
+	}
 	//! The exclusive bound value. For diagnostics only - the type deliberately hides it so
 	//! bounds and plain timestamps cannot be mixed up.
 	transaction_t Value() const {

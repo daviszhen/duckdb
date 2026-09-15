@@ -412,6 +412,25 @@ DuckTransactionManager::GetCheckpointType(DuckTransaction &transaction, const Un
 	return CheckpointDecision(checkpoint_type);
 }
 
+VisibilityBound DuckTransactionManager::HighestPinnedBound() const {
+	transaction_t highest = 0;
+	bool any = false;
+	for (auto &snapshot : snapshots.List()) {
+		highest = any ? MaxValue(highest, snapshot.pin) : snapshot.pin;
+		any = true;
+	}
+	for (auto &branch : branches.List()) {
+		highest = any ? MaxValue(highest, branch.pin) : branch.pin;
+		any = true;
+	}
+	if (!any) {
+		// nothing pinned: leave the ceiling to the active transactions
+		return VisibilityBound::Before(0);
+	}
+	// a reference's pin is inclusive, so the first id it cannot see is one past it
+	return VisibilityBound::Through(highest);
+}
+
 bool DuckTransactionManager::NoActiveWriter() {
 	auto lock = vacuum_lock.TryGetExclusiveLock();
 	return lock != nullptr;
