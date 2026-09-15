@@ -71,6 +71,128 @@ idx_t SnapshotRegistry::Count() const {
 	return snapshots.size();
 }
 
+bool BranchRegistry::Create(const string &name, transaction_t pin, const string &parent) {
+	lock_guard<mutex> guard(lock);
+	if (branches.find(name) != branches.end()) {
+		return false;
+	}
+	if (!parent.empty() && branches.find(parent) == branches.end()) {
+		// a branch has to descend from something, or its lineage cannot be walked
+		return false;
+	}
+	branches.emplace(name, Git4DataBranch {name, pin, parent});
+	RecomputeLowest();
+	dirty.store(true);
+	return true;
+}
+
+void BranchRegistry::Restore(const string &name, transaction_t pin, const string &parent) {
+	lock_guard<mutex> guard(lock);
+	branches[name] = Git4DataBranch {name, pin, parent};
+	RecomputeLowest();
+}
+
+bool BranchRegistry::HasChildren(const string &name) const {
+	lock_guard<mutex> guard(lock);
+	for (auto &entry : branches) {
+		if (entry.second.parent == name) {
+			return true;
+		}
+	}
+	return false;
+}
+
+bool BranchRegistry::Drop(const string &name) {
+	lock_guard<mutex> guard(lock);
+	auto entry = branches.find(name);
+	if (entry == branches.end()) {
+		return false;
+	}
+	for (auto &other : branches) {
+		if (other.second.parent == name) {
+			// a descendant still refers to this name to reach its ancestors
+			return false;
+		}
+	}
+	branches.erase(entry);
+	RecomputeLowest();
+	dirty.store(true);
+	return true;
+}
+
+vector<Git4DataBranch> BranchRegistry::List() const {
+	lock_guard<mutex> guard(lock);
+	vector<Git4DataBranch> result;
+	result.reserve(branches.size());
+	for (auto &entry : branches) {
+		result.push_back(entry.second);
+	}
+	return result;
+}
+
+idx_t BranchRegistry::Count() const {
+	lock_guard<mutex> guard(lock);
+	return branches.size();
+}
+
+bool BranchRegistry::Get(const string &name, Git4DataBranch &result) const {
+	lock_guard<mutex> guard(lock);
+	auto entry = branches.find(name);
+	if (entry == branches.end()) {
+		return false;
+	}
+	result = entry->second;
+	return true;
+}
+
+bool BranchRegistry::Ancestors(const string &name, vector<string> &result) const {
+	// caller holds the lock
+	auto current = name;
+	while (!current.empty()) {
+		auto entry = branches.find(current);
+		if (entry == branches.end()) {
+			return false;
+		}
+		result.push_back(current);
+		current = entry->second.parent;
+	}
+	return true;
+}
+
+bool BranchRegistry::FindLCA(const string &a, const string &b, string &result) const {
+	lock_guard<mutex> guard(lock);
+	vector<string> ancestors_a;
+	if (!Ancestors(a, ancestors_a)) {
+		return false;
+	}
+	vector<string> ancestors_b;
+	if (!Ancestors(b, ancestors_b)) {
+		return false;
+	}
+	// Both lists are nearest-first, and in a tree the common ancestors form one chain from the
+	// least common ancestor up to the root. So the first name of b's list that also appears in
+	// a's is the deepest one they share.
+	for (auto &candidate : ancestors_b) {
+		for (auto &ancestor : ancestors_a) {
+			if (ancestor == candidate) {
+				result = candidate;
+				return true;
+			}
+		}
+	}
+	return false;
+}
+
+void BranchRegistry::RecomputeLowest() {
+	transaction_t lowest = MAX_COMMIT_ID;
+	for (auto &entry : branches) {
+		if (entry.second.pin < lowest) {
+			lowest = entry.second.pin;
+		}
+	}
+	lowest_pin.store(lowest);
+}
+
 void SnapshotRegistry::RecomputeLowest() {
 	transaction_t lowest = MAX_COMMIT_ID;
 	for (auto &entry : snapshots) {
@@ -305,7 +427,7 @@ void DuckTransactionManager::Checkpoint(ClientContext &context, bool force) {
 	CheckpointOptions options;
 	options.retention_bound = LowestRetentionBound();
 	options.id_retention_bound = PinnedBound();
-	if (snapshots.IsDirty()) {
+	if (snapshots.IsDirty() || branches.IsDirty()) {
 		// the registry changed and is not on disk yet; a checkpoint that skips its body
 		// because the WAL is empty would leave it there
 		options.action = CheckpointAction::ALWAYS_CHECKPOINT;

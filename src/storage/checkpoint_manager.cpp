@@ -304,6 +304,7 @@ void SingleFileCheckpointWriter::CreateCheckpoint() {
 	idx_t registry_offset = 0;
 	auto start_timestamp = transaction_manager.GetStartTimestampCounter();
 	auto pinned_snapshots = transaction_manager.snapshots.List();
+	auto data_branches = transaction_manager.branches.List();
 	{
 		auto registry_writer = make_uniq<MetadataWriter>(metadata_manager);
 		auto registry_pointer = registry_writer->GetMetaBlockPointer();
@@ -314,6 +315,15 @@ void SingleFileCheckpointWriter::CreateCheckpoint() {
 			list.WriteObject([&](Serializer &obj) {
 				obj.WriteProperty<string>(100, "name", pinned_snapshots[i].name);
 				obj.WriteProperty<uint64_t>(101, "pin", pinned_snapshots[i].pin);
+			});
+		});
+		// branches go beside the snapshots because they are references in the same sense: each
+		// one pins the timeline, and each one has to come back with the file
+		registry_serializer.WriteList(101, "branches", data_branches.size(), [&](Serializer::List &list, idx_t i) {
+			list.WriteObject([&](Serializer &obj) {
+				obj.WriteProperty<string>(100, "name", data_branches[i].name);
+				obj.WriteProperty<uint64_t>(101, "pin", data_branches[i].pin);
+				obj.WriteProperty<string>(102, "parent", data_branches[i].parent);
 			});
 		});
 		registry_serializer.End();
@@ -335,6 +345,7 @@ void SingleFileCheckpointWriter::CreateCheckpoint() {
 	block_manager.WriteHeader(context, header);
 	// the registry is on disk now (or was empty), so the next checkpoint need not force itself
 	transaction_manager.snapshots.MarkClean();
+	transaction_manager.branches.MarkClean();
 
 	auto debug_verify_blocks = Settings::Get<DebugVerifyBlocksSetting>(db.GetDatabase());
 	if (debug_verify_blocks) {
@@ -467,6 +478,17 @@ void SingleFileCheckpointReader::LoadFromStorage() {
 				auto name = obj.ReadProperty<string>(100, "name");
 				auto pin = obj.ReadProperty<uint64_t>(101, "pin");
 				transaction_manager.snapshots.Create(name, pin);
+			});
+		});
+		// optional, because the block predates branches in files written before they existed.
+		// Restore() skips the parent check Create performs: a file could legitimately hold a
+		// parent that appears later in the list.
+		registry_deserializer.ReadOptionalList(101, "branches", [&](Deserializer::List &list, idx_t i) {
+			return list.ReadObject([&](Deserializer &obj) {
+				auto name = obj.ReadProperty<string>(100, "name");
+				auto pin = obj.ReadProperty<uint64_t>(101, "pin");
+				auto parent = obj.ReadProperty<string>(102, "parent");
+				transaction_manager.branches.Restore(name, pin, parent);
 			});
 		});
 		registry_deserializer.End();

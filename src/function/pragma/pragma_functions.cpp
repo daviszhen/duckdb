@@ -127,6 +127,82 @@ static DuckTransactionManager &GetGit4DataTransactionManager(ClientContext &cont
 	return DuckTransactionManager::Get(*attached);
 }
 
+static void PragmaGit4DataCreateBranch(ClientContext &context, const FunctionParameters &parameters) {
+	auto name = parameters.values[0].ToString();
+	auto parent = parameters.values[1].ToString();
+	auto &transaction_manager = GetGit4DataTransactionManager(context);
+	// A branch descends from another branch when one is named; otherwise it starts at the
+	// newest commit, which is the point a snapshot would pin. Either way the branch holds its
+	// base down exactly as a pin does.
+	transaction_t pin;
+	if (parent.empty()) {
+		pin = transaction_manager.GetLastCommit();
+	} else {
+		Git4DataBranch parent_branch;
+		if (!transaction_manager.branches.Get(parent, parent_branch)) {
+			throw InvalidInputException("Branch \"%s\" does not exist", parent);
+		}
+		pin = parent_branch.pin;
+	}
+	if (!transaction_manager.branches.Create(name, pin, parent)) {
+		throw InvalidInputException("Branch \"%s\" already exists", name);
+	}
+}
+
+static void PragmaGit4DataDropBranch(ClientContext &context, const FunctionParameters &parameters) {
+	auto name = parameters.values[0].ToString();
+	auto &transaction_manager = GetGit4DataTransactionManager(context);
+	Git4DataBranch existing;
+	if (!transaction_manager.branches.Get(name, existing)) {
+		throw InvalidInputException("Branch \"%s\" does not exist", name);
+	}
+	if (transaction_manager.branches.HasChildren(name)) {
+		// a descendant still walks through this name to reach its ancestors
+		throw InvalidInputException("Branch \"%s\" still has branches descending from it", name);
+	}
+	transaction_manager.branches.Drop(name);
+}
+
+static string PragmaGit4DataBranches(ClientContext &context, const FunctionParameters &parameters) {
+	auto entries = GetGit4DataTransactionManager(context).branches.List();
+	if (entries.empty()) {
+		return "SELECT NULL::VARCHAR AS branch_name, NULL::UBIGINT AS pinned_commit_id, "
+		       "NULL::VARCHAR AS parent_branch WHERE false";
+	}
+	string query = "SELECT * FROM (VALUES ";
+	for (idx_t i = 0; i < entries.size(); i++) {
+		if (i > 0) {
+			query += ", ";
+		}
+		// Branch names are user input, escape them before splicing into SQL
+		auto name = StringUtil::Replace(entries[i].name, "'", "''");
+		auto parent = StringUtil::Replace(entries[i].parent, "'", "''");
+		query += StringUtil::Format("('%s'::VARCHAR, %llu::UBIGINT, '%s'::VARCHAR)", name, entries[i].pin, parent);
+	}
+	query += ") t(branch_name, pinned_commit_id, parent_branch) ORDER BY pinned_commit_id, branch_name";
+	return query;
+}
+
+static string PragmaGit4DataLCA(ClientContext &context, const FunctionParameters &parameters) {
+	auto left = parameters.values[0].ToString();
+	auto right = parameters.values[1].ToString();
+	auto &transaction_manager = GetGit4DataTransactionManager(context);
+	Git4DataBranch existing;
+	if (!transaction_manager.branches.Get(left, existing)) {
+		throw InvalidInputException("Branch \"%s\" does not exist", left);
+	}
+	if (!transaction_manager.branches.Get(right, existing)) {
+		throw InvalidInputException("Branch \"%s\" does not exist", right);
+	}
+	string lca;
+	if (!transaction_manager.branches.FindLCA(left, right, lca)) {
+		// the two share no ancestor, which is what a broken lineage looks like
+		return "SELECT NULL::VARCHAR AS lca WHERE false";
+	}
+	lca = StringUtil::Replace(lca, "'", "''");
+	return StringUtil::Format("SELECT '%s'::VARCHAR AS lca", lca);
+}
+
 static void PragmaGit4DataCreateSnapshot(ClientContext &context, const FunctionParameters &parameters) {
 	auto name = parameters.values[0].ToString();
 	auto &transaction_manager = GetGit4DataTransactionManager(context);
@@ -322,6 +398,13 @@ void PragmaFunctions::RegisterFunction(BuiltinFunctions &set) {
 	set.AddFunction(
 	    PragmaFunction::PragmaCall("git4data_drop_snapshot", PragmaGit4DataDropSnapshot, {LogicalType::VARCHAR}));
 	set.AddFunction(PragmaFunction::PragmaStatement("git4data_snapshots", PragmaGit4DataSnapshots));
+	set.AddFunction(PragmaFunction::PragmaCall("git4data_create_branch", PragmaGit4DataCreateBranch,
+	                                           {LogicalType::VARCHAR, LogicalType::VARCHAR}));
+	set.AddFunction(
+	    PragmaFunction::PragmaCall("git4data_drop_branch", PragmaGit4DataDropBranch, {LogicalType::VARCHAR}));
+	set.AddFunction(PragmaFunction::PragmaStatement("git4data_branches", PragmaGit4DataBranches));
+	set.AddFunction(PragmaFunction::PragmaCall("git4data_lca", PragmaGit4DataLCA,
+	                                           {LogicalType::VARCHAR, LogicalType::VARCHAR}));
 	set.AddFunction(PragmaFunction::PragmaStatement("git4data_state", PragmaGit4DataState));
 	set.AddFunction(
 	    PragmaFunction::PragmaCall("git4data_probe", PragmaGit4DataProbe, {LogicalType::VARCHAR}));

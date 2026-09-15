@@ -1,0 +1,105 @@
+# name: test/sql/git4data/branch.test
+# description: Data branches carry lineage and hold their base down like a pin
+# group: [git4data]
+
+load {TEST_DIR}/branch.db
+
+statement ok
+CREATE TABLE t AS SELECT range AS i FROM range(1000)
+
+statement ok
+CHECKPOINT
+
+# a root branch starts at the newest commit, the same point a snapshot would pin
+statement ok
+PRAGMA git4data_create_branch('root', '')
+
+statement ok
+PRAGMA git4data_create_branch('a', 'root')
+
+statement ok
+PRAGMA git4data_create_branch('b', 'root')
+
+statement ok
+PRAGMA git4data_branches
+
+# siblings share the branch they both descend from
+query I
+PRAGMA git4data_lca('a', 'b')
+----
+root
+
+query I
+PRAGMA git4data_lca('a', 'root')
+----
+root
+
+# a branch is its own ancestor when asked against itself
+query I
+PRAGMA git4data_lca('a', 'a')
+----
+a
+
+statement error
+PRAGMA git4data_create_branch('a', 'root')
+----
+<REGEX>:.*already exists.*
+
+statement error
+PRAGMA git4data_create_branch('c', 'missing')
+----
+<REGEX>:.*missing.*does not exist.*
+
+# dropping a branch that others descend from is refused - it would leave their lineage dangling
+statement error
+PRAGMA git4data_drop_branch('root')
+----
+<REGEX>:.*descending.*
+
+# a leaf can be dropped, and is really gone
+statement ok
+PRAGMA git4data_drop_branch('b')
+
+statement error
+PRAGMA git4data_lca('b', 'a')
+----
+<REGEX>:.*b.*does not exist.*
+
+# A branch holds its base down exactly as a pin does. The delete commits well past the
+# branch, and the branch still keeps the pre-image readable at its own bound.
+statement ok
+DELETE FROM t WHERE i < 400
+
+statement ok
+CHECKPOINT
+
+query I
+SELECT count(*) FROM t
+----
+600
+
+query III
+PRAGMA git4data_probe('t')
+----
+1000	0	999
+
+# the branch, its lineage and the history it holds all come back with the file
+restart
+
+statement ok
+PRAGMA git4data_branches
+
+query I
+PRAGMA git4data_lca('a', 'root')
+----
+root
+
+query I
+SELECT count(*) FROM t
+----
+600
+
+query III
+PRAGMA git4data_probe('t')
+----
+1000	0	999

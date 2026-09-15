@@ -76,6 +76,63 @@ private:
 	std::atomic<bool> dirty {false};
 };
 
+//! A data branch: a named point on the commit timeline that also records where it came from.
+//! The parent link is what turns the branches into a tree, and a tree is what makes a least
+//! common ancestor computable - which diff and merge both need.
+struct Git4DataBranch {
+	string name;
+	//! Everything committed up to and including this commit id is this branch's base
+	transaction_t pin;
+	//! The branch this one was created from. Empty for a root branch.
+	string parent;
+};
+
+//! Registry of data branches. A branch is a reference like a snapshot is - both pin the
+//! timeline and both have to outlive the process that created them - so both fold into the
+//! same retention bound and both keep their ids on disk.
+class BranchRegistry {
+public:
+	//! Create a branch. Returns false if the name exists.
+	bool Create(const string &name, transaction_t pin, const string &parent);
+	//! Drop a branch. Returns false if the name is unknown, or if it still has children -
+	//! removing it would leave those children's lineage dangling.
+	bool Drop(const string &name);
+	//! Whether dropping this name would be refused because other branches descend from it
+	bool HasChildren(const string &name) const;
+	vector<Git4DataBranch> List() const;
+	idx_t Count() const;
+	//! Look a branch up by name. Returns false when there is none.
+	bool Get(const string &name, Git4DataBranch &result) const;
+	//! The lowest pinned commit id, or MAX_COMMIT_ID when there is no branch.
+	transaction_t LowestPin() const noexcept {
+		return lowest_pin.load();
+	}
+	//! Name of the deepest branch that both are descended from, which may be one of them.
+	//! Returns false when they share no ancestor, which is what a broken lineage looks like.
+	bool FindLCA(const string &a, const string &b, string &result) const;
+	//! Whether the registry changed since the last checkpoint wrote it
+	bool IsDirty() const noexcept {
+		return dirty.load();
+	}
+	void MarkClean() noexcept {
+		dirty.store(false);
+	}
+	//! Restore a branch read from disk without the checks Create performs
+	void Restore(const string &name, transaction_t pin, const string &parent);
+
+private:
+	//! Recompute the cached minimum pin. Caller must hold the lock.
+	void RecomputeLowest();
+	//! Ancestors of a branch, nearest first. Caller must hold the lock. False if unknown.
+	bool Ancestors(const string &name, vector<string> &result) const;
+
+private:
+	mutable mutex lock;
+	unordered_map<string, Git4DataBranch> branches;
+	std::atomic<transaction_t> lowest_pin {MAX_COMMIT_ID};
+	std::atomic<bool> dirty {false};
+};
+
 //! The Transaction Manager is responsible for creating and managing
 //! transactions
 class DuckTransactionManager : public TransactionManager {
@@ -106,12 +163,18 @@ public:
 	VisibilityBound LowestRetentionBound() const {
 		return VisibilityBound::Min(lowest_visibility_bound, PinnedBound());
 	}
-	//! Bound imposed by pinned snapshots, independent of active transactions
+	//! Bound imposed by references that outlive the process - pinned snapshots and data
+	//! branches - independent of active transactions. A branch is a reference in exactly the
+	//! same sense, so it holds the bound down the same way.
 	VisibilityBound PinnedBound() const noexcept {
-		return VisibilityBound::Through(snapshots.LowestPin());
+		auto snapshot_pin = snapshots.LowestPin();
+		auto branch_pin = branches.LowestPin();
+		return VisibilityBound::Through(snapshot_pin < branch_pin ? snapshot_pin : branch_pin);
 	}
 	//! Pinned snapshots keep superseded versions readable
 	SnapshotRegistry snapshots;
+	//! Data branches: references with a parent link, so they can be diffed and merged
+	BranchRegistry branches;
 	transaction_t GetLastCommit() const {
 		return last_commit;
 	}
