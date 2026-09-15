@@ -280,15 +280,26 @@ static string PragmaGit4DataRestoreAt(ClientContext &context, const FunctionPara
 //! computes. What this adds is the composition, and the decision that a pick needs a primary key -
 //! without one there is nothing to match a current row against, and applying a change to the wrong
 //! row would be worse than refusing to guess.
+//! The predicate that says two aliased rows hold the same values, NULL-safe column by column
+static string BuildGit4DataRowComparison(TableCatalogEntry &table, const string &left_alias, const string &right_alias);
+
 static string PragmaGit4DataPick(ClientContext &context, const FunctionParameters &parameters) {
 	auto table_name = parameters.values[0].ToString();
 	auto source = parameters.values[1].ToString();
 	auto base = parameters.values[2].ToString();
+	// Overwriting is what a pick did before there was a choice, so it stays the default - it answers
+	// "make the table look like the source", and the caller named the direction. fail and skip are
+	// there because the live table may have moved on since the base, and overwriting would throw away
+	// a decision the pick never saw.
+	auto policy = parameters.values.size() > 3 ? StringUtil::Lower(parameters.values[3].ToString()) : "overwrite";
+	if (policy != "overwrite" && policy != "fail" && policy != "skip") {
+		throw InvalidInputException("Pick policy has to be overwrite, fail or skip, not \"%s\"", policy);
+	}
 	auto &transaction_manager = GetGit4DataTransactionManager(context);
 
 	// both names resolve before any statement is generated, so a typo cannot half-apply a pick
 	auto source_unit = ResolveGit4DataReference(transaction_manager, source);
-	ResolveGit4DataReference(transaction_manager, base);
+	auto base_unit = ResolveGit4DataReference(transaction_manager, base);
 
 	auto &table = Catalog::GetEntry<TableCatalogEntry>(context, QualifiedName(Identifier(table_name)));
 	auto key_columns = Git4DataPrimaryKeyColumnNames(table);
@@ -312,23 +323,78 @@ static string PragmaGit4DataPick(ClientContext &context, const FunctionParameter
 
 	// The key is what the two sides are matched on, not a row id: a reference scan does not expose
 	// row ids, and the key is the identity the diff already pairs updates by.
-	auto removed_or_changed =
-	    StringUtil::Format("SELECT %s FROM %s WHERE change IN ('removed', 'changed')", key_list, diff);
-	auto added_or_changed =
-	    StringUtil::Format("SELECT %s FROM %s WHERE change IN ('added', 'changed')", key_list, diff);
+	// A conflict is a key the source changed whose live row has also changed since the base, and where
+	// the two sides did not end up with the same row. Both sides making the same change is agreement,
+	// not a conflict - the same rule a merge applies.
+	auto base_image = FormatGit4DataAtClause(table_name, base, base_unit);
+	auto source_image = FormatGit4DataAtClause(table_name, source, source_unit);
+	string conflict_table;
+	if (policy != "overwrite") {
+		string key_list_joined;
+		string join_live;
+		string join_base;
+		string join_source;
+		string row_comparison_base;
+		string row_comparison_source;
+		string presence_base;
+		string presence_source;
+		for (idx_t i = 0; i < key_columns.size(); i++) {
+			auto quoted = KeywordHelper::WriteOptionallyQuoted(key_columns[i]);
+			if (i > 0) {
+				key_list_joined += ", ";
+				join_live += " AND ";
+				join_base += " AND ";
+				join_source += " AND ";
+				presence_base += " OR ";
+				presence_source += " OR ";
+			}
+			key_list_joined += "tk." + quoted;
+			join_live += StringUtil::Format("l.%s = tk.%s", quoted, quoted);
+			join_base += StringUtil::Format("b.%s = tk.%s", quoted, quoted);
+			join_source += StringUtil::Format("s.%s = tk.%s", quoted, quoted);
+			// a key is never null, so a null one in an outer join means that side has no such row
+			presence_base += StringUtil::Format("(l.%s IS NULL) <> (b.%s IS NULL)", quoted, quoted);
+			presence_source += StringUtil::Format("(l.%s IS NULL) <> (s.%s IS NULL)", quoted, quoted);
+		}
+		auto live_key = "l." + KeywordHelper::WriteOptionallyQuoted(key_columns[0]);
+		auto changed_from_base = StringUtil::Format("((%s) OR (%s IS NOT NULL AND NOT (%s)))", presence_base, live_key,
+		                                            BuildGit4DataRowComparison(table, "l", "b"));
+		auto differs_from_source = StringUtil::Format("((%s) OR (%s IS NOT NULL AND NOT (%s)))", presence_source,
+		                                              live_key, BuildGit4DataRowComparison(table, "l", "s"));
+		conflict_table = StringUtil::Format(
+		    "CREATE OR REPLACE TEMP TABLE g4d_pick_conflicts AS WITH tk AS (SELECT %s FROM %s WHERE change IN "
+		    "('added', 'removed', 'changed')), l AS (SELECT * FROM %s), b AS (SELECT * FROM %s), s AS (SELECT * "
+		    "FROM %s) SELECT %s FROM tk LEFT JOIN l ON (%s) LEFT JOIN b ON (%s) LEFT JOIN s ON (%s) WHERE (%s) AND "
+		    "(%s);\n",
+		    key_list, diff, quoted_table, base_image, source_image, key_list_joined, join_live, join_base, join_source,
+		    changed_from_base, differs_from_source);
+	}
 
 	// A changed row is applied as a delete followed by an insert: there is no in-place update to reach
 	// for here, and the outcome is the same.
-	string result;
-	result += StringUtil::Format("DELETE FROM %s WHERE (%s) IN (%s);\n", quoted_table, key_list, removed_or_changed);
+	string result = conflict_table;
+	if (policy == "fail") {
+		result += "SELECT CASE WHEN EXISTS (SELECT 1 FROM g4d_pick_conflicts) THEN error('pick conflict: the live "
+		          "table changed the same rows since the base - pass policy skip to leave them, or overwrite to "
+		          "take the source') ELSE 0 END;\n";
+	}
+	auto conflict_filter = policy == "skip" ? StringUtil::Format(" AND (%s) NOT IN (SELECT %s FROM g4d_pick_conflicts)",
+	                                                             key_list, key_list)
+	                                        : string();
+	result += StringUtil::Format("DELETE FROM %s WHERE (%s) IN (SELECT %s FROM %s WHERE change IN ('removed', "
+	                             "'changed')%s);\n",
+	                             quoted_table, key_list, key_list, diff, conflict_filter);
 	// Only the keys the live table is actually missing: a row the source added may well still be there,
 	// because the live table is usually the source's own continuation, and inserting it again would
 	// collide with its primary key instead of restoring anything. The keys of changed rows were removed
 	// by the statement above, so they are missing by the time this runs and take the source's values.
-	result += StringUtil::Format("INSERT INTO %s SELECT * FROM %s WHERE (%s) IN (%s) AND (%s) NOT IN "
-	                             "(SELECT %s FROM %s);",
-	                             quoted_table, FormatGit4DataAtClause(table_name, source, source_unit), key_list,
-	                             added_or_changed, key_list, key_list, quoted_table);
+	result += StringUtil::Format("INSERT INTO %s SELECT * FROM %s WHERE (%s) IN (SELECT %s FROM %s WHERE change "
+	                             "IN ('added', 'changed')%s) AND (%s) NOT IN (SELECT %s FROM %s);",
+	                             quoted_table, source_image, key_list, key_list, diff, conflict_filter, key_list,
+	                             key_list, quoted_table);
+	if (!conflict_table.empty()) {
+		result += "\nDROP TABLE g4d_pick_conflicts;";
+	}
 	return result;
 }
 
@@ -873,8 +939,10 @@ void PragmaFunctions::RegisterFunction(BuiltinFunctions &set) {
 	    {LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR}));
 	set.AddFunction(
 	    PragmaFunction::PragmaCall("git4data_lca", PragmaGit4DataLCA, {LogicalType::VARCHAR, LogicalType::VARCHAR}));
+	// the policy is optional, so a pick that does not name one keeps overwriting
 	set.AddFunction(PragmaFunction::PragmaCall("git4data_pick", PragmaGit4DataPick,
-	                                           {LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR}));
+	                                           {LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR},
+	                                           LogicalType::VARCHAR));
 	set.AddFunction(PragmaFunction::PragmaCall("git4data_restore", PragmaGit4DataRestore,
 	                                           {LogicalType::VARCHAR, LogicalType::VARCHAR}));
 	set.AddFunction(PragmaFunction::PragmaCall("git4data_restore_at", PragmaGit4DataRestoreAt,

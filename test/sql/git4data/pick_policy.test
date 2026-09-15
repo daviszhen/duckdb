@@ -1,0 +1,106 @@
+# name: test/sql/git4data/pick_policy.test
+# description: A pick can refuse or skip rows the live table has moved on from
+# group: [git4data]
+
+load {TEST_DIR}/pick_policy.db
+
+statement ok
+CREATE TABLE t (k INTEGER PRIMARY KEY, v INTEGER)
+
+statement ok
+INSERT INTO t SELECT range, range FROM range(10)
+
+statement ok
+CHECKPOINT
+
+statement ok
+PRAGMA git4data_create_snapshot('base')
+
+# one row added, one removed, three changed - this is the source's state
+statement ok
+INSERT INTO t VALUES (100, 100)
+
+statement ok
+DELETE FROM t WHERE k = 5
+
+statement ok
+UPDATE t SET v = v + 1 WHERE k < 3
+
+statement ok
+CHECKPOINT
+
+statement ok
+PRAGMA git4data_create_snapshot('source')
+
+# The live table then moves on, on the very keys the source changed. That is what a pick would
+# silently overwrite, and what a policy is for.
+statement ok
+DELETE FROM t WHERE k = 100
+
+statement ok
+UPDATE t SET v = -1 WHERE k = 1
+
+statement ok
+UPDATE t SET v = -5 WHERE k = 0
+
+# fail refuses, and a refused pick leaves the table exactly as it was: the rows the two sides agree on
+# are untouched too, and the row the source added is still absent.
+statement error
+PRAGMA git4data_pick('t', 'source', 'base', 'fail')
+----
+<REGEX>:.*pick conflict.*
+
+query II
+SELECT (SELECT count(*) FROM t WHERE k = 100), (SELECT string_agg(k::VARCHAR || ':' || v::VARCHAR, ' ' ORDER BY k) FROM t WHERE k < 3)
+----
+0	0:-5 1:-1 2:3
+
+# skip applies what the two sides agree on and leaves the two the live table changed itself
+statement ok
+PRAGMA git4data_pick('t', 'source', 'base', 'skip')
+
+query I
+SELECT string_agg(k::VARCHAR || ':' || v::VARCHAR, ' ' ORDER BY k) FROM t WHERE k < 4
+----
+0:-5 1:-1 2:3 3:3
+
+# the row the source added is back with the source's value, and the one it removed stays removed
+query II
+SELECT (SELECT v FROM t WHERE k = 100), (SELECT count(*) FROM t WHERE k = 5)
+----
+100	0
+
+# A policy that is not one of the three is refused before anything runs.
+statement error
+PRAGMA git4data_pick('t', 'source', 'base', 'merge')
+----
+<REGEX>:.*Pick policy has to be overwrite, fail or skip.*
+
+# Making the same change on both sides is agreement, not a conflict, so the same pick goes through
+# under fail once the live table has caught up with the source on those keys.
+statement ok
+UPDATE t SET v = 1 WHERE k = 0
+
+statement ok
+UPDATE t SET v = 2 WHERE k = 1
+
+statement ok
+PRAGMA git4data_pick('t', 'source', 'base', 'fail')
+
+query I
+SELECT string_agg(k::VARCHAR || ':' || v::VARCHAR, ' ' ORDER BY k) FROM t WHERE k < 3
+----
+0:1 1:2 2:3
+
+# Overwriting is what a pick did before there was a choice, and it is still the default: the source's
+# value wins on a key the live table changed too.
+statement ok
+UPDATE t SET v = -1 WHERE k = 1
+
+statement ok
+PRAGMA git4data_pick('t', 'source', 'base')
+
+query I
+SELECT v FROM t WHERE k = 1
+----
+2
