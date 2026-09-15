@@ -77,7 +77,7 @@ public:
 	//! Rollback
 	ErrorData Rollback();
 	//! Cleanup the undo buffer
-	void Cleanup(VisibilityBound lowest_visibility_bound);
+	void Cleanup(VisibilityBound lowest_visibility_bound, VisibilityBound retention_bound);
 
 	bool ChangesMade();
 	UndoBufferProperties GetUndoProperties();

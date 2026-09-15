@@ -1,0 +1,72 @@
+# name: test/sql/git4data/pin_new_row_group.test
+# description: A pin must not see rows appended into a row group created after it
+# group: [git4data]
+
+require vector_size 2048
+
+load {TEST_DIR}/pin_new_row_group.db
+
+# exactly one full row group, so the append below starts a second one - which is the case that was
+# wrong. Every other test in this directory uses a table small enough to stay in one row group.
+statement ok
+CREATE TABLE t AS SELECT range AS i FROM range(122880)
+
+statement ok
+CHECKPOINT
+
+statement ok
+PRAGMA git4data_create_snapshot('s')
+
+query I
+SELECT count(*) FROM t AT (SNAPSHOT => 's')
+----
+122880
+
+statement ok
+INSERT INTO t SELECT 122880 + range AS i FROM range(122880)
+
+query I
+SELECT count(*) FROM t
+----
+245760
+
+query I
+SELECT count(*) FROM t AT (SNAPSHOT => 's')
+----
+122880
+
+# the rows are not merely uncounted, they must not be readable either
+query I
+SELECT count(*) FROM t AT (SNAPSHOT => 's') WHERE i >= 122880
+----
+0
+
+query II
+SELECT min(i), max(i) FROM t AT (SNAPSHOT => 's')
+----
+0	122879
+
+# a pin taken now sees everything, so it is the older pin the append had broken
+statement ok
+PRAGMA git4data_create_snapshot('after')
+
+query I
+SELECT count(*) FROM t AT (SNAPSHOT => 'after')
+----
+245760
+
+# the insert markers have to reach disk as well as survive in memory
+statement ok
+CHECKPOINT
+
+restart
+
+query I
+SELECT count(*) FROM t AT (SNAPSHOT => 's')
+----
+122880
+
+query I
+SELECT count(*) FROM t AT (SNAPSHOT => 'after')
+----
+245760

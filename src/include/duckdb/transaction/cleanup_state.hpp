@@ -23,7 +23,7 @@ struct UpdateInfo;
 class CleanupState {
 public:
 	explicit CleanupState(DuckTransaction &transaction, VisibilityBound lowest_visibility_bound,
-	                      ActiveTransactionState transaction_state);
+	                      VisibilityBound retention_bound, ActiveTransactionState transaction_state);
 
 public:
 	void CleanupEntry(UndoFlags type, data_ptr_t data);
@@ -31,6 +31,8 @@ public:
 private:
 	//! Lowest active transaction
 	VisibilityBound lowest_visibility_bound;
+	//! Bound the version information has to stay usable for - also covers pinned references
+	VisibilityBound retention_bound;
 	ActiveTransactionState transaction_state;
 	//! While cleaning up, we remove data from any delta indexes we added data to during the commit
 	IndexDataRemover index_data_remover;

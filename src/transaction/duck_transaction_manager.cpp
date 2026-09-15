@@ -215,7 +215,7 @@ static ErrorData BuildAutocheckpointError(AttachedDatabase &db, const std::excep
 void DuckCleanupInfo::Cleanup() {
 	for (auto &transaction : transactions) {
 		if (transaction->awaiting_cleanup) {
-			transaction->Cleanup(lowest_visibility_bound);
+			transaction->Cleanup(lowest_visibility_bound, retention_bound);
 		}
 	}
 }
@@ -722,7 +722,16 @@ DuckTransactionManager::RemoveTransaction(DuckTransaction &transaction, bool sto
 		current_transaction->awaiting_cleanup = true;
 		cleanup_info->transactions.push_back(std::move(current_transaction));
 	}
+	// This one also decides when a committed transaction may be released, so it tracks active
+	// transactions alone - holding it down with a reference keeps the checkpoint locks those
+	// transactions carry and makes every CHECKPOINT fail.
 	cleanup_info->lowest_visibility_bound = LowestVisibilityBound();
+	// What the version information has to be kept for is a separate question, and references count:
+	// a reader pinned below this commit has to be able to tell "appended after me" from "always
+	// there". With the transaction watermark alone the insert markers of a freshly appended row
+	// group were dropped, and that row group then read as visible to every reader - including the
+	// pin, which saw rows that did not exist when it was taken.
+	cleanup_info->retention_bound = LowestRetentionBound();
 
 	// Remove the transaction from the list of active transactions.
 	active_transactions.unsafe_erase_at(t_index);

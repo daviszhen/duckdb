@@ -24,6 +24,10 @@ struct UndoBufferProperties;
 struct DuckCleanupInfo {
 	//! All transactions in a cleanup info share the same lowest_visibility_bound.
 	VisibilityBound lowest_visibility_bound;
+	//! The bound the version information has to be kept for, which also covers pinned references.
+	//! Kept apart from lowest_visibility_bound because that one also decides when a committed
+	//! transaction may be released.
+	VisibilityBound retention_bound;
 	vector<unique_ptr<DuckTransaction>> transactions;
 
 	void Cleanup();

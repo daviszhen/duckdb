@@ -16,8 +16,9 @@
 namespace duckdb {
 
 CleanupState::CleanupState(DuckTransaction &transaction, VisibilityBound lowest_visibility_bound,
-                           ActiveTransactionState transaction_state)
-    : lowest_visibility_bound(lowest_visibility_bound), transaction_state(transaction_state),
+                           VisibilityBound retention_bound, ActiveTransactionState transaction_state)
+    : lowest_visibility_bound(lowest_visibility_bound), retention_bound(retention_bound),
+      transaction_state(transaction_state),
       index_data_remover(transaction, QueryContext(), IndexRemovalType::DELETED_ROWS_IN_USE) {
 }
 
@@ -33,8 +34,9 @@ void CleanupState::CleanupEntry(UndoFlags type, data_ptr_t data) {
 	}
 	case UndoFlags::INSERT_TUPLE: {
 		auto info = reinterpret_cast<AppendInfo *>(data);
-		// mark the tuples as committed
-		info->table->GetStorage().CleanupAppend(lowest_visibility_bound, info->start_row, info->count);
+		// mark the tuples as committed. The retention bound rather than the transaction one: a
+		// pinned reference still has to be able to tell these rows apart from rows that always existed.
+		info->table->GetStorage().CleanupAppend(retention_bound, info->start_row, info->count);
 		break;
 	}
 	case UndoFlags::DELETE_TUPLE: {

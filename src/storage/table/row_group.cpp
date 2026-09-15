@@ -1146,12 +1146,6 @@ optional_ptr<RowVersionManager> RowGroup::GetVersionInfo() {
 	}
 	D_ASSERT(!deletes_pointers.empty());
 	auto root_delete = deletes_pointers[0];
-	{
-		string ptrs;
-		for (auto &p : deletes_pointers) {
-			ptrs += std::to_string(p.block_pointer) + "@" + std::to_string(p.offset) + " ";
-		}
-	}
 	auto loaded_info = RowVersionManager::Deserialize(root_delete, GetBlockManager().GetMetadataManager());
 	SetVersionInfo(std::move(loaded_info));
 	deletes_is_loaded = true;

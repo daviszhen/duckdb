@@ -340,8 +340,8 @@ ErrorData DuckTransaction::Rollback() {
 	}
 }
 
-void DuckTransaction::Cleanup(VisibilityBound lowest_visibility_bound) {
-	undo_buffer.Cleanup(lowest_visibility_bound);
+void DuckTransaction::Cleanup(VisibilityBound lowest_visibility_bound, VisibilityBound retention_bound) {
+	undo_buffer.Cleanup(lowest_visibility_bound, retention_bound);
 }
 
 void DuckTransaction::SetModifications(DatabaseModificationType type) {
