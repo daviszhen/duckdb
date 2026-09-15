@@ -1,0 +1,85 @@
+# name: test/sql/git4data/restore_at.test
+# description: Rewind a table to the newest reference taken at or before a time
+# group: [git4data]
+
+load {TEST_DIR}/restore_at.db
+
+statement ok
+CREATE TABLE t (k INTEGER PRIMARY KEY, v INTEGER)
+
+statement ok
+INSERT INTO t SELECT range, range FROM range(100)
+
+statement ok
+CHECKPOINT
+
+statement ok
+PRAGMA git4data_create_snapshot('early')
+
+statement ok
+INSERT INTO t SELECT 100 + range, range FROM range(100)
+
+statement ok
+PRAGMA git4data_create_branch('late', '')
+
+statement ok
+CHECKPOINT
+
+query I
+SELECT count(*) FROM t
+----
+200
+
+# A time after both references has to pick the newer one. If it picked the older the count below
+# would be 100, so this is the selection being tested and not just the mechanics.
+statement ok
+PRAGMA git4data_restore_at('t', '2030-01-01 00:00:00')
+
+query III
+SELECT count(*), min(k), max(k) FROM t
+----
+200	0	199
+
+# the references are untouched by a restore
+query I
+SELECT count(*) FROM t AT (SNAPSHOT => 'early')
+----
+100
+
+query I
+SELECT count(*) FROM t AT (BRANCH => 'late')
+----
+200
+
+# a time before every reference has nothing to reach, and says so rather than picking one anyway
+statement ok
+DELETE FROM t WHERE k >= 100
+
+statement error
+PRAGMA git4data_restore_at('t', '2020-01-01 00:00:00')
+----
+<REGEX>:.*2020-01-01.*nothing to restore.*
+
+query I
+SELECT count(*) FROM t
+----
+100
+
+# the timestamps are part of the reference, so they survive the file
+statement ok
+CHECKPOINT
+
+restart
+
+# the timestamp itself is the wall clock, so the listing is asserted for shape only; that the
+# reference still carries one is what the restore below needs
+statement ok
+PRAGMA git4data_snapshots
+
+statement ok
+PRAGMA git4data_restore_at('t', '2030-01-01 00:00:00')
+
+query III
+SELECT count(*), min(k), max(k) FROM t
+----
+200	0	199

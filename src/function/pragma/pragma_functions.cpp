@@ -171,12 +171,9 @@ static vector<string> Git4DataPrimaryKeyColumnNames(TableCatalogEntry &table) {
 //! the reference's rows back, rather than comparing them column by column: the table is being rewound,
 //! so rewriting the rows it keeps is the honest reading of that, and it needs no comparison. The
 //! primary key decides which rows those are, as it does for a pick.
-static string PragmaGit4DataRestore(ClientContext &context, const FunctionParameters &parameters) {
-	auto table_name = parameters.values[0].ToString();
-	auto reference = parameters.values[1].ToString();
-	auto &transaction_manager = GetGit4DataTransactionManager(context);
-	auto unit = ResolveGit4DataReference(transaction_manager, reference);
-
+//! The statements that rewind a table to a reference, shared by the by-name and by-time forms
+static string BuildGit4DataRestore(ClientContext &context, const string &table_name, const string &reference,
+                                   const char *unit) {
 	auto &table = Catalog::GetEntry<TableCatalogEntry>(context, QualifiedName(Identifier(table_name)));
 	auto key_columns = Git4DataPrimaryKeyColumnNames(table);
 	if (key_columns.empty()) {
@@ -201,6 +198,49 @@ static string PragmaGit4DataRestore(ClientContext &context, const FunctionParame
 	result += StringUtil::Format("DELETE FROM %s;\n", quoted_table);
 	result += StringUtil::Format("INSERT INTO %s SELECT * FROM %s;", quoted_table, at_clause);
 	return result;
+}
+
+static string PragmaGit4DataRestore(ClientContext &context, const FunctionParameters &parameters) {
+	auto table_name = parameters.values[0].ToString();
+	auto reference = parameters.values[1].ToString();
+	auto unit = ResolveGit4DataReference(GetGit4DataTransactionManager(context), reference);
+	return BuildGit4DataRestore(context, table_name, reference, unit);
+}
+
+//! Rewind a table to the newest reference taken at or before a wall-clock time. Commit ids are a
+//! counter, so "as of 14:30" can only be answered from the timestamp each reference records; the
+//! reach is therefore as far back as references are still held.
+static string PragmaGit4DataRestoreAt(ClientContext &context, const FunctionParameters &parameters) {
+	auto table_name = parameters.values[0].ToString();
+	auto target = parameters.values[1].DefaultCastAs(LogicalType::TIMESTAMP);
+	auto target_ts = TimestampValue::Get(target);
+	auto &transaction_manager = GetGit4DataTransactionManager(context);
+
+	string best;
+	timestamp_t best_ts;
+	bool found = false;
+	auto consider = [&](const string &name, timestamp_t created) {
+		if (created > target_ts || (found && created <= best_ts)) {
+			return;
+		}
+		best = name;
+		best_ts = created;
+		found = true;
+	};
+	for (auto &snapshot : transaction_manager.snapshots.List()) {
+		consider(snapshot.name, snapshot.created);
+	}
+	for (auto &branch : transaction_manager.branches.List()) {
+		consider(branch.name, branch.created);
+	}
+	if (!found) {
+		throw InvalidInputException("No snapshot or branch was taken at or before %s, so there is nothing to "
+		                            "restore \"%s\" to",
+		                            target.ToString(), table_name);
+	}
+	// the name was chosen from the registries, so it resolves
+	auto unit = ResolveGit4DataReference(transaction_manager, best);
+	return BuildGit4DataRestore(context, table_name, best, unit);
 }
 
 //! Apply the changes one reference has relative to another onto the live table. Expressed as SQL
@@ -278,7 +318,7 @@ static void PragmaGit4DataCreateBranch(ClientContext &context, const FunctionPar
 		}
 		pin = parent_branch.pin;
 	}
-	if (!transaction_manager.branches.Create(name, pin, parent)) {
+	if (!transaction_manager.branches.Create(name, pin, parent, Timestamp::GetCurrentTimestamp())) {
 		throw InvalidInputException("Branch \"%s\" already exists", name);
 	}
 }
@@ -301,7 +341,7 @@ static string PragmaGit4DataBranches(ClientContext &context, const FunctionParam
 	auto entries = GetGit4DataTransactionManager(context).branches.List();
 	if (entries.empty()) {
 		return "SELECT NULL::VARCHAR AS branch_name, NULL::UBIGINT AS pinned_commit_id, "
-		       "NULL::VARCHAR AS parent_branch WHERE false";
+		       "NULL::VARCHAR AS parent_branch, NULL::TIMESTAMP AS created WHERE false";
 	}
 	string query = "SELECT * FROM (VALUES ";
 	for (idx_t i = 0; i < entries.size(); i++) {
@@ -311,9 +351,10 @@ static string PragmaGit4DataBranches(ClientContext &context, const FunctionParam
 		// Branch names are user input, escape them before splicing into SQL
 		auto name = StringUtil::Replace(entries[i].name, "'", "''");
 		auto parent = StringUtil::Replace(entries[i].parent, "'", "''");
-		query += StringUtil::Format("('%s'::VARCHAR, %llu::UBIGINT, '%s'::VARCHAR)", name, entries[i].pin, parent);
+		query += StringUtil::Format("('%s'::VARCHAR, %llu::UBIGINT, '%s'::VARCHAR, '%s'::TIMESTAMP)", name,
+		                            entries[i].pin, parent, Timestamp::ToString(entries[i].created));
 	}
-	query += ") t(branch_name, pinned_commit_id, parent_branch) ORDER BY pinned_commit_id, branch_name";
+	query += ") t(branch_name, pinned_commit_id, parent_branch, created) ORDER BY pinned_commit_id, branch_name";
 	return query;
 }
 
@@ -341,7 +382,8 @@ static void PragmaGit4DataCreateSnapshot(ClientContext &context, const FunctionP
 	auto name = parameters.values[0].ToString();
 	auto &transaction_manager = GetGit4DataTransactionManager(context);
 	// Pin at the newest commit, keep everything committed so far readable
-	if (!transaction_manager.snapshots.Create(name, transaction_manager.GetLastCommit())) {
+	if (!transaction_manager.snapshots.Create(name, transaction_manager.GetLastCommit(),
+	                                          Timestamp::GetCurrentTimestamp())) {
 		throw InvalidInputException("Snapshot \"%s\" already exists", name);
 	}
 }
@@ -357,7 +399,8 @@ static void PragmaGit4DataDropSnapshot(ClientContext &context, const FunctionPar
 static string PragmaGit4DataSnapshots(ClientContext &context, const FunctionParameters &parameters) {
 	auto entries = GetGit4DataTransactionManager(context).snapshots.List();
 	if (entries.empty()) {
-		return "SELECT NULL::VARCHAR AS snapshot_name, NULL::UBIGINT AS pinned_commit_id WHERE false";
+		return "SELECT NULL::VARCHAR AS snapshot_name, NULL::UBIGINT AS pinned_commit_id, "
+		       "NULL::TIMESTAMP AS created WHERE false";
 	}
 	string query = "SELECT * FROM (VALUES ";
 	for (idx_t i = 0; i < entries.size(); i++) {
@@ -366,9 +409,10 @@ static string PragmaGit4DataSnapshots(ClientContext &context, const FunctionPara
 		}
 		// Snapshot names are user input, escape them before splicing into SQL
 		auto name = StringUtil::Replace(entries[i].name, "'", "''");
-		query += StringUtil::Format("('%s'::VARCHAR, %llu::UBIGINT)", name, entries[i].pin);
+		query += StringUtil::Format("('%s'::VARCHAR, %llu::UBIGINT, '%s'::TIMESTAMP)", name, entries[i].pin,
+		                            Timestamp::ToString(entries[i].created));
 	}
-	query += ") t(snapshot_name, pinned_commit_id) ORDER BY pinned_commit_id";
+	query += ") t(snapshot_name, pinned_commit_id, created) ORDER BY pinned_commit_id";
 	return query;
 }
 
@@ -543,6 +587,8 @@ void PragmaFunctions::RegisterFunction(BuiltinFunctions &set) {
 	set.AddFunction(PragmaFunction::PragmaCall("git4data_pick", PragmaGit4DataPick,
 	                                           {LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR}));
 	set.AddFunction(PragmaFunction::PragmaCall("git4data_restore", PragmaGit4DataRestore,
+	                                           {LogicalType::VARCHAR, LogicalType::VARCHAR}));
+	set.AddFunction(PragmaFunction::PragmaCall("git4data_restore_at", PragmaGit4DataRestoreAt,
 	                                           {LogicalType::VARCHAR, LogicalType::VARCHAR}));
 	set.AddFunction(PragmaFunction::PragmaStatement("git4data_state", PragmaGit4DataState));
 	set.AddFunction(PragmaFunction::PragmaCall("git4data_probe", PragmaGit4DataProbe, {LogicalType::VARCHAR}));

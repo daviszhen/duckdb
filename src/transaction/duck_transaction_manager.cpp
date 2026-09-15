@@ -24,12 +24,12 @@
 
 namespace duckdb {
 
-bool SnapshotRegistry::Create(const string &name, transaction_t pin) {
+bool SnapshotRegistry::Create(const string &name, transaction_t pin, timestamp_t created) {
 	lock_guard<mutex> guard(lock);
 	if (snapshots.find(name) != snapshots.end()) {
 		return false;
 	}
-	snapshots.emplace(name, pin);
+	snapshots.emplace(name, Git4DataSnapshot {name, pin, created});
 	RecomputeLowest();
 	dirty.store(true);
 	return true;
@@ -52,7 +52,7 @@ vector<Git4DataSnapshot> SnapshotRegistry::List() const {
 	vector<Git4DataSnapshot> result;
 	result.reserve(snapshots.size());
 	for (auto &entry : snapshots) {
-		result.push_back(Git4DataSnapshot {entry.first, entry.second});
+		result.push_back(entry.second);
 	}
 	return result;
 }
@@ -63,7 +63,7 @@ optional_idx SnapshotRegistry::GetPin(const string &name) const {
 	if (entry == snapshots.end()) {
 		return optional_idx();
 	}
-	return optional_idx(entry->second);
+	return optional_idx(entry->second.pin);
 }
 
 idx_t SnapshotRegistry::Count() const {
@@ -71,7 +71,7 @@ idx_t SnapshotRegistry::Count() const {
 	return snapshots.size();
 }
 
-bool BranchRegistry::Create(const string &name, transaction_t pin, const string &parent) {
+bool BranchRegistry::Create(const string &name, transaction_t pin, const string &parent, timestamp_t created) {
 	lock_guard<mutex> guard(lock);
 	if (branches.find(name) != branches.end()) {
 		return false;
@@ -80,15 +80,15 @@ bool BranchRegistry::Create(const string &name, transaction_t pin, const string 
 		// a branch has to descend from something, or its lineage cannot be walked
 		return false;
 	}
-	branches.emplace(name, Git4DataBranch {name, pin, parent});
+	branches.emplace(name, Git4DataBranch {name, pin, parent, created});
 	RecomputeLowest();
 	dirty.store(true);
 	return true;
 }
 
-void BranchRegistry::Restore(const string &name, transaction_t pin, const string &parent) {
+void BranchRegistry::Restore(const string &name, transaction_t pin, const string &parent, timestamp_t created) {
 	lock_guard<mutex> guard(lock);
-	branches[name] = Git4DataBranch {name, pin, parent};
+	branches[name] = Git4DataBranch {name, pin, parent, created};
 	RecomputeLowest();
 }
 
@@ -196,8 +196,8 @@ void BranchRegistry::RecomputeLowest() {
 void SnapshotRegistry::RecomputeLowest() {
 	transaction_t lowest = MAX_COMMIT_ID;
 	for (auto &entry : snapshots) {
-		if (entry.second < lowest) {
-			lowest = entry.second;
+		if (entry.second.pin < lowest) {
+			lowest = entry.second.pin;
 		}
 	}
 	lowest_pin.store(lowest);

@@ -315,6 +315,7 @@ void SingleFileCheckpointWriter::CreateCheckpoint() {
 			list.WriteObject([&](Serializer &obj) {
 				obj.WriteProperty<string>(100, "name", pinned_snapshots[i].name);
 				obj.WriteProperty<uint64_t>(101, "pin", pinned_snapshots[i].pin);
+				obj.WriteProperty<int64_t>(102, "created", pinned_snapshots[i].created.value);
 			});
 		});
 		// branches go beside the snapshots because they are references in the same sense: each
@@ -324,6 +325,7 @@ void SingleFileCheckpointWriter::CreateCheckpoint() {
 				obj.WriteProperty<string>(100, "name", data_branches[i].name);
 				obj.WriteProperty<uint64_t>(101, "pin", data_branches[i].pin);
 				obj.WriteProperty<string>(102, "parent", data_branches[i].parent);
+				obj.WriteProperty<int64_t>(103, "created", data_branches[i].created.value);
 			});
 		});
 		registry_serializer.End();
@@ -477,7 +479,9 @@ void SingleFileCheckpointReader::LoadFromStorage() {
 			return list.ReadObject([&](Deserializer &obj) {
 				auto name = obj.ReadProperty<string>(100, "name");
 				auto pin = obj.ReadProperty<uint64_t>(101, "pin");
-				transaction_manager.snapshots.Create(name, pin);
+				// zero when the block predates the timestamp being recorded
+				auto created = obj.ReadPropertyWithExplicitDefault<int64_t>(102, "created", 0);
+				transaction_manager.snapshots.Create(name, pin, timestamp_t(created));
 			});
 		});
 		// optional, because the block predates branches in files written before they existed.
@@ -488,7 +492,8 @@ void SingleFileCheckpointReader::LoadFromStorage() {
 				auto name = obj.ReadProperty<string>(100, "name");
 				auto pin = obj.ReadProperty<uint64_t>(101, "pin");
 				auto parent = obj.ReadProperty<string>(102, "parent");
-				transaction_manager.branches.Restore(name, pin, parent);
+				auto created = obj.ReadPropertyWithExplicitDefault<int64_t>(103, "created", 0);
+				transaction_manager.branches.Restore(name, pin, parent, timestamp_t(created));
 			});
 		});
 		registry_deserializer.End();

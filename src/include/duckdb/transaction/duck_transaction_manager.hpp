@@ -13,6 +13,7 @@
 #include "duckdb/common/enums/checkpoint_type.hpp"
 #include "duckdb/common/queue.hpp"
 #include "duckdb/common/unordered_map.hpp"
+#include "duckdb/common/types/timestamp.hpp"
 
 namespace duckdb {
 class DuckTransactionManager;
@@ -39,6 +40,9 @@ struct Git4DataSnapshot {
 	string name;
 	//! Everything committed up to and including this commit id stays visible
 	transaction_t pin;
+	//! When the reference was taken, on the wall clock. Commit ids are a counter, not a time, so a
+	//! restore by time ("rewind to how it was at 14:30") has to be answered from this.
+	timestamp_t created;
 };
 
 //! Registry of pinned snapshots. Pinned bounds fold into the transaction manager's
@@ -46,7 +50,7 @@ struct Git4DataSnapshot {
 class SnapshotRegistry {
 public:
 	//! Pin a new snapshot at the given commit id. Returns false if the name exists.
-	bool Create(const string &name, transaction_t pin);
+	bool Create(const string &name, transaction_t pin, timestamp_t created);
 	//! Release a pinned snapshot. Returns false if the name is unknown.
 	bool Drop(const string &name);
 	vector<Git4DataSnapshot> List() const;
@@ -72,7 +76,7 @@ private:
 
 private:
 	mutable mutex lock;
-	unordered_map<string, transaction_t> snapshots;
+	unordered_map<string, Git4DataSnapshot> snapshots;
 	std::atomic<transaction_t> lowest_pin {MAX_COMMIT_ID};
 	//! Set by Create/Drop, cleared once a checkpoint has written the registry. A checkpoint
 	//! with nothing in the WAL skips its body entirely, so without this a snapshot taken on
@@ -89,6 +93,8 @@ struct Git4DataBranch {
 	transaction_t pin;
 	//! The branch this one was created from. Empty for a root branch.
 	string parent;
+	//! When the branch was taken, on the wall clock, as for a snapshot
+	timestamp_t created;
 };
 
 //! Registry of data branches. A branch is a reference like a snapshot is - both pin the
@@ -97,7 +103,7 @@ struct Git4DataBranch {
 class BranchRegistry {
 public:
 	//! Create a branch. Returns false if the name exists.
-	bool Create(const string &name, transaction_t pin, const string &parent);
+	bool Create(const string &name, transaction_t pin, const string &parent, timestamp_t created);
 	//! Drop a branch. Returns false if the name is unknown, or if it still has children -
 	//! removing it would leave those children's lineage dangling.
 	bool Drop(const string &name);
@@ -122,7 +128,7 @@ public:
 		dirty.store(false);
 	}
 	//! Restore a branch read from disk without the checks Create performs
-	void Restore(const string &name, transaction_t pin, const string &parent);
+	void Restore(const string &name, transaction_t pin, const string &parent, timestamp_t created);
 
 private:
 	//! Recompute the cached minimum pin. Caller must hold the lock.
