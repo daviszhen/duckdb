@@ -412,6 +412,11 @@ DuckTransactionManager::GetCheckpointType(DuckTransaction &transaction, const Un
 	return CheckpointDecision(checkpoint_type);
 }
 
+bool DuckTransactionManager::NoActiveWriter() {
+	auto lock = vacuum_lock.TryGetExclusiveLock();
+	return lock != nullptr;
+}
+
 idx_t DuckTransactionManager::UserSnapshotCount() const {
 	auto count = snapshots.Count();
 	if (pitr_enabled && count > 0) {
@@ -505,6 +510,11 @@ void DuckTransactionManager::Checkpoint(ClientContext &context, bool force) {
 	if (GetLastCommit() >= LowestRetentionBound()) {
 		// we cannot do a full checkpoint if any transaction needs to read old data
 		options.type = CheckpointType::CONCURRENT_CHECKPOINT;
+		if (HasReferences()) {
+			// a reference is holding the retention bound down, and it has no transaction behind it:
+			// with nothing writing, vacuum can still reclaim what no reference can reach
+			options.can_vacuum_under_reference = NoActiveWriter();
+		}
 	}
 
 	storage_manager.CreateCheckpoint(context, options);
@@ -708,6 +718,11 @@ ErrorData DuckTransactionManager::CommitTransaction(ClientContext &context, Tran
 		CheckpointOptions options;
 		options.action = CheckpointAction::ALWAYS_CHECKPOINT;
 		options.type = checkpoint_decision.type;
+		if (options.type == CheckpointType::CONCURRENT_CHECKPOINT && HasReferences()) {
+			// a reference makes the checkpoint concurrent without a transaction behind it, so vacuum
+			// may still run as long as nothing is writing
+			options.can_vacuum_under_reference = NoActiveWriter();
+		}
 		// every checkpoint has to know what a pinned snapshot still needs, not just the ones
 		// an explicit CHECKPOINT triggers - an automatic one writes the same state to disk
 		options.retention_bound = LowestRetentionBound();

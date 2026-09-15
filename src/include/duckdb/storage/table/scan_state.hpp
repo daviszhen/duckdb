@@ -288,6 +288,14 @@ public:
 	optional_idx row_number_base;
 	//! The valid selection
 	SelectionVector valid_sel;
+	//! The vector that produced the chunk the last scan call returned, and whether that chunk holds
+	//! every row of it. Together with valid_sel they say which source rows a caller moving those rows
+	//! (vacuum) has to look up version information for. DConstants::INVALID_INDEX when no chunk was
+	//! produced yet.
+	idx_t last_scanned_vector = DConstants::INVALID_INDEX;
+	//! Whether the last scanned chunk holds all rows of last_scanned_vector, in which case valid_sel
+	//! does not describe it
+	bool last_scanned_vector_full = false;
 	//! The currently prepared vector (see RowGroup::PrepareScan)
 	PreparedScanVector prepared_vector;
 	//! Whether scan I/O for the current row group assignment has been registered

@@ -37,6 +37,11 @@ struct CheckpointOptions {
 	//! Keeping it AllCommitted() while nothing is pinned leaves the compact id-free forms in
 	//! use, which is what an unpinned database writes.
 	VisibilityBound id_retention_bound = VisibilityBound::AllCommitted();
+	//! Whether vacuum may run even though this is a concurrent checkpoint, because a reference is the
+	//! only reason it is not a full one and no transaction is writing. The vacuum carries the version
+	//! information each reference needs into the row groups it writes, which is what makes it correct
+	//! without the exclusive vacuum lock a full checkpoint would hold.
+	bool can_vacuum_under_reference = false;
 	//! The WAL lock - in case we are holding it during the entire checkpoint.
 	//! This is only required if we are doing a checkpoint instead of writing to the WAL
 	optional_ptr<unique_lock<mutex>> wal_lock;

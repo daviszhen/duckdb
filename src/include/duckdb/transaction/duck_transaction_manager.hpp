@@ -199,6 +199,15 @@ public:
 	//! Snapshots the user asked for, which is every one but the recovery window's own
 	idx_t UserSnapshotCount() const;
 
+	//! Whether no active transaction is writing. A transaction that inserts or deletes holds the
+	//! vacuum lock for as long as it is open, so a vacuum lock that can be taken exclusively says
+	//! there is none - and none can appear while a checkpoint holds the checkpoint lock.
+	bool NoActiveWriter();
+	//! Whether any reference is held: a pinned snapshot or a branch
+	bool HasReferences() const {
+		return snapshots.Count() > 0 || branches.Count() > 0;
+	}
+
 	//! A point-in-time recovery window: one reference that is moved forward as it falls out of the
 	//! window, so the last `window` of history stays reachable without anyone remembering to take a
 	//! reference. A window of zero moves it at every checkpoint, which keeps nothing.

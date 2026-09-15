@@ -186,6 +186,15 @@ public:
 
 	//! Append count rows to the version info
 	void AppendVersionInfo(TransactionData transaction, idx_t count);
+	//! The insert and delete ids of a run of rows, for a caller carrying the version information of those
+	//! rows into another row group. sel names the rows; null means the run is the whole vector from row 0.
+	void GetVersionIdsForRows(idx_t vector_idx, const SelectionVector *sel, idx_t count, transaction_t *insert_ids,
+	                          transaction_t *delete_ids);
+	//! Record the version information of rows that were appended to this row group from another one, so
+	//! that a reader pinned below them keeps seeing exactly what it saw. `start` is the row the run
+	//! begins at within this row group.
+	void SetVersionInfoForAppendedRows(const transaction_t *insert_ids, const transaction_t *delete_ids, idx_t start,
+	                                   idx_t count);
 	//! Commit a previous append made by RowGroup::AppendVersionInfo
 	void CommitAppend(transaction_t commit_id, idx_t start, idx_t count);
 	//! Revert a previous append made by RowGroup::AppendVersionInfo
@@ -204,6 +213,9 @@ public:
 	RowGroupWriteData WriteToDisk(RowGroupWriteInfo &info) const;
 	//! Returns the number of committed rows (count - committed deletes)
 	idx_t GetCommittedRowCount();
+	//! The number of rows a reader pinned at the given bound still sees: the rows not deleted below it,
+	//! which includes rows deleted at or after it. GetCommittedRowCount is this at AllCommitted.
+	idx_t GetRowCountAtBound(VisibilityBound bound);
 	//! Returns the number of rows visible to the given transaction
 	idx_t GetVisibleRowCount(TransactionData transaction);
 	//! Count visible rows in a scan assignment starting at a vector boundary

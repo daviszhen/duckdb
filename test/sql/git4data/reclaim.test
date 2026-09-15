@@ -1,0 +1,117 @@
+# name: test/sql/git4data/reclaim.test
+# description: A checkpoint under a reference reclaims what that reference cannot reach
+# group: [git4data]
+
+load {TEST_DIR}/reclaim.db
+
+statement ok
+CREATE TABLE t AS SELECT range AS i, range AS v FROM range(40000);
+
+# Half of round one is deleted with no reference held. A single partially deleted row group is left
+# as it is, because vacuum rewrites row groups by merging them and there is nothing to merge with yet.
+statement ok
+DELETE FROM t WHERE i % 2 = 0;
+
+statement ok
+CHECKPOINT;
+
+query I
+SELECT sum("count") FROM pragma_storage_info('t') WHERE column_id = 0 AND segment_type <> 'VALIDITY'
+----
+40000
+
+# The reference is taken after that delete, so it never sees those rows: they are below its bound.
+statement ok
+PRAGMA git4data_create_snapshot('pin');
+
+# Deleting the rest of round one is what a reference makes expensive - those rows have to stay
+# readable to it, so vacuum cannot simply reclaim them.
+statement ok
+DELETE FROM t WHERE i % 2 = 1;
+
+statement ok
+CHECKPOINT;
+
+query III
+SELECT (SELECT count(*) FROM t), (SELECT count(*) FROM t AT (SNAPSHOT => 'pin')),
+       (SELECT sum("count") FROM pragma_storage_info('t') WHERE column_id = 0 AND segment_type <> 'VALIDITY')
+----
+0	20000	40000
+
+# Round two is inserted after the reference, which cannot see any of it. The next checkpoint merges
+# the two row groups, and while it does it reclaims exactly what the reference cannot reach: round
+# one's pre-reference deletes. What the reference still needs stays in the file - the rows it deleted
+# later, and round two, which is live.
+statement ok
+INSERT INTO t SELECT 100000 + range, 100000 + range FROM range(40000);
+
+statement ok
+CHECKPOINT;
+
+query III
+SELECT (SELECT count(*) FROM t), (SELECT count(*) FROM t AT (SNAPSHOT => 'pin')),
+       (SELECT sum("count") FROM pragma_storage_info('t') WHERE column_id = 0 AND segment_type <> 'VALIDITY')
+----
+40000	20000	60000
+
+# The reference reads exactly what it read before, values included: the rows it deleted later are
+# still rows to it. That is what carrying their version information into the rewritten row group has
+# to achieve; an implementation that dropped the markers would show 0 rows here instead.
+query III
+SELECT count(*), sum(i), sum(v) FROM t AT (SNAPSHOT => 'pin')
+----
+20000	400000000	400000000
+
+# The current view still hides what it hid: a row moved for a reference's sake must not come back,
+# and a row deleted after the reference must not reappear in it.
+statement ok
+DELETE FROM t WHERE i % 2 = 1;
+
+statement ok
+CHECKPOINT;
+
+query III
+SELECT count(*), sum(i), sum(v) FROM t
+----
+20000	2399980000	2399980000
+
+query III
+SELECT count(*), sum(i), sum(v) FROM t AT (SNAPSHOT => 'pin')
+----
+20000	400000000	400000000
+
+# The version information that travelled with the rows reaches the file, so a reopen agrees.
+restart
+
+query III
+SELECT count(*), sum(i), sum(v) FROM t AT (SNAPSHOT => 'pin')
+----
+20000	400000000	400000000
+
+query III
+SELECT count(*), sum(i), sum(v) FROM t
+----
+20000	2399980000	2399980000
+
+# A further checkpoint under the reference still changes nothing.
+statement ok
+CHECKPOINT;
+
+query III
+SELECT count(*), sum(i), sum(v) FROM t AT (SNAPSHOT => 'pin')
+----
+20000	400000000	400000000
+
+# Dropping the reference turns those retained rows into ordinary deleted rows. This checkpoint does
+# not reclaim them: what is left is one partially deleted row group, which vacuum leaves alone until a
+# merge pays for itself. Nothing depends on them any more, which is the point.
+statement ok
+PRAGMA git4data_drop_snapshot('pin');
+
+statement ok
+CHECKPOINT;
+
+query III
+SELECT count(*), sum(i), sum(v) FROM t
+----
+20000	2399980000	2399980000

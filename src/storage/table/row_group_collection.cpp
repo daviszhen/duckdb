@@ -1354,6 +1354,16 @@ public:
 		auto &initial_append_row_group = *new_row_groups[current_append_idx];
 		RowGroup::InitializeAppend(initial_append_row_group, append_state.row_group_append_state);
 
+		// Scan at the very bound this pass was planned with, so the rows the plan counted and the rows
+		// the scan hands over are the same rows even if a reference is dropped while it runs. A row
+		// deleted at or after that bound is still a row to a reference, so it has to move into the new
+		// row group instead of being reclaimed, and a row inserted after it moves with it.
+		ScanOptions vacuum_scan_options(
+		    TransactionData(MAX_TRANSACTION_ID, checkpoint_state.writer.GetCheckpointOptions().retention_bound));
+		vacuum_scan_options.insert_type = InsertedScanType::ALL_ROWS;
+		vacuum_scan_options.delete_type = DeletedScanType::OMIT_COMMITTED_DELETES;
+		vacuum_scan_options.update_type = UpdateScanType::DISALLOW_UPDATES;
+
 		TableScanState scan_state;
 		scan_state.Initialize(column_ids);
 		scan_state.table_state.Initialize(QueryContext(), types);
@@ -1378,21 +1388,35 @@ public:
 			while (true) {
 				scan_chunk.Reset();
 
-				current_row_group.Scan(scan_state.table_state, scan_chunk, TableScanType::TABLE_SCAN_COMMITTED_ROWS);
+				current_row_group.Scan(vacuum_scan_options, scan_state.table_state, scan_chunk);
 				if (scan_chunk.size() == 0) {
 					break;
 				}
 				scan_chunk.Flatten();
 				const auto chunk_count = scan_chunk.size();
+				// The version information of the rows being moved has to travel with them. A row the
+				// retention bound still sees has to stay visible to it, and a row it does not see must
+				// not become visible to it here - which is what an id-less new row group would do.
+				vector<transaction_t> insert_ids(chunk_count);
+				vector<transaction_t> delete_ids(chunk_count);
+				current_row_group.GetVersionIdsForRows(
+				    scan_state.table_state.last_scanned_vector,
+				    scan_state.table_state.last_scanned_vector_full ? nullptr : &scan_state.table_state.valid_sel,
+				    chunk_count, insert_ids.data(), delete_ids.data());
 				// Buffer shifted rows and strip the scanned rowid column before appending to the new row groups.
 				auto &append_chunk =
 				    remapper ? remapper->ProcessScanChunk(scan_chunk, row_start.GetIndex() + live_row_offset)
 				             : scan_chunk;
 				idx_t remaining = append_chunk.size();
+				idx_t chunk_offset = 0;
 				while (remaining > 0) {
 					auto &current_append_row_group = new_row_groups[current_append_idx]->GetNode();
 					idx_t append_count = MinValue<idx_t>(remaining, row_group_size - append_counts[current_append_idx]);
+					const idx_t target_start = append_counts[current_append_idx];
 					current_append_row_group.Append(append_state.row_group_append_state, append_chunk, append_count);
+					current_append_row_group.SetVersionInfoForAppendedRows(
+					    insert_ids.data() + chunk_offset, delete_ids.data() + chunk_offset, target_start, append_count);
+					chunk_offset += append_count;
 					append_counts[current_append_idx] += append_count;
 					remaining -= append_count;
 					const bool row_group_full = append_counts[current_append_idx] == row_group_size;
@@ -1466,18 +1490,12 @@ private:
 void RowGroupCollection::InitializeVacuumState(CollectionCheckpointState &checkpoint_state, VacuumState &state,
                                                optional_idx checkpoint_row_group_count) {
 	auto options = checkpoint_state.writer.GetCheckpointOptions();
-	// currently we can only vacuum deletes if we are doing a full checkpoint
-	state.can_vacuum_deletes = options.type != CheckpointType::CONCURRENT_CHECKPOINT;
-	if (state.can_vacuum_deletes) {
-		// a pinned snapshot still needs the rows deleted at or after its bound, and vacuuming them
-		// away would leave that snapshot unreadable. The condition that forces a concurrent
-		// checkpoint has to hold vacuum back too, because the type alone does not carry it: an
-		// in-memory table checkpoints as VACUUM_ONLY, which reclaims deletes like a full one does.
-		auto &transaction_manager = DuckTransactionManager::Get(checkpoint_state.writer.GetAttached());
-		if (transaction_manager.GetLastCommit() >= options.retention_bound) {
-			state.can_vacuum_deletes = false;
-		}
-	}
+	// A concurrent checkpoint normally holds vacuum back, because the row groups it would move can
+	// still be under a reader. A reference is the exception the options carry: it lowers the retention
+	// bound without a transaction behind it, and the reads it serves rely on version ids, which this
+	// vacuum carries into the row groups it writes.
+	state.can_vacuum_deletes =
+	    options.type != CheckpointType::CONCURRENT_CHECKPOINT || options.can_vacuum_under_reference;
 	if (!state.can_vacuum_deletes) {
 		return;
 	}
@@ -1508,11 +1526,14 @@ void RowGroupCollection::InitializeVacuumState(CollectionCheckpointState &checkp
 	vector<idx_t> committed_counts;
 	for (auto &entry : checkpoint_state.row_groups.SegmentNodes()) {
 		auto &row_group = entry.GetNode();
-		auto row_group_num_rows = row_group.GetCommittedRowCount();
+		// Counting at the retention bound rather than at the last commit is what keeps this pass and the
+		// scan below in agreement: a row deleted at or after the bound is still a row here, because it is
+		// still a row for a reference and it is still a row the scan will hand to the new row group.
+		auto row_group_num_rows = row_group.GetRowCountAtBound(options.retention_bound);
 		if (legacy_vacuum_with_stable_row_ids) {
 			// In this legacy path, empty row groups in the middle must be kept because they would create a rowid gap
-			// that cannot be persisted or densely rewritten. Keep the committed counts so the pass below can
-			// still remove trailing deleted row groups.
+			// that cannot be persisted or densely rewritten. Keep the counts at the retention bound so the pass
+			// below can still remove trailing row groups nothing needs.
 			committed_counts.emplace_back(row_group_num_rows);
 		}
 		if (row_group_num_rows == 0) {

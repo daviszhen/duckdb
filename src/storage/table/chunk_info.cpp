@@ -333,6 +333,13 @@ void ChunkVectorInfo::FreeDeleteData() {
 	delete_state = DeleteIdState::CONSTANT;
 }
 
+void ChunkVectorInfo::FreeInsertData() {
+	if (!HasConstantInsertionId()) {
+		allocator.Free(inserted_data);
+		inserted_data = IndexPointer();
+	}
+}
+
 void ChunkVectorInfo::CompressDeleteToMask(transaction_t mask_id) {
 	D_ASSERT(delete_state == DeleteIdState::ARRAY);
 	// the mask can only carry a single committed id shared by every deleted row
@@ -805,6 +812,74 @@ transaction_t ChunkVectorInfo::ConstantDeleteId() const {
 		throw InternalException("ConstantDeleteId() called but vector info does not have a constant delete id");
 	}
 	return constant_delete_id;
+}
+
+transaction_t ChunkVectorInfo::GetInsertId(idx_t row) const {
+	if (HasConstantInsertionId()) {
+		return ConstantInsertId();
+	}
+	auto insert_segment = allocator.GetHandle(GetInsertedPointer());
+	return insert_segment.GetPtr<transaction_t>()[row];
+}
+
+void ChunkVectorInfo::SetInsertIds(idx_t start, idx_t count, const transaction_t *ids) {
+	bool all_equal = true;
+	for (idx_t i = 1; i < count; i++) {
+		if (ids[i] != ids[0]) {
+			all_equal = false;
+			break;
+		}
+	}
+	if (all_equal) {
+		if (HasConstantInsertionId() && ConstantInsertId() == ids[0]) {
+			// already exactly this
+			return;
+		}
+		if (start == 0) {
+			// A run that begins at the vector's first row can speak for the whole vector. Rows a later
+			// run adds continue it, and that run materializes the per-row ids and overwrites its own
+			// part when its id differs - so this stays correct without an array per vector.
+			FreeInsertData();
+			constant_insert_id = ids[0];
+			return;
+		}
+	}
+	// we are materializing / modifying per-row insert ids - re-arm the compression check
+	recheck_compression = true;
+	auto segment = allocator.GetHandle(GetInitializedInsertedPointer());
+	auto inserted = segment.GetPtr<transaction_t>();
+	for (idx_t i = 0; i < count; i++) {
+		inserted[start + i] = ids[i];
+	}
+}
+
+void ChunkVectorInfo::SetDeleteIds(idx_t start, idx_t count, const transaction_t *ids) {
+	bool all_equal = true;
+	for (idx_t i = 1; i < count; i++) {
+		if (ids[i] != ids[0]) {
+			all_equal = false;
+			break;
+		}
+	}
+	if (all_equal) {
+		if (HasConstantDeleteId() && ConstantDeleteId() == ids[0]) {
+			// nothing to record: the vector already says exactly this
+			return;
+		}
+		if (start == 0) {
+			// as above: the first run of a vector may speak for the whole of it
+			FreeDeleteData();
+			constant_delete_id = ids[0];
+			return;
+		}
+	}
+	// we are materializing / modifying per-row delete ids - re-arm the compression check
+	recheck_compression = true;
+	auto segment = allocator.GetHandle(GetInitializedDeletedPointer());
+	auto deleted = segment.GetPtr<transaction_t>();
+	for (idx_t i = 0; i < count; i++) {
+		deleted[start + i] = ids[i];
+	}
 }
 
 transaction_t ChunkVectorInfo::GetDeleteId(idx_t row) const {

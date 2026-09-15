@@ -114,6 +114,15 @@ public:
 	void Write(WriteStream &writer, VisibilityBound visibility_bound, VisibilityBound retention_bound) const;
 	//! The delete id of the given row, NOT_DELETED_ID when the row is alive
 	transaction_t GetDeleteId(idx_t row) const;
+	//! The insert id of the given row
+	transaction_t GetInsertId(idx_t row) const;
+	//! Record the insert ids of a run of rows moving in from another chunk, so that a reader pinned
+	//! below them still does not see them. Runs arrive in increasing row order, so a run beginning at
+	//! the vector's first row may set the vector's constant and a later run overwrites its own part.
+	void SetInsertIds(idx_t start, idx_t count, const transaction_t *ids);
+	//! The same for the delete side: a row deleted at or after the retention bound has to keep the id
+	//! that says so, or a reader pinned there loses a row it still sees.
+	void SetDeleteIds(idx_t start, idx_t count, const transaction_t *ids);
 	//! Whether any insert id is at or after the given bound, so a reader pinned there still
 	//! needs the insert side written out. Without this the checkpoint would skip a vector that
 	//! holds only freshly inserted rows and they would read as visible to everyone on reload.
@@ -131,6 +140,8 @@ private:
 	IndexPointer GetInitializedDeletedPointer();
 	//! Frees the per-row delete ids (if any)
 	void FreeDeleteData();
+	//! Frees the per-row insert ids (if any)
+	void FreeInsertData();
 	//! ARRAY -> MASKED: record alive rows as invalid bits, free the per-row delete array. mask_id is the
 	//! shared committed id of the deleted rows (0 when they are already visible to all transactions)
 	void CompressDeleteToMask(transaction_t mask_id);

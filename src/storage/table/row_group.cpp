@@ -1083,6 +1083,9 @@ void RowGroup::ProcessPreparedScan(ScanOptions options, CollectionScanState &sta
 		count = approved_tuple_count;
 	}
 	result.SetChildCardinality(count);
+	// remember which source vector produced this chunk, for a caller that has to move these rows
+	state.last_scanned_vector = state.vector_index;
+	state.last_scanned_vector_full = count == max_count && !has_sample_selection && !has_filters;
 	FinishVector(state);
 }
 
@@ -1258,6 +1261,25 @@ void RowGroup::AppendVersionInfo(TransactionData transaction, idx_t count) {
 	auto &vinfo = GetOrCreateVersionInfo();
 	vinfo.AppendVersionInfo(transaction, count, row_group_start, row_group_end);
 	SetCount(row_group_end);
+}
+
+void RowGroup::GetVersionIdsForRows(idx_t vector_idx, const SelectionVector *sel, idx_t count,
+                                    transaction_t *insert_ids, transaction_t *delete_ids) {
+	auto vinfo = GetVersionInfo();
+	if (!vinfo) {
+		for (idx_t i = 0; i < count; i++) {
+			insert_ids[i] = 0;
+			delete_ids[i] = NOT_DELETED_ID;
+		}
+		return;
+	}
+	vinfo->GetVersionIdsForRows(vector_idx, sel, count, insert_ids, delete_ids);
+}
+
+void RowGroup::SetVersionInfoForAppendedRows(const transaction_t *insert_ids, const transaction_t *delete_ids,
+                                             idx_t start, idx_t count) {
+	auto &vinfo = GetOrCreateVersionInfo();
+	vinfo.SetVersionInfoForAppendedRows(insert_ids, delete_ids, start, count);
 }
 
 void RowGroup::CommitAppend(transaction_t commit_id, idx_t row_group_start, idx_t count) {
@@ -1526,6 +1548,17 @@ idx_t RowGroup::GetCommittedRowCount() {
 		return count;
 	}
 	ScanOptions options(TransactionData(0, VisibilityBound::AllCommitted()));
+	options.insert_type = InsertedScanType::ALL_ROWS;
+	options.delete_type = DeletedScanType::OMIT_COMMITTED_DELETES;
+	return vinfo->GetRowCount(options, count);
+}
+
+idx_t RowGroup::GetRowCountAtBound(VisibilityBound bound) {
+	auto vinfo = GetVersionInfo();
+	if (!vinfo) {
+		return count;
+	}
+	ScanOptions options(TransactionData(0, bound));
 	options.insert_type = InsertedScanType::ALL_ROWS;
 	options.delete_type = DeletedScanType::OMIT_COMMITTED_DELETES;
 	return vinfo->GetRowCount(options, count);

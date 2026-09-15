@@ -201,6 +201,47 @@ idx_t RowVersionManager::DeleteRows(idx_t vector_idx, transaction_t transaction_
 	return GetVectorInfo(vector_idx).Delete(transaction_id, rows, count);
 }
 
+void RowVersionManager::GetVersionIdsForRows(idx_t vector_idx, const SelectionVector *sel, idx_t count,
+                                             transaction_t *insert_ids, transaction_t *delete_ids) {
+	lock_guard<mutex> lock(version_lock);
+	if (vector_idx >= vector_info.size() || !vector_info[vector_idx]) {
+		// no version info: every row is visible to everyone, so it carries the start of the timeline
+		for (idx_t i = 0; i < count; i++) {
+			insert_ids[i] = 0;
+			delete_ids[i] = NOT_DELETED_ID;
+		}
+		return;
+	}
+	auto &info = *vector_info[vector_idx];
+	for (idx_t i = 0; i < count; i++) {
+		const idx_t row = sel ? sel->get_index(i) : i;
+		insert_ids[i] = info.GetInsertId(row);
+		delete_ids[i] = info.GetDeleteId(row);
+	}
+}
+
+void RowVersionManager::SetVersionInfoForAppendedRows(const transaction_t *insert_ids, const transaction_t *delete_ids,
+                                                      idx_t start, idx_t count) {
+	if (count == 0) {
+		return;
+	}
+	const idx_t end = start + count;
+
+	lock_guard<mutex> lock(version_lock);
+	needs_compression_check = true;
+	const idx_t start_vector_idx = start / STANDARD_VECTOR_SIZE;
+	const idx_t end_vector_idx = (end - 1) / STANDARD_VECTOR_SIZE;
+	for (idx_t vector_idx = start_vector_idx; vector_idx <= end_vector_idx; vector_idx++) {
+		const idx_t vstart = vector_idx == start_vector_idx ? start - start_vector_idx * STANDARD_VECTOR_SIZE : 0;
+		const idx_t vend =
+		    vector_idx == end_vector_idx ? end - end_vector_idx * STANDARD_VECTOR_SIZE : STANDARD_VECTOR_SIZE;
+		const idx_t offset = vector_idx * STANDARD_VECTOR_SIZE + vstart - start;
+		auto &info = GetVectorInfo(vector_idx);
+		info.SetInsertIds(vstart, vend - vstart, insert_ids + offset);
+		info.SetDeleteIds(vstart, vend - vstart, delete_ids + offset);
+	}
+}
+
 void RowVersionManager::CommitDelete(idx_t vector_idx, transaction_t commit_id, const DeleteInfo &info) {
 	lock_guard<mutex> lock(version_lock);
 	needs_compression_check = true;

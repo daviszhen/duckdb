@@ -41,6 +41,17 @@ public:
 	idx_t DeleteRows(idx_t vector_idx, transaction_t transaction_id, row_t rows[], idx_t count);
 	void CommitDelete(idx_t vector_idx, transaction_t commit_id, const DeleteInfo &info);
 
+	//! The insert and delete ids of a run of rows of one vector, for a caller carrying the version
+	//! information of those rows into another row group. sel names the rows; null means the run is the
+	//! whole vector from its first row.
+	void GetVersionIdsForRows(idx_t vector_idx, const SelectionVector *sel, idx_t count, transaction_t *insert_ids,
+	                          transaction_t *delete_ids);
+	//! Record the version information of rows moving into this row group from another one, so that a
+	//! reader pinned below them keeps seeing exactly what it saw. `start` is the row the run begins at
+	//! within this row group.
+	void SetVersionInfoForAppendedRows(const transaction_t *insert_ids, const transaction_t *delete_ids, idx_t start,
+	                                   idx_t count);
+
 	//! Attempts to compress the per-row insert/delete ids of each vector into constants. Ids that precede
 	//! lowest_visibility_bound look the same to every active and future transaction, so they can collapse.
 	//! Cheap when nothing can have changed: the pass only runs when version ids were modified since the
