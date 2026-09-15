@@ -48,7 +48,7 @@ PRAGMA git4data_create_branch('a', 'root')
 statement error
 PRAGMA git4data_create_branch('c', 'missing')
 ----
-<REGEX>:.*missing.*does not exist.*
+<REGEX>:.*missing.*neither a branch nor a snapshot.*
 
 # dropping a branch that others descend from is refused - it would leave their lineage dangling
 statement error

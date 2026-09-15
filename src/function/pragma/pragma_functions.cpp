@@ -639,21 +639,34 @@ static void PragmaGit4DataCreateBranch(ClientContext &context, const FunctionPar
 	auto name = parameters.values[0].ToString();
 	auto parent = parameters.values[1].ToString();
 	auto &transaction_manager = GetGit4DataTransactionManager(context);
-	// A branch descends from another branch when one is named; otherwise it starts at the
-	// newest commit, which is the point a snapshot would pin. Either way the branch holds its
-	// base down exactly as a pin does.
+	// A branch descends from another branch when one is named; otherwise it starts at the newest
+	// commit. Either way the branch holds its base down exactly as a pin does.
+	//
+	// The ancestor may also be a snapshot, which is how a line is started from a state that is no
+	// longer the newest one - a snapshot is a commit, and a commit is what a branch is forked from.
+	// Such a line has no branch ancestor, so a merge that has to find one between it and another
+	// branch still refuses; a pick takes its base explicitly and works.
 	transaction_t pin;
+	bool parent_is_snapshot = false;
 	if (parent.empty()) {
 		pin = transaction_manager.GetLastCommit();
 	} else {
 		Git4DataBranch parent_branch;
-		if (!transaction_manager.branches.Get(parent, parent_branch)) {
-			throw InvalidInputException("Branch \"%s\" does not exist", parent);
+		if (transaction_manager.branches.Get(parent, parent_branch)) {
+			pin = parent_branch.pin;
+		} else {
+			auto snapshot_pin = transaction_manager.snapshots.GetPin(parent);
+			if (!snapshot_pin.IsValid()) {
+				throw InvalidInputException("Reference \"%s\" is neither a branch nor a snapshot, so a branch "
+				                            "cannot descend from it",
+				                            parent);
+			}
+			pin = snapshot_pin.GetIndex();
+			parent_is_snapshot = true;
 		}
-		pin = parent_branch.pin;
 	}
 	CheckGit4DataReferenceLimit("branches", transaction_manager.branches.Count(), transaction_manager.branch_limit);
-	if (!transaction_manager.branches.Create(name, pin, parent, Timestamp::GetCurrentTimestamp())) {
+	if (!transaction_manager.branches.Create(name, pin, parent, Timestamp::GetCurrentTimestamp(), parent_is_snapshot)) {
 		throw InvalidInputException("Branch \"%s\" already exists", name);
 	}
 }
@@ -687,7 +700,7 @@ static string PragmaGit4DataBranches(ClientContext &context, const FunctionParam
 	auto entries = GetGit4DataTransactionManager(context).branches.List();
 	if (entries.empty()) {
 		return "SELECT NULL::VARCHAR AS branch_name, NULL::UBIGINT AS pinned_commit_id, "
-		       "NULL::VARCHAR AS parent_branch, NULL::TIMESTAMP AS created WHERE false";
+		       "NULL::VARCHAR AS parent, NULL::TIMESTAMP AS created WHERE false";
 	}
 	string query = "SELECT * FROM (VALUES ";
 	for (idx_t i = 0; i < entries.size(); i++) {
@@ -700,7 +713,7 @@ static string PragmaGit4DataBranches(ClientContext &context, const FunctionParam
 		query += StringUtil::Format("('%s'::VARCHAR, %llu::UBIGINT, '%s'::VARCHAR, '%s'::TIMESTAMP)", name,
 		                            entries[i].pin, parent, Timestamp::ToString(entries[i].created));
 	}
-	query += ") t(branch_name, pinned_commit_id, parent_branch, created) ORDER BY pinned_commit_id, branch_name";
+	query += ") t(branch_name, pinned_commit_id, parent, created) ORDER BY pinned_commit_id, branch_name";
 	return query;
 }
 

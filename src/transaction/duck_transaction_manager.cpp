@@ -81,13 +81,14 @@ idx_t SnapshotRegistry::Count() const {
 	return snapshots.size();
 }
 
-bool BranchRegistry::Create(const string &name, transaction_t pin, const string &parent, timestamp_t created) {
+bool BranchRegistry::Create(const string &name, transaction_t pin, const string &parent, timestamp_t created,
+                            bool parent_is_snapshot) {
 	lock_guard<mutex> guard(lock);
 	if (branches.find(name) != branches.end()) {
 		return false;
 	}
-	if (!parent.empty() && branches.find(parent) == branches.end()) {
-		// a branch has to descend from something, or its lineage cannot be walked
+	if (!parent.empty() && !parent_is_snapshot && branches.find(parent) == branches.end()) {
+		// a branch has to descend from something that is there, or its lineage cannot be walked
 		return false;
 	}
 	branches.emplace(name, Git4DataBranch {name, pin, parent, created});
@@ -178,12 +179,16 @@ bool BranchRegistry::Ancestors(const string &name, vector<string> &result) const
 	while (!current.empty()) {
 		auto entry = branches.find(current);
 		if (entry == branches.end()) {
-			return false;
+			// A parent that is not a branch is where the walk ends: a branch may descend from a
+			// snapshot, which is a commit a line can be forked from, and a snapshot is not part of the
+			// branch ancestry. The name is still recorded on the branch, so the listing says what it
+			// came from even though the ancestry stops here.
+			break;
 		}
 		result.push_back(current);
 		current = entry->second.parent;
 	}
-	return true;
+	return !result.empty();
 }
 
 bool BranchRegistry::FindLCA(const string &a, const string &b, string &result) const {

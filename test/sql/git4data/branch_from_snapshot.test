@@ -1,0 +1,107 @@
+# name: test/sql/git4data/branch_from_snapshot.test
+# description: Starting a writable line from a snapshot that is no longer the newest state
+# group: [git4data]
+
+load {TEST_DIR}/branch_from_snapshot.db
+
+statement ok
+CREATE TABLE t (k INTEGER PRIMARY KEY, v INTEGER)
+
+statement ok
+INSERT INTO t SELECT range, range FROM range(100)
+
+statement ok
+CHECKPOINT
+
+# the state worth going back to
+statement ok
+PRAGMA git4data_create_snapshot('good')
+
+# the main line moves on from it, so the snapshot is no longer what the table holds
+statement ok
+UPDATE t SET v = v + 1000 WHERE k < 10
+
+statement ok
+CHECKPOINT
+
+# A snapshot is a commit, and a commit is what a branch is forked from, so a branch can descend from
+# one - which is the only way to start a writable line from a state that is no longer the newest one.
+statement ok
+PRAGMA git4data_create_branch('fix', 'good')
+
+# the branch reads the state the snapshot holds, which is not what the table holds
+query II
+SELECT count(*), sum(v) FROM t AT (BRANCH => 'fix')
+----
+100	4950
+
+query II
+SELECT count(*), sum(v) FROM t AT (SNAPSHOT => 'good')
+----
+100	4950
+
+query II
+SELECT count(*), sum(v) FROM t
+----
+100	14950
+
+# giving it a table of its own makes it writable, and the three lines stay independent
+statement ok
+PRAGMA git4data_materialize('t', 'fix', 't_fix')
+
+statement ok
+UPDATE t_fix SET v = -1 WHERE k = 0
+
+statement ok
+CHECKPOINT
+
+query III
+SELECT (SELECT v FROM t AT (BRANCH => 'fix') WHERE k = 0), (SELECT v FROM t WHERE k = 0),
+       (SELECT v FROM t AT (SNAPSHOT => 'good') WHERE k = 0)
+----
+-1	1000	0
+
+# a branch forked from the branch inherits its state, and the least common ancestor of the two is the
+# branch they share
+statement ok
+PRAGMA git4data_create_branch('fix2', 'fix')
+
+query I
+SELECT count(*) FROM t AT (BRANCH => 'fix2')
+----
+100
+
+query I
+PRAGMA git4data_lca('fix', 'fix2')
+----
+fix
+
+# The listing names what each line descends from - a snapshot here, a branch there - and runs. Its
+# creation timestamps are wall-clock, so the values are not asserted; the ancestry above is what says
+# the parent was recorded.
+statement ok
+PRAGMA git4data_branches
+
+# A line forked from a snapshot has no ancestor *branch* to share with a line that was not, so a merge
+# that has to find one refuses rather than inventing a base. A pick names its base explicitly and is
+# unaffected.
+statement ok
+PRAGMA git4data_create_branch('other', '')
+
+statement ok
+PRAGMA git4data_materialize('t', 'other', 't_other')
+
+query I
+PRAGMA git4data_lca('fix2', 'other')
+----
+
+statement error
+PRAGMA git4data_merge('t', 'other', 'fix2', 'fail')
+----
+<REGEX>:.*share no ancestor to merge against.*
+
+# an ancestor that is neither a branch nor a snapshot is refused, and so is a typo
+statement error
+PRAGMA git4data_create_branch('bad', 'nowhere')
+----
+<REGEX>:.*neither a branch nor a snapshot.*

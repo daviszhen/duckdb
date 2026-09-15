@@ -109,7 +109,12 @@ struct Git4DataBranch {
 class BranchRegistry {
 public:
 	//! Create a branch. Returns false if the name exists.
-	bool Create(const string &name, transaction_t pin, const string &parent, timestamp_t created);
+	//! parent_is_snapshot says the parent names a snapshot rather than a branch: a snapshot is a commit,
+	//! and a commit is something a branch can be forked from just as well as another branch can. Such a
+	//! branch has no ancestor *branch*, so a walk that needs one - a merge looking for a least common
+	//! ancestor - stops at it rather than inventing one.
+	bool Create(const string &name, transaction_t pin, const string &parent, timestamp_t created,
+	            bool parent_is_snapshot = false);
 	//! Drop a branch. Returns false if the name is unknown, or if it still has children -
 	//! removing it would leave those children's lineage dangling.
 	bool Drop(const string &name);
