@@ -3779,7 +3779,7 @@ unique_ptr<TransformResultValue> PEGTransformerFactory::TransformCreateViewStmtI
 	auto select_statement_internal = transformer.Transform<unique_ptr<SelectStatement>>(list_pr.GetChild(8));
 	auto result =
 	    TransformCreateViewStmt(transformer, create_secure, create_recursive, if_not_exists, qualified_name,
-	                            insert_column_list, std::move(with_list), std::move(select_statement_internal));
+		                        insert_column_list, std::move(with_list), std::move(select_statement_internal));
 	return make_uniq<TypedTransformResult<unique_ptr<CreateStatement>>>(std::move(result));
 }
 
@@ -3847,7 +3847,7 @@ unique_ptr<TransformResultValue> PEGTransformerFactory::TransformDeleteStatement
 	}
 	auto result =
 	    TransformDeleteStatement(transformer, std::move(with_clause), std::move(target_opt_alias),
-	                             std::move(delete_using_clause), std::move(where_clause), std::move(returning_clause));
+		                         std::move(delete_using_clause), std::move(where_clause), std::move(returning_clause));
 	return make_uniq<TypedTransformResult<unique_ptr<SQLStatement>>>(std::move(result));
 }
 
@@ -4583,7 +4583,7 @@ PEGTransformerFactory::TransformCatalogReservedSchemaTableColumnNameInternal(PEG
 	auto reserved_column_name = list_pr.GetChild(3).Cast<IdentifierParseResult>().identifier;
 	auto result =
 	    TransformCatalogReservedSchemaTableColumnName(transformer, catalog_qualification, reserved_schema_qualification,
-	                                                  reserved_table_qualification, reserved_column_name);
+		                                              reserved_table_qualification, reserved_column_name);
 	return make_uniq<TypedTransformResult<unique_ptr<ColumnRefExpression>>>(std::move(result));
 }
 
@@ -4683,7 +4683,7 @@ PEGTransformerFactory::TransformFunctionExpressionArgumentListInternal(PEGTransf
 	}
 	auto result =
 	    TransformFunctionExpressionArgumentList(transformer, distinct_or_all, std::move(function_argument_list),
-	                                            std::move(order_by_clause), ignore_or_respect_nulls);
+		                                        std::move(order_by_clause), ignore_or_respect_nulls);
 	return make_uniq<TypedTransformResult<MethodArguments>>(std::move(result));
 }
 
@@ -6938,7 +6938,7 @@ PEGTransformerFactory::TransformMethodExpressionArgumentListInternal(PEGTransfor
 	}
 	auto result =
 	    TransformMethodExpressionArgumentList(transformer, distinct_or_all, std::move(method_function_arguments),
-	                                          std::move(order_by_clause), ignore_or_respect_nulls);
+		                                      std::move(order_by_clause), ignore_or_respect_nulls);
 	return make_uniq<TypedTransformResult<MethodArguments>>(std::move(result));
 }
 
@@ -9480,6 +9480,12 @@ unique_ptr<TransformResultValue> PEGTransformerFactory::TransformSnapshotAtUnitI
 	return make_uniq<TypedTransformResult<string>>(result);
 }
 
+unique_ptr<TransformResultValue> PEGTransformerFactory::TransformBranchAtUnitInternal(PEGTransformer &transformer,
+                                                                                      ParseResult &parse_result) {
+	string result = "BRANCH";
+	return make_uniq<TypedTransformResult<string>>(result);
+}
+
 unique_ptr<TransformResultValue> PEGTransformerFactory::TransformTimestampAtUnitInternal(PEGTransformer &transformer,
                                                                                          ParseResult &parse_result) {
 	auto result = TransformTimestampAtUnit(transformer);
@@ -11203,7 +11209,7 @@ void PEGTransformerFactory::RegisterGenerated() {
 	    {"PartitionByColumnList", &PEGTransformerFactory::TransformPartitionByColumnListInternal},
 	    {"StarPartitionByColumnList", &PEGTransformerFactory::TransformStarPartitionByColumnListInternal},
 	    {"ParenthesizedPartitionByColumnList",
-	     &PEGTransformerFactory::TransformParenthesizedPartitionByColumnListInternal},
+		 &PEGTransformerFactory::TransformParenthesizedPartitionByColumnListInternal},
 	    {"SinglePartitionByColumnList", &PEGTransformerFactory::TransformSinglePartitionByColumnListInternal},
 	    {"ForceNullOption", &PEGTransformerFactory::TransformForceNullOptionInternal},
 	    {"ForceNotNull", &PEGTransformerFactory::TransformForceNotNullInternal},
@@ -11217,7 +11223,7 @@ void PEGTransformerFactory::RegisterGenerated() {
 	    {"GenericCopyOptionOrderList", &PEGTransformerFactory::TransformGenericCopyOptionOrderListInternal},
 	    {"GenericCopyOptionExpression", &PEGTransformerFactory::TransformGenericCopyOptionExpressionInternal},
 	    {"GenericCopyOptionParenthesizedExpressionList",
-	     &PEGTransformerFactory::TransformGenericCopyOptionParenthesizedExpressionListInternal},
+		 &PEGTransformerFactory::TransformGenericCopyOptionParenthesizedExpressionListInternal},
 	    {"CopyFromDatabase", &PEGTransformerFactory::TransformCopyFromDatabaseInternal},
 	    {"CopyFromDatabaseWithFlag", &PEGTransformerFactory::TransformCopyFromDatabaseWithFlagInternal},
 	    {"CopyFromDatabaseWithoutFlag", &PEGTransformerFactory::TransformCopyFromDatabaseWithoutFlagInternal},
@@ -11296,11 +11302,11 @@ void PEGTransformerFactory::RegisterGenerated() {
 	    {"IfNotExists", &PEGTransformerFactory::TransformIfNotExistsInternal},
 	    {"QualifiedName", &PEGTransformerFactory::TransformQualifiedNameInternal},
 	    {"SchemaReservedIdentifierOrStringLiteral",
-	     &PEGTransformerFactory::TransformSchemaReservedIdentifierOrStringLiteralInternal},
+		 &PEGTransformerFactory::TransformSchemaReservedIdentifierOrStringLiteralInternal},
 	    {"CatalogReservedSchemaIdentifier", &PEGTransformerFactory::TransformCatalogReservedSchemaIdentifierInternal},
 	    {"IdentifierOrStringLiteral", &PEGTransformerFactory::TransformIdentifierOrStringLiteralInternal},
 	    {"ReservedIdentifierOrStringLiteral",
-	     &PEGTransformerFactory::TransformReservedIdentifierOrStringLiteralInternal},
+		 &PEGTransformerFactory::TransformReservedIdentifierOrStringLiteralInternal},
 	    {"CatalogQualification", &PEGTransformerFactory::TransformCatalogQualificationInternal},
 	    {"SchemaQualification", &PEGTransformerFactory::TransformSchemaQualificationInternal},
 	    {"ReservedSchemaQualification", &PEGTransformerFactory::TransformReservedSchemaQualificationInternal},
@@ -11451,7 +11457,7 @@ void PEGTransformerFactory::RegisterGenerated() {
 	    {"ColumnReference", &PEGTransformerFactory::TransformColumnReferenceInternal},
 	    {"NestedSchemaTableColumnName", &PEGTransformerFactory::TransformNestedSchemaTableColumnNameInternal},
 	    {"CatalogReservedSchemaTableColumnName",
-	     &PEGTransformerFactory::TransformCatalogReservedSchemaTableColumnNameInternal},
+		 &PEGTransformerFactory::TransformCatalogReservedSchemaTableColumnNameInternal},
 	    {"SchemaReservedTableColumnName", &PEGTransformerFactory::TransformSchemaReservedTableColumnNameInternal},
 	    {"TableReservedColumnName", &PEGTransformerFactory::TransformTableReservedColumnNameInternal},
 	    {"FunctionExpression", &PEGTransformerFactory::TransformFunctionExpressionInternal},
@@ -11461,7 +11467,7 @@ void PEGTransformerFactory::RegisterGenerated() {
 	    {"FunctionIdentifier", &PEGTransformerFactory::TransformFunctionIdentifierInternal},
 	    {"FunctionNameAsQualifiedName", &PEGTransformerFactory::TransformFunctionNameAsQualifiedNameInternal},
 	    {"CatalogReservedSchemaFunctionName",
-	     &PEGTransformerFactory::TransformCatalogReservedSchemaFunctionNameInternal},
+		 &PEGTransformerFactory::TransformCatalogReservedSchemaFunctionNameInternal},
 	    {"SchemaReservedFunctionName", &PEGTransformerFactory::TransformSchemaReservedFunctionNameInternal},
 	    {"DistinctOrAll", &PEGTransformerFactory::TransformDistinctOrAllInternal},
 	    {"DistinctKeyword", &PEGTransformerFactory::TransformDistinctKeywordInternal},
@@ -11894,6 +11900,7 @@ void PEGTransformerFactory::RegisterGenerated() {
 	    {"AtUnit", &PEGTransformerFactory::TransformAtUnitInternal},
 	    {"VersionAtUnit", &PEGTransformerFactory::TransformVersionAtUnitInternal},
 	    {"SnapshotAtUnit", &PEGTransformerFactory::TransformSnapshotAtUnitInternal},
+	    {"BranchAtUnit", &PEGTransformerFactory::TransformBranchAtUnitInternal},
 	    {"TimestampAtUnit", &PEGTransformerFactory::TransformTimestampAtUnitInternal},
 	    {"JoinClause", &PEGTransformerFactory::TransformJoinClauseInternal},
 	    {"NearestJoinClause", &PEGTransformerFactory::TransformNearestJoinClauseInternal},

@@ -99,9 +99,10 @@ TableAliasWithoutAs <- Identifier ColumnAliases?
 
 AtClause <- 'AT' Parens(AtSpecifier)
 AtSpecifier <- AtUnit '=>' Expression
-AtUnit <- VersionAtUnit / SnapshotAtUnit / TimestampAtUnit
+AtUnit <- VersionAtUnit / SnapshotAtUnit / BranchAtUnit / TimestampAtUnit
 VersionAtUnit <- 'VERSION'
 SnapshotAtUnit <- 'SNAPSHOT'
+BranchAtUnit <- 'BRANCH'
 TimestampAtUnit <- 'TIMESTAMP'
 
 JoinClause <- JoinByClause / RegularJoinClause / JoinWithoutOnClause / NearestJoinClause

@@ -52,14 +52,20 @@ struct DuckDBConnectionCountFun {
 	static void RegisterFunction(BuiltinFunctions &set);
 };
 
+//! Which registry a reference name is looked up in. A branch and a snapshot are the same kind
+//! of thing - a named point on the commit timeline that holds the retention bound down - so the
+//! scan is identical for both and only the lookup and the error message differ.
+enum class Git4DataRefKind : uint8_t { SNAPSHOT, BRANCH };
+
 struct Git4DataSnapshotScanFun {
 	static void RegisterFunction(BuiltinFunctions &set);
 	//! The table function itself, so a binder can put it on a LogicalGet directly
 	static TableFunction GetFunction();
-	//! Bind data for reading a table as of a pinned snapshot. Throws when the snapshot is
-	//! unknown. Used by the binder for a table reference carrying AT (SNAPSHOT => 'name').
+	//! Bind data for reading a table as of a pinned reference. Throws when the name is unknown
+	//! in the registry the kind selects. Used by the binder for a table reference carrying
+	//! AT (SNAPSHOT => 'name') or AT (BRANCH => 'name').
 	static unique_ptr<FunctionData> CreateBindData(ClientContext &context, const string &table_name,
-	                                               const string &snapshot_name);
+	                                               const string &reference_name, Git4DataRefKind kind);
 };
 
 struct DuckDBApproxDatabaseCountFun {

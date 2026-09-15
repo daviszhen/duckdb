@@ -1074,6 +1074,7 @@ String:
     - AtUnit
     - VersionAtUnit
     - SnapshotAtUnit
+    - BranchAtUnit
     - TimestampAtUnit
     - TrimDirection
     - TrimBoth

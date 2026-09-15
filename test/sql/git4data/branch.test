@@ -83,8 +83,30 @@ PRAGMA git4data_probe('t')
 ----
 1000	0	999
 
-# the branch, its lineage and the history it holds all come back with the file
+# and the branch is readable: the same reference the pin provides, through the clause
+query I
+SELECT count(*) FROM t AT (BRANCH => 'a')
+----
+1000
+
+# an unknown name is looked up in the branch registry, so a snapshot name is not found here
+statement error
+SELECT count(*) FROM t AT (BRANCH => 's_not_a_branch')
+----
+<REGEX>:.*s_not_a_branch.*does not exist.*
+
+# the branch, its lineage, the history it holds and its read path all come back with the file
 restart
+
+query I
+SELECT count(*) FROM t AT (BRANCH => 'a')
+----
+1000
+
+query I
+SELECT count(*) FROM t AT (BRANCH => 'root')
+----
+1000
 
 statement ok
 PRAGMA git4data_branches

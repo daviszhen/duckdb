@@ -11,12 +11,13 @@
 
 namespace duckdb {
 
-//! Reads a table as of a pinned snapshot: the rows a reader at that snapshot's commit id would
-//! have seen. The retention bound keeps those rows and their delete ids alive, so the scan is
-//! an ordinary visibility-filtered scan with the pinned bound substituted for "now".
+//! Reads a table as of a pinned reference: the rows a reader at that commit id would have seen.
+//! The retention bound keeps those rows and their delete ids alive, so the scan is an ordinary
+//! visibility-filtered scan with the pinned bound substituted for "now".
 struct Git4DataSnapshotScanBindData : public TableFunctionData {
 	string table_name;
-	string snapshot_name;
+	string reference_name;
+	Git4DataRefKind kind;
 	VisibilityBound bound;
 };
 
@@ -33,17 +34,26 @@ struct Git4DataSnapshotScanState : public GlobalTableFunctionState {
 };
 
 unique_ptr<FunctionData> Git4DataSnapshotScanFun::CreateBindData(ClientContext &context, const string &table_name,
-                                                                 const string &snapshot_name) {
+                                                                 const string &reference_name, Git4DataRefKind kind) {
 	auto result = make_uniq<Git4DataSnapshotScanBindData>();
 	result->table_name = table_name;
-	result->snapshot_name = snapshot_name;
+	result->reference_name = reference_name;
+	result->kind = kind;
 
 	auto &db_manager = DatabaseManager::Get(context);
 	auto attached = db_manager.GetDatabase(context, DatabaseManager::GetDefaultDatabase(context));
 	auto &transaction_manager = DuckTransactionManager::Get(*attached);
-	auto pin = transaction_manager.snapshots.GetPin(snapshot_name);
+	if (kind == Git4DataRefKind::BRANCH) {
+		Git4DataBranch branch;
+		if (!transaction_manager.branches.Get(reference_name, branch)) {
+			throw InvalidInputException("Branch \"%s\" does not exist", reference_name);
+		}
+		result->bound = VisibilityBound::Through(branch.pin);
+		return std::move(result);
+	}
+	auto pin = transaction_manager.snapshots.GetPin(reference_name);
 	if (!pin.IsValid()) {
-		throw InvalidInputException("Snapshot \"%s\" does not exist", snapshot_name);
+		throw InvalidInputException("Snapshot \"%s\" does not exist", reference_name);
 	}
 	result->bound = VisibilityBound::Through(pin.GetIndex());
 	return std::move(result);
@@ -53,7 +63,8 @@ static unique_ptr<FunctionData> Git4DataSnapshotScanBind(ClientContext &context,
                                                          vector<LogicalType> &return_types,
                                                          vector<Identifier> &names) {
 	auto result = Git4DataSnapshotScanFun::CreateBindData(context, input.inputs[0].GetValue<string>(),
-	                                                      input.inputs[1].GetValue<string>());
+	                                                      input.inputs[1].GetValue<string>(),
+	                                                      Git4DataRefKind::SNAPSHOT);
 
 	auto &bind_data = result->Cast<Git4DataSnapshotScanBindData>();
 	auto &table = Catalog::GetEntry<TableCatalogEntry>(context, QualifiedName(Identifier(bind_data.table_name)));

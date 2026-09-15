@@ -174,11 +174,23 @@ BoundStatement Binder::Bind(BaseTableRef &ref) {
 	// not a CTE
 	// extract a table or view from the catalog
 	auto at_clause = BindAtClause(ref.at_clause);
-	// AT (SNAPSHOT => 'name') asks for the table as that snapshot saw it. A DuckCatalog has no
-	// time travel, so the clause must not reach the entry lookup; the read is served by a
-	// snapshot scan instead, wired up once the LogicalGet exists.
-	bool is_snapshot_at = at_clause && at_clause->Unit().GetIdentifierName() == "SNAPSHOT";
-	auto entry_at_clause = is_snapshot_at ? nullptr : (at_clause ? at_clause.get() : entry_retriever.GetAtClause());
+	// AT (SNAPSHOT => 'name') and AT (BRANCH => 'name') both ask for the table as that reference
+	// saw it. A DuckCatalog has no time travel, so the clause must not reach the entry lookup;
+	// the read is served by a reference scan instead, wired up once the LogicalGet exists. The
+	// two units select which registry the name is looked up in and nothing else - a branch is a
+	// pinned reference in the same sense a snapshot is.
+	Git4DataRefKind reference_kind = Git4DataRefKind::SNAPSHOT;
+	bool is_reference_at = false;
+	if (at_clause) {
+		auto at_unit = at_clause->Unit().GetIdentifierName();
+		if (at_unit == "SNAPSHOT") {
+			is_reference_at = true;
+		} else if (at_unit == "BRANCH") {
+			is_reference_at = true;
+			reference_kind = Git4DataRefKind::BRANCH;
+		}
+	}
+	auto entry_at_clause = is_reference_at ? nullptr : (at_clause ? at_clause.get() : entry_retriever.GetAtClause());
 	EntryLookupInfo table_lookup(CatalogType::TABLE_ENTRY, QualifiedName(ref.Table()), entry_at_clause, error_context);
 	// resolve the catalog/schema qualification for the lookup only - the reference itself keeps the name as written,
 	// which is what name extraction and replacement scans report
@@ -292,11 +304,11 @@ BoundStatement Binder::Bind(BaseTableRef &ref) {
 		auto logical_get =
 		    make_uniq<LogicalGet>(table_index, scan_function, std::move(bind_data), std::move(return_types),
 		                          std::move(return_names), std::move(virtual_columns));
-		if (is_snapshot_at) {
+		if (is_reference_at) {
 			logical_get->function = Git4DataSnapshotScanFun::GetFunction();
 			logical_get->bind_data = Git4DataSnapshotScanFun::CreateBindData(
-			    context, ref.Table().GetIdentifierName(), at_clause->GetValue().ToString());
-			// the underlying table declared virtual columns for the base scan; the snapshot
+			    context, ref.Table().GetIdentifierName(), at_clause->GetValue().ToString(), reference_kind);
+			// the underlying table declared virtual columns for the base scan; the reference
 			// scan has none, and keeping them would demand projection pushdown it does not do
 			logical_get->virtual_columns.clear();
 		}

@@ -3546,6 +3546,9 @@ public:
 	static void InitializeSnapshotAtUnitTrampoline(PEGTransformer &transformer, GeneratedTransformProcess &process);
 	static unique_ptr<TransformResultValue> FinalizeSnapshotAtUnitTrampoline(PEGTransformer &transformer,
 	                                                                         GeneratedTransformProcess &process);
+	static void InitializeBranchAtUnitTrampoline(PEGTransformer &transformer, GeneratedTransformProcess &process);
+	static unique_ptr<TransformResultValue> FinalizeBranchAtUnitTrampoline(PEGTransformer &transformer,
+	                                                                       GeneratedTransformProcess &process);
 	static void InitializeTimestampAtUnitTrampoline(PEGTransformer &transformer, GeneratedTransformProcess &process);
 	static unique_ptr<TransformResultValue> FinalizeTimestampAtUnitTrampoline(PEGTransformer &transformer,
 	                                                                          GeneratedTransformProcess &process);
@@ -4044,7 +4047,7 @@ public:
 		    [function](PEGTransformer &transformer, ParseResult &parse_result) -> unique_ptr<TransformProcess> {
 			    transform_finalize_function_t finalize =
 			        [function](PEGTransformer &transformer,
-			                   ParseResult &parse_result) -> unique_ptr<TransformResultValue> {
+					           ParseResult &parse_result) -> unique_ptr<TransformResultValue> {
 				    auto result_value = function(transformer, parse_result);
 				    return make_uniq<TypedTransformResult<decltype(result_value)>>(std::move(result_value));
 			    };
@@ -7282,6 +7285,8 @@ public:
 	static unique_ptr<TransformResultValue> TransformSnapshotAtUnitInternal(PEGTransformer &transformer,
 	                                                                        ParseResult &parse_result);
 	static string TransformSnapshotAtUnit(PEGTransformer &transformer);
+	static unique_ptr<TransformResultValue> TransformBranchAtUnitInternal(PEGTransformer &transformer,
+	                                                                      ParseResult &parse_result);
 	static unique_ptr<TransformResultValue> TransformTimestampAtUnitInternal(PEGTransformer &transformer,
 	                                                                         ParseResult &parse_result);
 	static string TransformTimestampAtUnit(PEGTransformer &transformer);

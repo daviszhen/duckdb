@@ -2534,6 +2534,9 @@ static const TransformFrameOps VERSION_AT_UNIT_OPS = {"VersionAtUnit",
 static const TransformFrameOps SNAPSHOT_AT_UNIT_OPS = {"SnapshotAtUnit",
                                                        &PEGTransformerFactory::InitializeSnapshotAtUnitTrampoline,
                                                        &PEGTransformerFactory::FinalizeSnapshotAtUnitTrampoline};
+static const TransformFrameOps BRANCH_AT_UNIT_OPS = {"BranchAtUnit",
+                                                     &PEGTransformerFactory::InitializeBranchAtUnitTrampoline,
+                                                     &PEGTransformerFactory::FinalizeBranchAtUnitTrampoline};
 static const TransformFrameOps TIMESTAMP_AT_UNIT_OPS = {"TimestampAtUnit",
                                                         &PEGTransformerFactory::InitializeTimestampAtUnitTrampoline,
                                                         &PEGTransformerFactory::FinalizeTimestampAtUnitTrampoline};
@@ -3836,6 +3839,7 @@ const case_insensitive_map_t<const TransformFrameOps *> &PEGTransformerFactory::
 	    {"AtUnit", &AT_UNIT_OPS},
 	    {"VersionAtUnit", &VERSION_AT_UNIT_OPS},
 	    {"SnapshotAtUnit", &SNAPSHOT_AT_UNIT_OPS},
+	    {"BranchAtUnit", &BRANCH_AT_UNIT_OPS},
 	    {"TimestampAtUnit", &TIMESTAMP_AT_UNIT_OPS},
 	    {"JoinClause", &JOIN_CLAUSE_OPS},
 	    {"NearestJoinClause", &NEAREST_JOIN_CLAUSE_OPS},
@@ -11207,7 +11211,7 @@ PEGTransformerFactory::FinalizeCreateViewStmtTrampoline(PEGTransformer &transfor
 	auto select_statement_internal = process.TakeResult<unique_ptr<SelectStatement>>(6);
 	auto result =
 	    TransformCreateViewStmt(transformer, create_secure, create_recursive, if_not_exists, qualified_name,
-	                            insert_column_list, std::move(with_list), std::move(select_statement_internal));
+		                        insert_column_list, std::move(with_list), std::move(select_statement_internal));
 	return make_uniq<TypedTransformResult<unique_ptr<CreateStatement>>>(std::move(result));
 }
 
@@ -11314,7 +11318,7 @@ PEGTransformerFactory::FinalizeDeleteStatementTrampoline(PEGTransformer &transfo
 	}
 	auto result =
 	    TransformDeleteStatement(transformer, std::move(with_clause), std::move(target_opt_alias),
-	                             std::move(delete_using_clause), std::move(where_clause), std::move(returning_clause));
+		                         std::move(delete_using_clause), std::move(where_clause), std::move(returning_clause));
 	return make_uniq<TypedTransformResult<unique_ptr<SQLStatement>>>(std::move(result));
 }
 
@@ -12680,7 +12684,7 @@ PEGTransformerFactory::FinalizeCatalogReservedSchemaTableColumnNameTrampoline(PE
 	auto reserved_column_name = list_pr.GetChild(3).Cast<IdentifierParseResult>().identifier;
 	auto result =
 	    TransformCatalogReservedSchemaTableColumnName(transformer, catalog_qualification, reserved_schema_qualification,
-	                                                  reserved_table_qualification, reserved_column_name);
+		                                              reserved_table_qualification, reserved_column_name);
 	return make_uniq<TypedTransformResult<unique_ptr<ColumnRefExpression>>>(std::move(result));
 }
 
@@ -12827,7 +12831,7 @@ PEGTransformerFactory::FinalizeFunctionExpressionArgumentListTrampoline(PEGTrans
 	}
 	auto result =
 	    TransformFunctionExpressionArgumentList(transformer, distinct_or_all, std::move(function_argument_list),
-	                                            std::move(order_by_clause), ignore_or_respect_nulls);
+		                                        std::move(order_by_clause), ignore_or_respect_nulls);
 	return make_uniq<TypedTransformResult<MethodArguments>>(std::move(result));
 }
 
@@ -17178,7 +17182,7 @@ PEGTransformerFactory::FinalizeMethodExpressionArgumentListTrampoline(PEGTransfo
 	}
 	auto result =
 	    TransformMethodExpressionArgumentList(transformer, distinct_or_all, std::move(method_function_arguments),
-	                                          std::move(order_by_clause), ignore_or_respect_nulls);
+		                                      std::move(order_by_clause), ignore_or_respect_nulls);
 	return make_uniq<TypedTransformResult<MethodArguments>>(std::move(result));
 }
 
@@ -21811,6 +21815,17 @@ unique_ptr<TransformResultValue>
 PEGTransformerFactory::FinalizeSnapshotAtUnitTrampoline(PEGTransformer &transformer,
                                                         GeneratedTransformProcess &process) {
 	auto result = TransformSnapshotAtUnit(transformer);
+	return make_uniq<TypedTransformResult<string>>(result);
+}
+
+void PEGTransformerFactory::InitializeBranchAtUnitTrampoline(PEGTransformer &transformer,
+                                                             GeneratedTransformProcess &process) {
+	process.ReserveChildSlots(0);
+}
+
+unique_ptr<TransformResultValue>
+PEGTransformerFactory::FinalizeBranchAtUnitTrampoline(PEGTransformer &transformer, GeneratedTransformProcess &process) {
+	string result = "BRANCH";
 	return make_uniq<TypedTransformResult<string>>(result);
 }
 
