@@ -1,0 +1,104 @@
+# name: test/sql/git4data/reference_ddl.test
+# description: What a reference means when the table under it is altered or dropped
+# group: [git4data]
+
+load {TEST_DIR}/reference_ddl.db
+
+statement ok
+CREATE TABLE t (k INTEGER PRIMARY KEY, v INTEGER)
+
+statement ok
+INSERT INTO t SELECT range, range FROM range(100)
+
+statement ok
+CHECKPOINT
+
+statement ok
+PRAGMA git4data_create_snapshot('pin')
+
+# A reference pins the rows, not the schema: a column added afterwards reads as its default at the
+# reference too, exactly as it does in the current view.
+statement ok
+ALTER TABLE t ADD COLUMN c INTEGER DEFAULT 7
+
+query II
+SELECT v, c FROM t AT (SNAPSHOT => 'pin') WHERE k = 1
+----
+1	7
+
+query II
+SELECT v, c FROM t WHERE k = 1
+----
+1	7
+
+statement ok
+ALTER TABLE t DROP COLUMN c
+
+# the column is gone for every reader, the reference included: the pinned rows are still there and
+# still read, and asking for the dropped column is an ordinary binder error
+query I
+SELECT count(*) FROM t AT (SNAPSHOT => 'pin')
+----
+100
+
+statement error
+SELECT c FROM t AT (SNAPSHOT => 'pin')
+----
+<REGEX>:.*Binder Error.*
+
+# Dropping the table takes the rows with it. The reference stays - it is a commit, not a claim on a
+# table - and reading it says the table is not there rather than crashing.
+statement ok
+DROP TABLE t
+
+query IIII
+PRAGMA git4data_limits
+----
+-1	1	-1	0
+
+statement error
+SELECT count(*) FROM t AT (SNAPSHOT => 'pin')
+----
+<REGEX>:.*Table with name t does not exist.*
+
+# Recreating the name does not resurrect the old rows: at that commit the new table had none, and rows
+# inserted into it afterwards came later than the commit the reference holds.
+statement ok
+CREATE TABLE t (k INTEGER PRIMARY KEY, v INTEGER)
+
+query I
+SELECT count(*) FROM t AT (SNAPSHOT => 'pin')
+----
+0
+
+statement ok
+INSERT INTO t SELECT range, range FROM range(5)
+
+query I
+SELECT count(*) FROM t AT (SNAPSHOT => 'pin')
+----
+0
+
+# the dead reference survives a checkpoint and a reopen, and can still be dropped there
+statement ok
+CHECKPOINT
+
+restart
+
+query IIII
+PRAGMA git4data_limits
+----
+-1	1	-1	0
+
+query I
+SELECT count(*) FROM t
+----
+5
+
+statement ok
+PRAGMA git4data_drop_snapshot('pin')
+
+query IIII
+PRAGMA git4data_limits
+----
+-1	0	-1	0
