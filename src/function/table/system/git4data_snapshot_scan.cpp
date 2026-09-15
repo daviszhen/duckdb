@@ -61,11 +61,9 @@ unique_ptr<FunctionData> Git4DataSnapshotScanFun::CreateBindData(ClientContext &
 }
 
 static unique_ptr<FunctionData> Git4DataSnapshotScanBind(ClientContext &context, TableFunctionBindInput &input,
-                                                         vector<LogicalType> &return_types,
-                                                         vector<Identifier> &names) {
-	auto result = Git4DataSnapshotScanFun::CreateBindData(context, input.inputs[0].GetValue<string>(),
-	                                                      input.inputs[1].GetValue<string>(),
-	                                                      Git4DataRefKind::SNAPSHOT);
+                                                         vector<LogicalType> &return_types, vector<Identifier> &names) {
+	auto result = Git4DataSnapshotScanFun::CreateBindData(
+	    context, input.inputs[0].GetValue<string>(), input.inputs[1].GetValue<string>(), Git4DataRefKind::SNAPSHOT);
 
 	auto &bind_data = result->Cast<Git4DataSnapshotScanBindData>();
 	auto &table = Catalog::GetEntry<TableCatalogEntry>(context, QualifiedName(Identifier(bind_data.table_name)));
@@ -189,8 +187,9 @@ unique_ptr<FunctionData> Git4DataDiffFun::CreateBindData(ClientContext &context,
 
 static unique_ptr<FunctionData> Git4DataDiffBind(ClientContext &context, TableFunctionBindInput &input,
                                                  vector<LogicalType> &return_types, vector<Identifier> &names) {
-	auto result = Git4DataDiffFun::CreateBindData(context, input.inputs[0].GetValue<string>(),
-	                                              input.inputs[1].GetValue<string>(), input.inputs[2].GetValue<string>());
+	auto result =
+	    Git4DataDiffFun::CreateBindData(context, input.inputs[0].GetValue<string>(), input.inputs[1].GetValue<string>(),
+	                                    input.inputs[2].GetValue<string>());
 	names.emplace_back("row_id");
 	return_types.emplace_back(LogicalType::UBIGINT);
 	names.emplace_back("change");
@@ -262,11 +261,13 @@ static void Git4DataDiffFunction(ClientContext &context, TableFunctionInput &dat
 		return;
 	}
 	if (state.phase == Git4DataDiffState::Phase::LEFT) {
-		Git4DataDiffCollect(state, state.left_scan, state.left_bound, [&](row_t row_id) { state.left_rows.insert(row_id); });
+		Git4DataDiffCollect(state, state.left_scan, state.left_bound,
+		                    [&](row_t row_id) { state.left_rows.insert(row_id); });
 		state.phase = Git4DataDiffState::Phase::RIGHT;
 	}
 	if (state.phase == Git4DataDiffState::Phase::RIGHT) {
-		Git4DataDiffCollect(state, state.right_scan, state.right_bound, [&](row_t row_id) { state.right_rows.insert(row_id); });
+		Git4DataDiffCollect(state, state.right_scan, state.right_bound,
+		                    [&](row_t row_id) { state.right_rows.insert(row_id); });
 		for (auto row_id : state.right_rows) {
 			if (state.left_rows.find(row_id) == state.left_rows.end()) {
 				state.added.push_back(row_id);

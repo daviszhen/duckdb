@@ -350,7 +350,8 @@ static string PragmaGit4DataProbeAt(ClientContext &context, const FunctionParame
 	idx_t count = 0;
 	while (true) {
 		scan_chunk.Reset();
-		ScanOptions options(TransactionData(MAX_TRANSACTION_ID, VisibilityBound::Before(NumericCast<transaction_t>(bound_value))));
+		ScanOptions options(
+		    TransactionData(MAX_TRANSACTION_ID, VisibilityBound::Before(NumericCast<transaction_t>(bound_value))));
 		options.insert_type = InsertedScanType::ALL_ROWS;
 		options.delete_type = DeletedScanType::OMIT_COMMITTED_DELETES;
 		options.update_type = UpdateScanType::SKIP_UPDATES;
@@ -403,13 +404,11 @@ void PragmaFunctions::RegisterFunction(BuiltinFunctions &set) {
 	set.AddFunction(
 	    PragmaFunction::PragmaCall("git4data_drop_branch", PragmaGit4DataDropBranch, {LogicalType::VARCHAR}));
 	set.AddFunction(PragmaFunction::PragmaStatement("git4data_branches", PragmaGit4DataBranches));
-	set.AddFunction(PragmaFunction::PragmaCall("git4data_lca", PragmaGit4DataLCA,
-	                                           {LogicalType::VARCHAR, LogicalType::VARCHAR}));
+	set.AddFunction(
+	    PragmaFunction::PragmaCall("git4data_lca", PragmaGit4DataLCA, {LogicalType::VARCHAR, LogicalType::VARCHAR}));
 	set.AddFunction(PragmaFunction::PragmaStatement("git4data_state", PragmaGit4DataState));
-	set.AddFunction(
-	    PragmaFunction::PragmaCall("git4data_probe", PragmaGit4DataProbe, {LogicalType::VARCHAR}));
-	set.AddFunction(
-	    PragmaFunction::PragmaCall("git4data_probe_all", PragmaGit4DataProbeAll, {LogicalType::VARCHAR}));
+	set.AddFunction(PragmaFunction::PragmaCall("git4data_probe", PragmaGit4DataProbe, {LogicalType::VARCHAR}));
+	set.AddFunction(PragmaFunction::PragmaCall("git4data_probe_all", PragmaGit4DataProbeAll, {LogicalType::VARCHAR}));
 	set.AddFunction(PragmaFunction::PragmaCall("git4data_probe_at", PragmaGit4DataProbeAt,
 	                                           {LogicalType::VARCHAR, LogicalType::BIGINT}));
 
