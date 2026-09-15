@@ -404,6 +404,129 @@ static void PragmaGit4DataBindBranchTable(ClientContext &context, const Function
 	transaction_manager.branches.SetStorageTable(branch_name, source_table, storage_table);
 }
 
+//! The columns of one image compared against the other's, for telling a real merge conflict from two
+//! branches that made the same change.
+static string BuildGit4DataRowComparison(TableCatalogEntry &table, const string &left_alias,
+                                         const string &right_alias) {
+	string result;
+	for (auto &column : table.GetColumns().Logical()) {
+		if (!result.empty()) {
+			result += " AND ";
+		}
+		auto name = KeywordHelper::WriteOptionallyQuoted(column.Name().GetIdentifierName());
+		result += StringUtil::Format("%s.%s IS NOT DISTINCT FROM %s.%s", left_alias, name, right_alias, name);
+	}
+	return result;
+}
+
+//! Merge one branch into another, three-way, with their least common ancestor as the base. The left
+//! branch is where the result lands, so it has to have storage of its own to be written to.
+//!
+//! A key is in conflict when both sides changed it relative to the ancestor. Two sides that ended up
+//! holding the same row have not conflicted, which is what the row comparison is for - without it,
+//! both branches adding the same row would be reported as a conflict and fail a policy of fail.
+static string PragmaGit4DataMerge(ClientContext &context, const FunctionParameters &parameters) {
+	auto table_name = parameters.values[0].ToString();
+	auto left_name = parameters.values[1].ToString();
+	auto right_name = parameters.values[2].ToString();
+	auto policy = StringUtil::Lower(parameters.values[3].ToString());
+	if (policy != "fail" && policy != "skip" && policy != "accept") {
+		throw InvalidInputException("Merge policy has to be fail, skip or accept, not \"%s\"", policy);
+	}
+	auto &transaction_manager = GetGit4DataTransactionManager(context);
+
+	Git4DataBranch left;
+	if (!transaction_manager.branches.Get(left_name, left)) {
+		throw InvalidInputException("Branch \"%s\" does not exist", left_name);
+	}
+	Git4DataBranch right;
+	if (!transaction_manager.branches.Get(right_name, right)) {
+		throw InvalidInputException("Branch \"%s\" does not exist", right_name);
+	}
+	string merge_into;
+	for (auto &entry : left.storage_tables) {
+		if (entry.first == table_name) {
+			merge_into = entry.second;
+		}
+	}
+	if (merge_into.empty()) {
+		throw InvalidInputException("Branch \"%s\" has no storage of its own for table \"%s\", so a merge "
+		                            "has nowhere to land - materialize it first",
+		                            left_name, table_name);
+	}
+	string ancestor;
+	if (!transaction_manager.branches.FindLCA(left_name, right_name, ancestor)) {
+		throw InvalidInputException("Branches \"%s\" and \"%s\" share no ancestor to merge against", left_name,
+		                            right_name);
+	}
+
+	auto &table = Catalog::GetEntry<TableCatalogEntry>(context, QualifiedName(Identifier(table_name)));
+	auto key_columns = Git4DataPrimaryKeyColumnNames(table);
+	if (key_columns.empty()) {
+		throw InvalidInputException("Table \"%s\" has no primary key, so a merge cannot tell which rows are "
+		                            "the same row",
+		                            table_name);
+	}
+	auto escape = [](const string &value) {
+		return StringUtil::Replace(value, "'", "''");
+	};
+	string key_list;
+	string key_list_both;
+	string key_match_xy;
+	string key_match_by;
+	for (idx_t i = 0; i < key_columns.size(); i++) {
+		auto quoted = KeywordHelper::WriteOptionallyQuoted(key_columns[i]);
+		if (i > 0) {
+			key_list += ", ";
+			key_list_both += ", ";
+			key_match_xy += " AND ";
+			key_match_by += " AND ";
+		}
+		key_list += quoted;
+		key_list_both += "b." + quoted;
+		key_match_xy += "x." + quoted + " = y." + quoted;
+		key_match_by += "y." + quoted + " = b." + quoted;
+	}
+	auto quoted_table = KeywordHelper::WriteOptionallyQuoted(table_name);
+	auto quoted_into = KeywordHelper::WriteOptionallyQuoted(merge_into);
+	auto diff_left =
+	    StringUtil::Format("git4data_diff('%s', '%s', '%s')", escape(table_name), escape(ancestor), escape(left_name));
+	auto diff_right =
+	    StringUtil::Format("git4data_diff('%s', '%s', '%s')", escape(table_name), escape(ancestor), escape(right_name));
+	auto right_image =
+	    FormatGit4DataAtClause(table_name, right_name, ResolveGit4DataReference(transaction_manager, right_name));
+
+	string result =
+	    StringUtil::Format("CREATE OR REPLACE TEMP TABLE g4d_merge_conflicts AS WITH l AS (SELECT %s FROM %s), "
+	                       "r AS (SELECT %s FROM %s), both_sides AS (SELECT %s FROM l INTERSECT SELECT %s FROM r) "
+	                       "SELECT %s FROM both_sides b WHERE NOT EXISTS (SELECT 1 FROM (SELECT * FROM %s) x JOIN "
+	                       "(SELECT * FROM %s) y ON (%s) WHERE %s AND (%s));\n",
+	                       key_list, diff_left, key_list, diff_right, key_list, key_list, key_list_both, quoted_into,
+	                       right_image, key_match_xy, key_match_by, BuildGit4DataRowComparison(table, "x", "y"));
+	if (policy == "fail") {
+		result += "SELECT CASE WHEN EXISTS (SELECT 1 FROM g4d_merge_conflicts) THEN error('merge conflict: use "
+		          "policy skip or accept, or resolve it first') ELSE 0 END;\n";
+	}
+	// with accept the right side wins outright; otherwise a conflicting key is left as the left has it
+	auto conflict_filter =
+	    policy == "accept"
+	        ? string()
+	        : StringUtil::Format(" AND (%s) NOT IN (SELECT %s FROM g4d_merge_conflicts)", key_list, key_list);
+	// Accepting means the right side's row replaces whatever the left has for that key, including when
+	// the right side added it and the left also has one - so every key the right touched is cleared
+	// first, not only the ones it removed or changed.
+	result += StringUtil::Format(
+	    "DELETE FROM %s WHERE (%s) IN (SELECT %s FROM %s WHERE change IN (%s)%s);\n", quoted_into, key_list, key_list,
+	    diff_right, policy == "accept" ? "'added', 'removed', 'changed'" : "'removed', 'changed'", conflict_filter);
+	result += StringUtil::Format(
+	    "INSERT INTO %s SELECT * FROM %s WHERE (%s) IN (SELECT %s FROM %s WHERE change IN (%s)%s) AND (%s) NOT IN "
+	    "(SELECT %s FROM %s);\n",
+	    quoted_into, right_image, key_list, key_list, diff_right, "'added', 'changed'", conflict_filter, key_list,
+	    key_list, quoted_into);
+	result += "DROP TABLE g4d_merge_conflicts;";
+	return result;
+}
+
 static void PragmaGit4DataCreateBranch(ClientContext &context, const FunctionParameters &parameters) {
 	auto name = parameters.values[0].ToString();
 	auto parent = parameters.values[1].ToString();
@@ -689,6 +812,9 @@ void PragmaFunctions::RegisterFunction(BuiltinFunctions &set) {
 	                                           {LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR}));
 	set.AddFunction(PragmaFunction::PragmaCall("git4data_bind_branch_table", PragmaGit4DataBindBranchTable,
 	                                           {LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR}));
+	set.AddFunction(PragmaFunction::PragmaCall(
+	    "git4data_merge", PragmaGit4DataMerge,
+	    {LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR}));
 	set.AddFunction(
 	    PragmaFunction::PragmaCall("git4data_lca", PragmaGit4DataLCA, {LogicalType::VARCHAR, LogicalType::VARCHAR}));
 	set.AddFunction(PragmaFunction::PragmaCall("git4data_pick", PragmaGit4DataPick,

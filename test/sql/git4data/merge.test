@@ -1,0 +1,160 @@
+# name: test/sql/git4data/merge.test
+# description: Three-way merge of one branch into another, with conflict policies
+# group: [git4data]
+
+load {TEST_DIR}/merge.db
+
+statement ok
+CREATE TABLE t (k INTEGER PRIMARY KEY, v INTEGER)
+
+statement ok
+INSERT INTO t SELECT range, range FROM range(100)
+
+statement ok
+CHECKPOINT
+
+# two branches off one ancestor, so the ancestor is their least common base
+statement ok
+PRAGMA git4data_create_branch('root', '')
+
+statement ok
+PRAGMA git4data_create_branch('left', 'root')
+
+statement ok
+PRAGMA git4data_create_branch('right', 'root')
+
+statement ok
+CHECKPOINT
+
+statement ok
+PRAGMA git4data_materialize('t', 'left', 't_left')
+
+statement ok
+PRAGMA git4data_materialize('t', 'right', 't_right')
+
+# each side changes a different row
+statement ok
+INSERT INTO t_left VALUES (1000, 1)
+
+statement ok
+INSERT INTO t_right VALUES (2000, 2)
+
+statement ok
+PRAGMA git4data_merge('t', 'left', 'right', 'fail')
+
+query I
+SELECT count(*) FROM t AT (BRANCH => 'left')
+----
+102
+
+query I
+SELECT v FROM t_left WHERE k = 2000
+----
+2
+
+# the merge lands in the left branch, so the source table is untouched
+query I
+SELECT count(*) FROM t
+----
+100
+
+# a real conflict: the same key, changed differently on each side
+statement ok
+INSERT INTO t_left VALUES (3000, 3)
+
+statement ok
+INSERT INTO t_right VALUES (3000, 99)
+
+statement error
+PRAGMA git4data_merge('t', 'left', 'right', 'fail')
+----
+<REGEX>:.*merge conflict.*
+
+# failing applies nothing at all, not half of it
+query I
+SELECT count(*) FROM t_left WHERE k = 2000
+----
+1
+
+query I
+SELECT v FROM t_left WHERE k = 3000
+----
+3
+
+# skip leaves a conflicting key as the left branch has it
+statement ok
+PRAGMA git4data_merge('t', 'left', 'right', 'skip')
+
+query I
+SELECT v FROM t_left WHERE k = 3000
+----
+3
+
+# accept takes the right branch's version
+statement ok
+PRAGMA git4data_merge('t', 'left', 'right', 'accept')
+
+query I
+SELECT v FROM t_left WHERE k = 3000
+----
+99
+
+# The same change made on both sides is not a conflict, so a policy of fail does not refuse it -
+# otherwise two branches adding the same row could never be merged.
+statement ok
+INSERT INTO t_left VALUES (5000, 5)
+
+statement ok
+INSERT INTO t_right VALUES (5000, 5)
+
+statement ok
+PRAGMA git4data_merge('t', 'left', 'right', 'fail')
+
+query I
+SELECT count(*) FROM t_left WHERE k = 5000
+----
+1
+
+# a merge has to land somewhere writable, and root has no storage of its own yet
+statement error
+PRAGMA git4data_merge('t', 'root', 'left', 'fail')
+----
+<REGEX>:.*no storage of its own.*
+
+statement ok
+PRAGMA git4data_materialize('t', 'root', 't_root')
+
+# merged into a branch that is an ancestor: right's changes relative to the ancestor apply cleanly
+statement ok
+PRAGMA git4data_merge('t', 'root', 'right', 'fail')
+
+query I
+SELECT count(*) FROM t_root
+----
+103
+
+statement error
+PRAGMA git4data_merge('t', 'left', 'nope', 'fail')
+----
+<REGEX>:.*nope.*does not exist.*
+
+statement error
+PRAGMA git4data_merge('t', 'left', 'right', 'maybe')
+----
+<REGEX>:.*fail, skip or accept.*
+
+# and it still works after the file is reopened
+statement ok
+CHECKPOINT
+
+restart
+
+query I
+SELECT v FROM t_left WHERE k = 3000
+----
+99
+
+query I
+SELECT count(*) FROM t AT (BRANCH => 'left')
+----
+104
