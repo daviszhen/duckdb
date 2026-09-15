@@ -1,0 +1,95 @@
+# name: test/sql/git4data/diff_identity.test
+# description: A primary key pairs the two halves of an update; without one they stay apart
+# group: [git4data]
+
+load {TEST_DIR}/diff_identity.db
+
+statement ok
+CREATE TABLE pk_t (k INTEGER PRIMARY KEY, v INTEGER)
+
+statement ok
+INSERT INTO pk_t SELECT range, range * 10 FROM range(100)
+
+statement ok
+CHECKPOINT
+
+statement ok
+PRAGMA git4data_create_snapshot('before')
+
+# an update is a delete plus an insert of a different physical row, so it arrives as two halves
+statement ok
+UPDATE pk_t SET v = v + 1 WHERE k < 10
+
+statement ok
+INSERT INTO pk_t VALUES (1000, 1)
+
+statement ok
+DELETE FROM pk_t WHERE k = 50
+
+statement ok
+CHECKPOINT
+
+statement ok
+PRAGMA git4data_create_branch('after', '')
+
+statement ok
+CHECKPOINT
+
+# the primary key says the removed pre-image and the added post-image are the same row
+query II
+SELECT change, count(*) FROM git4data_diff('pk_t', 'before', 'after') GROUP BY change ORDER BY change
+----
+added	1
+changed	10
+removed	1
+
+# every changed row carries the row it became
+query I
+SELECT count(*) FROM git4data_diff('pk_t', 'before', 'after')
+WHERE change = 'changed' AND counterpart_row_id IS NOT NULL
+----
+10
+
+# the rows that only appeared or only went away have no counterpart
+query I
+SELECT count(*) FROM git4data_diff('pk_t', 'before', 'after')
+WHERE change <> 'changed' AND counterpart_row_id IS NULL
+----
+2
+
+# Without a primary key nothing in the storage links the two halves, so they stay separate rather
+# than being paired by a guess - the same update as above, reported as ten of each.
+statement ok
+CREATE TABLE no_pk (k INTEGER, v INTEGER)
+
+statement ok
+INSERT INTO no_pk SELECT range, range * 10 FROM range(100)
+
+statement ok
+CHECKPOINT
+
+statement ok
+PRAGMA git4data_create_snapshot('np_before')
+
+statement ok
+UPDATE no_pk SET v = v + 1 WHERE k < 10
+
+statement ok
+CHECKPOINT
+
+statement ok
+PRAGMA git4data_create_branch('np_after', '')
+
+statement ok
+CHECKPOINT
+
+query II
+SELECT change, count(*) FROM git4data_diff('no_pk', 'np_before', 'np_after') GROUP BY change ORDER BY change
+----
+added	10
+removed	10
+
+query I
+SELECT count(*) FROM git4data_diff('no_pk', 'np_before', 'np_after') WHERE change = 'changed'
+----
+0
