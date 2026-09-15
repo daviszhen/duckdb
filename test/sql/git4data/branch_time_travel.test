@@ -1,0 +1,70 @@
+# name: test/sql/git4data/branch_time_travel.test
+# description: A branch's own line has a history, readable at a snapshot like any other table
+# group: [git4data]
+
+load {TEST_DIR}/branch_time_travel.db
+
+statement ok
+CREATE TABLE t (k INTEGER PRIMARY KEY, v INTEGER)
+
+statement ok
+INSERT INTO t SELECT range, range FROM range(10)
+
+statement ok
+CHECKPOINT
+
+statement ok
+PRAGMA git4data_create_snapshot('base')
+
+statement ok
+PRAGMA git4data_create_branch('b', '')
+
+statement ok
+PRAGMA git4data_materialize('t', 'b', 't_b')
+
+statement ok
+UPDATE t_b SET v = 111 WHERE k = 1
+
+statement ok
+CHECKPOINT
+
+statement ok
+PRAGMA git4data_create_snapshot('s1')
+
+statement ok
+UPDATE t_b SET v = 222 WHERE k = 2
+
+statement ok
+DELETE FROM t_b WHERE k = 3
+
+statement ok
+CHECKPOINT
+
+# the branch reads its own current state
+query III
+SELECT (SELECT v FROM t AT (BRANCH => 'b') WHERE k = 1), (SELECT v FROM t AT (BRANCH => 'b') WHERE k = 2),
+       (SELECT count(*) FROM t AT (BRANCH => 'b') WHERE k = 3)
+----
+111	222	0
+
+# A branch's line is a table, and a table can be read at a snapshot - which is what makes a branch's
+# own history readable rather than only its newest state. At 's1' only the first change had happened.
+query III
+SELECT (SELECT v FROM t_b AT (SNAPSHOT => 's1') WHERE k = 1), (SELECT v FROM t_b AT (SNAPSHOT => 's1') WHERE k = 2),
+       (SELECT count(*) FROM t_b AT (SNAPSHOT => 's1') WHERE k = 3)
+----
+111	2	1
+
+# A branch's storage is a table of its own, created when the branch was given one, so a snapshot taken
+# before that reads nothing from it - the rows were inserted after that commit.
+query I
+SELECT count(*) FROM t_b AT (SNAPSHOT => 'base')
+----
+0
+
+# the table the branch came from is untouched by any of it, at either snapshot
+query III
+SELECT (SELECT v FROM t WHERE k = 1), (SELECT count(*) FROM t WHERE k = 3),
+       (SELECT count(*) FROM t AT (SNAPSHOT => 'base'))
+----
+1	1	10
