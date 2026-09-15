@@ -214,8 +214,14 @@ static string PragmaGit4DataPick(ClientContext &context, const FunctionParameter
 	// for here, and the outcome is the same.
 	string result;
 	result += StringUtil::Format("DELETE FROM %s WHERE (%s) IN (%s);\n", quoted_table, key_list, removed_or_changed);
-	result += StringUtil::Format("INSERT INTO %s SELECT * FROM %s WHERE (%s) IN (%s);", quoted_table,
-	                             FormatGit4DataAtClause(table_name, source, source_unit), key_list, added_or_changed);
+	// Only the keys the live table is actually missing: a row the source added may well still be there,
+	// because the live table is usually the source's own continuation, and inserting it again would
+	// collide with its primary key instead of restoring anything. The keys of changed rows were removed
+	// by the statement above, so they are missing by the time this runs and take the source's values.
+	result += StringUtil::Format("INSERT INTO %s SELECT * FROM %s WHERE (%s) IN (%s) AND (%s) NOT IN "
+	                             "(SELECT %s FROM %s);",
+	                             quoted_table, FormatGit4DataAtClause(table_name, source, source_unit), key_list,
+	                             added_or_changed, key_list, key_list, quoted_table);
 	return result;
 }
 

@@ -1,0 +1,84 @@
+# name: test/sql/git4data/pick_scale.test
+# description: Pick over a table large enough to span several row groups
+# group: [git4data]
+
+require vector_size 2048
+
+load {TEST_DIR}/pick_scale.db
+
+# 300000 rows is more than two full row groups, so both the source image and the live table span
+# several - which is what the single-row-group tests could not reach.
+statement ok
+CREATE TABLE t (k INTEGER PRIMARY KEY, v INTEGER)
+
+statement ok
+INSERT INTO t SELECT range, range FROM range(300000)
+
+statement ok
+CHECKPOINT
+
+statement ok
+PRAGMA git4data_create_snapshot('base')
+
+statement ok
+INSERT INTO t SELECT 300000 + range, range FROM range(200000)
+
+statement ok
+CHECKPOINT
+
+statement ok
+PRAGMA git4data_create_branch('source', '')
+
+statement ok
+CHECKPOINT
+
+# the live table diverges by dropping rows the source added
+statement ok
+DELETE FROM t WHERE k >= 300000 AND k < 305000
+
+query I
+SELECT count(*) FROM t
+----
+495000
+
+# Most of the rows the source added are still present, so a pick must add only the missing ones.
+# Inserting all of them would collide with the primary key of the ones still there.
+statement ok
+PRAGMA git4data_pick('t', 'source', 'base')
+
+query I
+SELECT count(*) FROM t
+----
+500000
+
+query I
+SELECT count(*) FROM t WHERE k >= 300000 AND k < 305000
+----
+5000
+
+query II
+SELECT k, v FROM t WHERE k IN (300001, 499999) ORDER BY k
+----
+300001	1
+499999	199999
+
+# picking again changes nothing: the rows it would add are already there and the ones it would
+# remove were never put back
+statement ok
+PRAGMA git4data_pick('t', 'source', 'base')
+
+query I
+SELECT count(*) FROM t
+----
+500000
+
+# and the references still read what they should
+query I
+SELECT count(*) FROM t AT (SNAPSHOT => 'base')
+----
+300000
+
+query I
+SELECT count(*) FROM t AT (BRANCH => 'source')
+----
+500000
