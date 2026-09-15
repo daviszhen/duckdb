@@ -50,7 +50,11 @@ public:
 	vector<MetaBlockPointer> Checkpoint(RowGroupWriter &writer);
 	static shared_ptr<RowVersionManager> Deserialize(MetaBlockPointer delete_pointer, MetadataManager &manager);
 
-	bool HasUnserializedChanges();
+	//! Whether a checkpoint would have to rewrite the version information rather than reuse what is
+	//! already on disk. Deletes count, and so do inserts: an insert at or after the id retention
+	//! bound has to keep its id, and only the id-bearing on-disk form can carry one. Callers that
+	//! have no bound to hand pass the default, which reports the delete case alone.
+	bool HasUnserializedChanges(VisibilityBound id_retention_bound = VisibilityBound::AllCommitted());
 	bool HasDeletes();
 	bool HasUncommittedChanges();
 	vector<MetaBlockPointer> GetStoragePointers();

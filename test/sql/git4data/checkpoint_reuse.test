@@ -1,0 +1,74 @@
+# name: test/sql/git4data/checkpoint_reuse.test
+# description: A row group whose version information is rewritten must not reuse its metadata
+# group: [git4data]
+
+load {TEST_DIR}/checkpoint_reuse.db
+
+statement ok
+CREATE TABLE t (k INTEGER PRIMARY KEY, v INTEGER)
+
+statement ok
+INSERT INTO t SELECT range, range FROM range(10)
+
+statement ok
+CHECKPOINT
+
+# a reference holds the id retention bound down, so the version information cannot be written in the
+# id-free form and has to be rewritten at the checkpoints below
+statement ok
+PRAGMA git4data_create_snapshot('base')
+
+statement ok
+INSERT INTO t VALUES (100, 100)
+
+statement ok
+CHECKPOINT
+
+statement ok
+PRAGMA git4data_create_branch('source', '')
+
+statement ok
+CHECKPOINT
+
+# A second table is what reached the metadata re-use path in the report: the table metadata is
+# reused, so the file keeps the row group pointer it already had, and if the version information was
+# rewritten to new blocks in the meantime that pointer is left dangling.
+statement ok
+CREATE TABLE other (k INTEGER PRIMARY KEY, v INTEGER)
+
+statement ok
+INSERT INTO other SELECT range, range FROM range(5)
+
+statement ok
+CHECKPOINT
+
+statement ok
+PRAGMA git4data_create_branch('other_b', '')
+
+statement ok
+CHECKPOINT
+
+# Before the fix this failed with "In DeserializeDeletes, vector_index ... is out of range", because
+# the pointer the file carried had been freed and handed to another table.
+restart
+
+query I
+SELECT count(*) FROM t
+----
+11
+
+query I
+SELECT count(*) FROM other
+----
+5
+
+# the history the references hold is still readable, which is the point of holding them
+query I
+SELECT count(*) FROM t AT (SNAPSHOT => 'base')
+----
+10
+
+query I
+SELECT count(*) FROM t AT (BRANCH => 'source')
+----
+11

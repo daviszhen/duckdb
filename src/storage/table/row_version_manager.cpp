@@ -256,6 +256,12 @@ vector<MetaBlockPointer> RowVersionManager::Checkpoint(RowGroupWriter &writer) {
 	if (!uncheckpointed_delete_commit.IsValid() && !pending_inserts) {
 		// we can write the current pointer as-is
 		// ensure the blocks we are pointing to are not marked as free
+		{
+			string ptrs;
+			for (auto &p : storage_pointers) {
+				ptrs += std::to_string(p.block_pointer) + "@" + std::to_string(p.offset) + " ";
+			}
+		}
 		manager.ClearModifiedBlocks(storage_pointers);
 		// return the current set of pointers
 		return storage_pointers;
@@ -288,6 +294,12 @@ vector<MetaBlockPointer> RowVersionManager::Checkpoint(RowGroupWriter &writer) {
 			chunk_info.Write(metadata_writer, options.visibility_bound, options.id_retention_bound);
 		}
 		metadata_writer.Flush();
+		{
+			string ptrs;
+			for (auto &p : storage_pointers) {
+				ptrs += std::to_string(p.block_pointer) + "@" + std::to_string(p.offset) + " ";
+			}
+		}
 	}
 
 	if (uncheckpointed_delete_commit.IsValid() && uncheckpointed_delete_commit.GetIndex() < options.visibility_bound) {
@@ -328,9 +340,17 @@ shared_ptr<RowVersionManager> RowVersionManager::Deserialize(MetaBlockPointer de
 	return version_info;
 }
 
-bool RowVersionManager::HasUnserializedChanges() {
+bool RowVersionManager::HasUnserializedChanges(VisibilityBound id_retention_bound) {
 	lock_guard<mutex> lock(version_lock);
-	return uncheckpointed_delete_commit.IsValid();
+	if (uncheckpointed_delete_commit.IsValid()) {
+		return true;
+	}
+	for (auto &info : vector_info) {
+		if (info && info->HasPendingInserts(id_retention_bound)) {
+			return true;
+		}
+	}
+	return false;
 }
 
 bool RowVersionManager::HasDeletes() {

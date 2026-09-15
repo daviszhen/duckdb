@@ -1146,6 +1146,12 @@ optional_ptr<RowVersionManager> RowGroup::GetVersionInfo() {
 	}
 	D_ASSERT(!deletes_pointers.empty());
 	auto root_delete = deletes_pointers[0];
+	{
+		string ptrs;
+		for (auto &p : deletes_pointers) {
+			ptrs += std::to_string(p.block_pointer) + "@" + std::to_string(p.offset) + " ";
+		}
+	}
 	auto loaded_info = RowVersionManager::Deserialize(root_delete, GetBlockManager().GetMetadataManager());
 	SetVersionInfo(std::move(loaded_info));
 	deletes_is_loaded = true;
@@ -1629,7 +1635,7 @@ bool RowGroup::HasUnchangedColumns() const {
 
 RowGroupWriteData RowGroup::WriteToDisk(RowGroupWriter &writer) {
 	bool can_reuse_metadata = CanReuseMetadata(writer);
-	if (can_reuse_metadata && !HasChanges()) {
+	if (can_reuse_metadata && !HasChanges(writer.GetCheckpointOptions().id_retention_bound)) {
 		RowGroupWriteData result;
 		result.write_action = RowGroupWriteAction::REUSE_EXISTING_ROW_GROUP_METADATA;
 		if (GetCollection().SupportsPerColumnWrites()) {
@@ -1917,13 +1923,13 @@ RowGroupPointer RowGroup::Checkpoint(RowGroupWriteData write_data, RowGroupWrite
 	return row_group_pointer;
 }
 
-bool RowGroup::HasChanges() const {
+bool RowGroup::HasChanges(VisibilityBound id_retention_bound) const {
 	if (has_changes) {
 		return true;
 	}
 	auto version_info_loaded = version_info.load();
-	if (version_info_loaded && version_info_loaded->HasUnserializedChanges()) {
-		// we have deletes
+	if (version_info_loaded && version_info_loaded->HasUnserializedChanges(id_retention_bound)) {
+		// we have deletes, or inserts whose ids the on-disk form would have to carry
 		return true;
 	}
 	// check if any of the columns have changes
@@ -1985,7 +1991,14 @@ vector<MetaBlockPointer> RowGroup::CheckpointDeletes(RowGroupWriter &writer) {
 		// no version information: write nothing
 		return vector<MetaBlockPointer>();
 	}
-	return vinfo->Checkpoint(writer);
+	auto result = vinfo->Checkpoint(writer);
+	{
+		string ptrs;
+		for (auto &p : result) {
+			ptrs += std::to_string(p.block_pointer) + "@" + std::to_string(p.offset) + " ";
+		}
+	}
+	return result;
 }
 
 void RowGroup::Serialize(RowGroupPointer &pointer, Serializer &serializer, bool supports_per_column_writes) {
