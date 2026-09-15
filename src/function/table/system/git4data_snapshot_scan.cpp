@@ -178,6 +178,10 @@ struct Git4DataDiffBindData : public TableFunctionData {
 	vector<LogicalType> key_types;
 	//! The names of those columns, in the same order
 	vector<Identifier> key_names;
+	//! Whether the two sides are two different tables, which is what a branch with a table of its own
+	//! makes them. Different tables do not share row ids - the branch's storage numbers its own rows
+	//! from zero again - so the comparison has to be made on the primary key instead.
+	bool compare_by_key = false;
 };
 
 //! Marks a Change that stands alone rather than being paired with a counterpart
@@ -200,6 +204,18 @@ struct Git4DataDiffState : public GlobalTableFunctionState {
 	//! Key values of the rows on the left, so a removed row can be paired with the added row that
 	//! replaced it. Only filled when the table has a primary key.
 	unordered_map<row_t, vector<Value>> left_keys;
+	//! Whether the two sides are two different tables, in which case the comparison is made on the
+	//! primary key and the scan carries every column so two rows can be told apart by value.
+	bool compare_by_key = false;
+	//! The number of columns after the keys, contiguous in the scan chunk, when comparing by key
+	idx_t value_count = 0;
+	//! A row of the left side, held under its primary key
+	struct KeyedRow {
+		vector<Value> key;
+		vector<Value> values;
+		row_t row_id;
+	};
+	unordered_map<hash_t, vector<KeyedRow>> left_by_key;
 	struct Change {
 		row_t row_id;
 		row_t counterpart;
@@ -281,6 +297,15 @@ unique_ptr<FunctionData> Git4DataDiffFun::CreateBindData(ClientContext &context,
 
 	auto &table = Catalog::GetEntry<TableCatalogEntry>(context, QualifiedName(Identifier(table_name)));
 	Git4DataDiffPrimaryKey(table, result->key_columns, result->key_types, result->key_names);
+	// A branch with a table of its own is read as that table, and its row ids are its own. Comparing
+	// those against another table's row ids would compare numbers that mean different rows, so the
+	// comparison moves to the primary key - and without one there is nothing left to compare on.
+	result->compare_by_key = result->left_table != result->right_table;
+	if (result->compare_by_key && result->key_columns.empty()) {
+		throw InvalidInputException("Comparing references \"%s\" and \"%s\" reads two different tables (\"%s\" and "
+		                            "\"%s\"), which needs a primary key to tell one row from another",
+		                            left_name, right_name, result->left_table, result->right_table);
+	}
 	return std::move(result);
 }
 
@@ -345,11 +370,35 @@ static unique_ptr<GlobalTableFunctionState> Git4DataDiffInit(ClientContext &cont
 
 	auto &table = Catalog::GetEntry<TableCatalogEntry>(context, QualifiedName(Identifier(bind_data.table_name)));
 
-	// the key columns first, then the row id, so a chunk carries everything the diff compares
+	result->compare_by_key = bind_data.compare_by_key;
+	// the key columns first, then the row id, so a chunk carries everything the diff compares. When
+	// the two sides are different tables the values come along too, in one run after the keys.
 	vector<LogicalType> scan_types;
 	for (idx_t i = 0; i < bind_data.key_columns.size(); i++) {
 		result->column_ids.push_back(bind_data.key_columns[i]);
 		scan_types.push_back(bind_data.key_types[i]);
+	}
+	if (bind_data.compare_by_key) {
+		auto &columns = table.GetColumns();
+		for (idx_t i = 0; i < columns.PhysicalColumnCount(); i++) {
+			auto &column = columns.GetColumn(PhysicalIndex(i));
+			if (column.Generated()) {
+				continue;
+			}
+			bool is_key = false;
+			for (auto &key_column : bind_data.key_columns) {
+				if (key_column.GetPrimaryIndex() == i) {
+					is_key = true;
+					break;
+				}
+			}
+			if (is_key) {
+				continue;
+			}
+			result->column_ids.emplace_back(i);
+			scan_types.push_back(column.Type());
+			result->value_count++;
+		}
 	}
 	result->column_ids.emplace_back(COLUMN_IDENTIFIER_ROW_ID);
 	scan_types.push_back(LogicalType::ROW_TYPE);
@@ -381,7 +430,8 @@ static void Git4DataDiffCollect(Git4DataDiffState &state, TableScanState &scan, 
 			break;
 		}
 		// the row id column is not necessarily flat - a scan may hand back a dictionary
-		auto row_ids = state.scan_chunk.data[state.key_count].Values<row_t>();
+		// the row id sits after the keys, and after the values when those are carried too
+		auto row_ids = state.scan_chunk.data[state.key_count + state.value_count].Values<row_t>();
 		for (idx_t i = 0; i < count; i++) {
 			callback(row_ids[i].GetValue(), i);
 		}
@@ -416,9 +466,95 @@ static idx_t Git4DataDiffEmit(DataChunk &output, const vector<Git4DataDiffState:
 	return count;
 }
 
+//! The values of a row after the keys, in the order the scan carries them
+static vector<Value> Git4DataDiffRowValues(DataChunk &chunk, idx_t key_count, idx_t value_count, idx_t row) {
+	vector<Value> values;
+	values.reserve(value_count);
+	for (idx_t i = 0; i < value_count; i++) {
+		values.push_back(chunk.data[key_count + i].GetValue(row));
+	}
+	return values;
+}
+
+static bool Git4DataDiffSameValues(const vector<Value> &left, const vector<Value> &right) {
+	if (left.size() != right.size()) {
+		return false;
+	}
+	for (idx_t i = 0; i < left.size(); i++) {
+		if (!Value::NotDistinctFrom(left[i], right[i])) {
+			return false;
+		}
+	}
+	return true;
+}
+
 static void Git4DataDiffFunction(ClientContext &context, TableFunctionInput &data_p, DataChunk &output) {
 	auto &state = data_p.global_state->Cast<Git4DataDiffState>();
 	if (state.phase == Git4DataDiffState::Phase::DONE) {
+		return;
+	}
+	if (state.compare_by_key) {
+		// The two sides are two different tables, so their row ids are not comparable: the branch's
+		// storage numbers its own rows from zero again and the numbers drift apart as soon as the two
+		// tables append a different number of rows. The primary key is the identity that survives
+		// that, and the values are read so two rows sharing a key can be told apart from one row.
+		if (state.phase == Git4DataDiffState::Phase::LEFT) {
+			Git4DataDiffCollect(state, state.left_scan, state.left_bound, [&](row_t row_id, idx_t row) {
+				auto key = Git4DataDiffRowKey(state.scan_chunk, state.key_count, row);
+				Git4DataDiffState::KeyedRow entry;
+				entry.key = key;
+				entry.values = Git4DataDiffRowValues(state.scan_chunk, state.key_count, state.value_count, row);
+				entry.row_id = row_id;
+				state.left_by_key[Git4DataDiffKeyHash(key)].push_back(std::move(entry));
+			});
+			state.phase = Git4DataDiffState::Phase::RIGHT;
+		}
+		if (state.phase == Git4DataDiffState::Phase::RIGHT) {
+			unordered_set<hash_t> matched;
+			Git4DataDiffCollect(state, state.right_scan, state.right_bound, [&](row_t row_id, idx_t row) {
+				auto key = Git4DataDiffRowKey(state.scan_chunk, state.key_count, row);
+				auto hash = Git4DataDiffKeyHash(key);
+				auto entry = state.left_by_key.find(hash);
+				if (entry != state.left_by_key.end()) {
+					for (auto &candidate : entry->second) {
+						if (!Git4DataDiffSameKey(candidate.key, key)) {
+							continue;
+						}
+						matched.insert(hash);
+						auto values = Git4DataDiffRowValues(state.scan_chunk, state.key_count, state.value_count, row);
+						if (!Git4DataDiffSameValues(candidate.values, values)) {
+							state.changed.push_back(Git4DataDiffState::Change {candidate.row_id, row_id, key});
+						}
+						return;
+					}
+				}
+				state.added.push_back(Git4DataDiffState::Change {row_id, NO_COUNTERPART, key});
+			});
+			for (auto &entry : state.left_by_key) {
+				if (matched.find(entry.first) != matched.end()) {
+					continue;
+				}
+				for (auto &candidate : entry.second) {
+					state.removed.push_back(
+					    Git4DataDiffState::Change {candidate.row_id, NO_COUNTERPART, candidate.key});
+				}
+			}
+			state.left_by_key.clear();
+			state.phase = Git4DataDiffState::Phase::EMIT;
+		}
+		auto keyed = Git4DataDiffEmit(output, state.changed, state.changed_cursor, "changed");
+		if (keyed > 0) {
+			return;
+		}
+		keyed = Git4DataDiffEmit(output, state.removed, state.removed_cursor, "removed");
+		if (keyed > 0) {
+			return;
+		}
+		keyed = Git4DataDiffEmit(output, state.added, state.added_cursor, "added");
+		if (keyed > 0) {
+			return;
+		}
+		state.phase = Git4DataDiffState::Phase::DONE;
 		return;
 	}
 	if (state.phase == Git4DataDiffState::Phase::LEFT) {

@@ -1,0 +1,131 @@
+# name: test/sql/git4data/diff_tables.test
+# description: A diff between a branch that has storage and another line compares primary keys
+# group: [git4data]
+
+load {TEST_DIR}/diff_tables.db
+
+statement ok
+CREATE TABLE t (k INTEGER PRIMARY KEY, v INTEGER)
+
+statement ok
+INSERT INTO t SELECT range, range FROM range(100)
+
+statement ok
+CHECKPOINT
+
+statement ok
+PRAGMA git4data_create_snapshot('base')
+
+statement ok
+PRAGMA git4data_create_branch('feature', '')
+
+statement ok
+PRAGMA git4data_materialize('t', 'feature', 't_feature')
+
+# the branch goes its own way: ten rows changed, ten removed, one added
+statement ok
+UPDATE t_feature SET v = v + 1000 WHERE k < 10
+
+statement ok
+DELETE FROM t_feature WHERE k >= 10 AND k < 20
+
+statement ok
+INSERT INTO t_feature VALUES (200, 200)
+
+statement ok
+CHECKPOINT
+
+# The main line diverges too, and by a *different* number of appended rows. A materialized branch's
+# storage numbers its own rows from zero again, so once the two tables append differently the row ids
+# stop naming the same rows - which is why the comparison has to be made on the key.
+statement ok
+UPDATE t SET v = -1 WHERE k < 5
+
+statement ok
+DELETE FROM t WHERE k >= 90
+
+# the branch is read as itself, so what it holds is what the diff reports, and the main line's own
+# changes since the base do not leak into it
+query II
+SELECT change, count(*) FROM git4data_diff('t', 'base', 'feature') GROUP BY change ORDER BY change
+----
+added	1
+changed	10
+removed	10
+
+# a row that is the same on both sides is not a difference at all
+query I
+SELECT count(*) FROM git4data_diff('t', 'base', 'feature') WHERE k = 50
+----
+0
+
+# the keys the branch carried forward are the ones it changed, and the removed ones are the ones it
+# dropped - not the ones the main line dropped since the base
+query I
+SELECT string_agg(change || ':' || k::VARCHAR, ' ' ORDER BY change, k)
+FROM git4data_diff('t', 'base', 'feature') WHERE k IN (0, 5, 15, 95, 200)
+----
+added:200 changed:0 changed:5 removed:15
+
+# Both directions are answered from the branch's side: comparing the references the other way round
+# reports the same rows with the two kinds swapped.
+query II
+SELECT change, count(*) FROM git4data_diff('t', 'feature', 'base') GROUP BY change ORDER BY change
+----
+added	10
+changed	10
+removed	1
+
+# Without a primary key there is nothing to compare two different tables on, and guessing by row id
+# is what this comparison exists to avoid.
+statement ok
+CREATE TABLE u (a INTEGER, b INTEGER)
+
+statement ok
+INSERT INTO u SELECT range, range FROM range(10)
+
+statement ok
+CHECKPOINT
+
+statement ok
+PRAGMA git4data_create_snapshot('u_base')
+
+statement ok
+PRAGMA git4data_create_branch('u_feature', '')
+
+statement ok
+PRAGMA git4data_materialize('u', 'u_feature', 'u_storage')
+
+statement ok
+UPDATE u_storage SET b = b + 1 WHERE a < 3
+
+statement ok
+CHECKPOINT
+
+# the snapshot reads the table and the branch reads its own storage, so this compares two tables - and
+# with no primary key there is nothing to compare them on
+statement error
+SELECT * FROM git4data_diff('u', 'u_base', 'u_feature')
+----
+<REGEX>:.*primary key to tell one row from another.*
+
+# the same table at two bounds still needs no key: its row ids are its own on both sides. A branch
+# with no storage of its own reads the table at its pin, which is the case the row ids describe.
+statement ok
+INSERT INTO u VALUES (100, 100)
+
+statement ok
+DELETE FROM u WHERE a = 0
+
+statement ok
+CHECKPOINT
+
+# taken after the change, so its pin is the state the comparison is against
+statement ok
+PRAGMA git4data_create_branch('u_plain', '')
+
+query II
+SELECT change, count(*) FROM git4data_diff('u', 'u_base', 'u_plain') GROUP BY change ORDER BY change
+----
+added	1
+removed	1
