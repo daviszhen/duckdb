@@ -17,6 +17,8 @@
 #include "duckdb/common/encryption_functions.hpp"
 #include "duckdb/logging/log_manager.hpp"
 #include "duckdb/transaction/duck_transaction_manager.hpp"
+#include "duckdb/parser/keyword_helper.hpp"
+#include "duckdb/parser/constraints/unique_constraint.hpp"
 #include "duckdb/catalog/catalog.hpp"
 #include "duckdb/catalog/catalog_entry/table_catalog_entry.hpp"
 #include "duckdb/storage/data_table.hpp"
@@ -125,6 +127,96 @@ static DuckTransactionManager &GetGit4DataTransactionManager(ClientContext &cont
 		throw InvalidInputException("Git4Data snapshots require an attached database");
 	}
 	return DuckTransactionManager::Get(*attached);
+}
+
+//! The AT unit a reference has to be read through, throwing when neither registry has the name
+static const char *ResolveGit4DataReference(DuckTransactionManager &transaction_manager, const string &name) {
+	if (transaction_manager.snapshots.GetPin(name).IsValid()) {
+		return "SNAPSHOT";
+	}
+	Git4DataBranch branch;
+	if (transaction_manager.branches.Get(name, branch)) {
+		return "BRANCH";
+	}
+	throw InvalidInputException("Reference \"%s\" is neither a snapshot nor a branch", name);
+}
+
+//! A table read as of a reference, spelled the way the binder accepts it. The unit has to match
+//! the registry the name lives in, or the read is looked up in the wrong one.
+static string FormatGit4DataAtClause(const string &table_name, const string &reference, const char *unit) {
+	return StringUtil::Format("%s AT (%s => '%s')", KeywordHelper::WriteOptionallyQuoted(table_name), unit,
+	                          StringUtil::Replace(reference, "'", "''"));
+}
+
+//! The primary key's column names, empty when the table has none
+static vector<string> Git4DataPrimaryKeyColumnNames(TableCatalogEntry &table) {
+	vector<string> result;
+	for (auto &constraint : table.GetConstraints()) {
+		if (constraint->type != ConstraintType::UNIQUE) {
+			continue;
+		}
+		auto &unique = constraint->Cast<UniqueConstraint>();
+		if (!unique.IsPrimaryKey()) {
+			continue;
+		}
+		for (auto &name : unique.GetColumnNames()) {
+			result.push_back(name.GetIdentifierName());
+		}
+		break;
+	}
+	return result;
+}
+
+//! Apply the changes one reference has relative to another onto the live table. Expressed as SQL
+//! rather than as a new physical operator: the read side already exists (the reference scan), the
+//! write side is ordinary DML, and the difference between the two references is what git4data_diff
+//! computes. What this adds is the composition, and the decision that a pick needs a primary key -
+//! without one there is nothing to match a current row against, and applying a change to the wrong
+//! row would be worse than refusing to guess.
+static string PragmaGit4DataPick(ClientContext &context, const FunctionParameters &parameters) {
+	auto table_name = parameters.values[0].ToString();
+	auto source = parameters.values[1].ToString();
+	auto base = parameters.values[2].ToString();
+	auto &transaction_manager = GetGit4DataTransactionManager(context);
+
+	// both names resolve before any statement is generated, so a typo cannot half-apply a pick
+	auto source_unit = ResolveGit4DataReference(transaction_manager, source);
+	ResolveGit4DataReference(transaction_manager, base);
+
+	auto &table = Catalog::GetEntry<TableCatalogEntry>(context, QualifiedName(Identifier(table_name)));
+	auto key_columns = Git4DataPrimaryKeyColumnNames(table);
+	if (key_columns.empty()) {
+		throw InvalidInputException("Table \"%s\" has no primary key, so a pick cannot tell which rows to "
+		                            "apply the changes to",
+		                            table_name);
+	}
+	string key_list;
+	for (idx_t i = 0; i < key_columns.size(); i++) {
+		if (i > 0) {
+			key_list += ", ";
+		}
+		key_list += KeywordHelper::WriteOptionallyQuoted(key_columns[i]);
+	}
+	auto quoted_table = KeywordHelper::WriteOptionallyQuoted(table_name);
+	auto escape = [](const string &value) {
+		return StringUtil::Replace(value, "'", "''");
+	};
+	auto diff = StringUtil::Format("git4data_diff('%s', '%s', '%s')", escape(table_name), escape(base), escape(source));
+
+	// The key is what the two sides are matched on, not a row id: a reference scan does not expose
+	// row ids, and the key is the identity the diff already pairs updates by.
+	auto removed_or_changed =
+	    StringUtil::Format("SELECT %s FROM %s WHERE change IN ('removed', 'changed')", key_list, diff);
+	auto added_or_changed =
+	    StringUtil::Format("SELECT %s FROM %s WHERE change IN ('added', 'changed')", key_list, diff);
+
+	// A changed row is applied as a delete followed by an insert: there is no in-place update to reach
+	// for here, and the outcome is the same.
+	string result;
+	result += StringUtil::Format("DELETE FROM %s WHERE (%s) IN (%s);\n", quoted_table, key_list, removed_or_changed);
+	result += StringUtil::Format("INSERT INTO %s SELECT * FROM %s WHERE (%s) IN (%s);", quoted_table,
+	                             FormatGit4DataAtClause(table_name, source, source_unit), key_list, added_or_changed);
+	return result;
 }
 
 static void PragmaGit4DataCreateBranch(ClientContext &context, const FunctionParameters &parameters) {
@@ -406,6 +498,8 @@ void PragmaFunctions::RegisterFunction(BuiltinFunctions &set) {
 	set.AddFunction(PragmaFunction::PragmaStatement("git4data_branches", PragmaGit4DataBranches));
 	set.AddFunction(
 	    PragmaFunction::PragmaCall("git4data_lca", PragmaGit4DataLCA, {LogicalType::VARCHAR, LogicalType::VARCHAR}));
+	set.AddFunction(PragmaFunction::PragmaCall("git4data_pick", PragmaGit4DataPick,
+	                                           {LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR}));
 	set.AddFunction(PragmaFunction::PragmaStatement("git4data_state", PragmaGit4DataState));
 	set.AddFunction(PragmaFunction::PragmaCall("git4data_probe", PragmaGit4DataProbe, {LogicalType::VARCHAR}));
 	set.AddFunction(PragmaFunction::PragmaCall("git4data_probe_all", PragmaGit4DataProbeAll, {LogicalType::VARCHAR}));

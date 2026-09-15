@@ -1,0 +1,116 @@
+# name: test/sql/git4data/pick.test
+# description: Apply the changes one reference has over another onto the live table
+# group: [git4data]
+
+load {TEST_DIR}/pick.db
+
+statement ok
+CREATE TABLE t (k INTEGER PRIMARY KEY, v INTEGER)
+
+statement ok
+INSERT INTO t SELECT range, range FROM range(10)
+
+statement ok
+CHECKPOINT
+
+statement ok
+PRAGMA git4data_create_snapshot('base')
+
+# three kinds of change over the base: one row added, one removed, three changed
+statement ok
+INSERT INTO t VALUES (100, 100)
+
+statement ok
+DELETE FROM t WHERE k = 5
+
+statement ok
+UPDATE t SET v = v + 1 WHERE k < 3
+
+statement ok
+CHECKPOINT
+
+statement ok
+PRAGMA git4data_create_branch('source', '')
+
+statement ok
+CHECKPOINT
+
+# The live table moves on from the source, which is what gives a pick something to do. On one
+# write line this is the only way to diverge, and it is why pick becomes properly useful only
+# once branches can be written to independently.
+statement ok
+DELETE FROM t WHERE k = 100
+
+statement ok
+UPDATE t SET v = -1 WHERE k = 1
+
+query II
+SELECT k, v FROM t WHERE k IN (1, 5, 100) ORDER BY k
+----
+1	-1
+
+statement ok
+PRAGMA git4data_pick('t', 'source', 'base')
+
+# the added row is back with the source's value, the changed row is the source's value again, and
+# the row the source removed stays removed
+query II
+SELECT k, v FROM t WHERE k IN (1, 5, 100) ORDER BY k
+----
+1	2
+100	100
+
+query I
+SELECT count(*) FROM t
+----
+10
+
+# a pick needs a primary key: without one there is nothing to match a current row against
+statement ok
+CREATE TABLE no_pk (k INTEGER, v INTEGER)
+
+statement ok
+INSERT INTO no_pk SELECT range, range FROM range(5)
+
+statement ok
+CHECKPOINT
+
+statement ok
+PRAGMA git4data_create_snapshot('np_base')
+
+statement ok
+INSERT INTO no_pk VALUES (99, 99)
+
+statement ok
+CHECKPOINT
+
+statement ok
+PRAGMA git4data_create_branch('np_source', '')
+
+statement ok
+CHECKPOINT
+
+statement error
+PRAGMA git4data_pick('no_pk', 'np_source', 'np_base')
+----
+<REGEX>:.*has no primary key.*
+
+# an unknown reference is refused before any statement runs, so a typo cannot half-apply a pick
+statement error
+PRAGMA git4data_pick('t', 'nope', 'base')
+----
+<REGEX>:.*nope.*neither a snapshot nor a branch.*
+
+# the references are durable, so a pick still works after the file is reopened
+restart
+
+statement ok
+DELETE FROM t WHERE k = 100
+
+statement ok
+PRAGMA git4data_pick('t', 'source', 'base')
+
+query I
+SELECT count(*) FROM t WHERE k = 100
+----
+1

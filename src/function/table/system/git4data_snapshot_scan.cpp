@@ -145,6 +145,8 @@ struct Git4DataDiffBindData : public TableFunctionData {
 	vector<StorageIndex> key_columns;
 	//! The types of those columns, in the same order
 	vector<LogicalType> key_types;
+	//! The names of those columns, in the same order
+	vector<Identifier> key_names;
 };
 
 //! Marks a Change that stands alone rather than being paired with a counterpart
@@ -170,6 +172,8 @@ struct Git4DataDiffState : public GlobalTableFunctionState {
 	struct Change {
 		row_t row_id;
 		row_t counterpart;
+		//! The primary key of the row, carried so a caller can match it without knowing row ids
+		vector<Value> key;
 	};
 	vector<Change> added;
 	vector<Change> removed;
@@ -200,8 +204,8 @@ static VisibilityBound ResolveReferenceBound(DuckTransactionManager &transaction
 
 //! The primary key of a table as physical column indexes plus their types, both empty when it has
 //! none. A key is what makes two physical rows recognisably the same row.
-static void Git4DataDiffPrimaryKey(TableCatalogEntry &table, vector<StorageIndex> &columns,
-                                   vector<LogicalType> &types) {
+static void Git4DataDiffPrimaryKey(TableCatalogEntry &table, vector<StorageIndex> &columns, vector<LogicalType> &types,
+                                   vector<Identifier> &names) {
 	auto &table_columns = table.GetColumns();
 	for (auto &constraint : table.GetConstraints()) {
 		if (constraint->type != ConstraintType::UNIQUE) {
@@ -212,8 +216,10 @@ static void Git4DataDiffPrimaryKey(TableCatalogEntry &table, vector<StorageIndex
 			continue;
 		}
 		for (auto index : unique.GetLogicalIndexes(table_columns)) {
-			columns.emplace_back(table_columns.GetColumn(index).Physical().index);
-			types.push_back(table_columns.GetColumn(index).Type());
+			auto &column = table_columns.GetColumn(index);
+			columns.emplace_back(column.Physical().index);
+			types.push_back(column.Type());
+			names.push_back(column.Name());
 		}
 		return;
 	}
@@ -231,7 +237,7 @@ unique_ptr<FunctionData> Git4DataDiffFun::CreateBindData(ClientContext &context,
 	result->right_bound = ResolveReferenceBound(transaction_manager, right_name);
 
 	auto &table = Catalog::GetEntry<TableCatalogEntry>(context, QualifiedName(Identifier(table_name)));
-	Git4DataDiffPrimaryKey(table, result->key_columns, result->key_types);
+	Git4DataDiffPrimaryKey(table, result->key_columns, result->key_types, result->key_names);
 	return std::move(result);
 }
 
@@ -246,6 +252,13 @@ static unique_ptr<FunctionData> Git4DataDiffBind(ClientContext &context, TableFu
 	return_types.emplace_back(LogicalType::UBIGINT);
 	names.emplace_back("counterpart_row_id");
 	return_types.emplace_back(LogicalType::UBIGINT);
+	// the key follows, so a caller can match a changed row against the live table by key rather
+	// than by a physical row id that the reference scan does not expose
+	auto &bind_data = result->Cast<Git4DataDiffBindData>();
+	for (idx_t i = 0; i < bind_data.key_columns.size(); i++) {
+		names.push_back(bind_data.key_names[i]);
+		return_types.push_back(bind_data.key_types[i]);
+	}
 	return result;
 }
 
@@ -347,6 +360,9 @@ static idx_t Git4DataDiffEmit(DataChunk &output, const vector<Git4DataDiffState:
 		} else {
 			counterpart_writer.WriteValue(NumericCast<uint64_t>(entry.counterpart));
 		}
+		for (idx_t k = 0; k < entry.key.size(); k++) {
+			output.data[3 + k].SetValue(i, entry.key[k]);
+		}
 	}
 	cursor += count;
 	return count;
@@ -407,20 +423,22 @@ static void Git4DataDiffFunction(ClientContext &context, TableFunctionInput &dat
 					}
 				}
 				if (match == DConstants::INVALID_INDEX) {
-					state.added.push_back(Git4DataDiffState::Change {added.first, NO_COUNTERPART});
+					state.added.push_back(Git4DataDiffState::Change {added.first, NO_COUNTERPART, added.second});
 				} else {
 					removed_taken[match] = true;
-					state.changed.push_back(Git4DataDiffState::Change {removed_rows[match].first, added.first});
+					state.changed.push_back(
+					    Git4DataDiffState::Change {removed_rows[match].first, added.first, added.second});
 				}
 			}
 		} else {
 			for (auto &added : added_rows) {
-				state.added.push_back(Git4DataDiffState::Change {added.first, NO_COUNTERPART});
+				state.added.push_back(Git4DataDiffState::Change {added.first, NO_COUNTERPART, added.second});
 			}
 		}
 		for (idx_t i = 0; i < removed_rows.size(); i++) {
 			if (!removed_taken[i]) {
-				state.removed.push_back(Git4DataDiffState::Change {removed_rows[i].first, NO_COUNTERPART});
+				state.removed.push_back(
+				    Git4DataDiffState::Change {removed_rows[i].first, NO_COUNTERPART, removed_rows[i].second});
 			}
 		}
 		// the sets and keys are only needed to work out the three lists
