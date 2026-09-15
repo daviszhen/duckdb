@@ -1,0 +1,79 @@
+# name: test/sql/git4data/pitr_churn.test
+# description: A recovery window does not make churn accumulate in the file
+# group: [git4data]
+
+load {TEST_DIR}/pitr_churn.db
+
+statement ok
+CREATE TABLE t AS SELECT range AS i, range AS v FROM range(300000)
+
+statement ok
+CHECKPOINT
+
+# A window that will not elapse on its own: history from here on stays reachable to it, which is what
+# makes reclamation under a reference the interesting case rather than a rare one.
+statement ok
+PRAGMA git4data_pitr(3650)
+
+statement ok
+INSERT INTO t SELECT 1000000 + range, 1000000 + range FROM range(100000)
+
+statement ok
+DELETE FROM t WHERE i >= 1000000 AND i % 2 = 1
+
+statement ok
+CHECKPOINT
+
+statement ok
+INSERT INTO t SELECT 2000000 + range, 2000000 + range FROM range(100000)
+
+statement ok
+DELETE FROM t WHERE i >= 2000000 AND i % 2 = 1
+
+statement ok
+CHECKPOINT
+
+statement ok
+INSERT INTO t SELECT 3000000 + range, 3000000 + range FROM range(100000)
+
+statement ok
+DELETE FROM t WHERE i >= 3000000 AND i % 2 = 1
+
+statement ok
+CHECKPOINT
+
+# Three rounds of append-and-delete-half churn. The live table grew by half of each round.
+query I
+SELECT count(*) FROM t
+----
+450000
+
+# The window cannot see any of the churn - those rows came after it - so every deleted row in every
+# round is reachable by nobody and the file holds the live rows plus only what the window needs.
+query II
+SELECT (SELECT count(*) FROM t AT (SNAPSHOT => '__pitr__')),
+       (SELECT sum("count") FROM pragma_storage_info('t') WHERE column_id = 0 AND segment_type <> 'VALIDITY')
+----
+300000	450000
+
+# the window still reads exactly the state it was opened on
+query III
+SELECT count(*), min(i), max(i) FROM t AT (SNAPSHOT => '__pitr__')
+----
+300000	0	299999
+
+# a fourth round does not change the shape of that answer
+statement ok
+INSERT INTO t SELECT 4000000 + range, 4000000 + range FROM range(100000)
+
+statement ok
+DELETE FROM t WHERE i >= 4000000 AND i % 2 = 1
+
+statement ok
+CHECKPOINT
+
+query III
+SELECT (SELECT count(*) FROM t), (SELECT count(*) FROM t AT (SNAPSHOT => '__pitr__')),
+       (SELECT sum("count") FROM pragma_storage_info('t') WHERE column_id = 0 AND segment_type <> 'VALIDITY')
+----
+500000	300000	550000
