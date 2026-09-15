@@ -55,6 +55,8 @@ public:
 	bool Drop(const string &name);
 	vector<Git4DataSnapshot> List() const;
 	idx_t Count() const;
+	//! Look a snapshot up by name. Returns false when there is none.
+	bool Get(const string &name, Git4DataSnapshot &result) const;
 	//! The commit id pinned under this name, or an invalid optional when there is none
 	optional_idx GetPin(const string &name) const;
 	//! The lowest pinned commit id, or MAX_COMMIT_ID when nothing is pinned.
@@ -183,6 +185,27 @@ public:
 	}
 	//! Pinned snapshots keep superseded versions readable
 	SnapshotRegistry snapshots;
+
+	//! A point-in-time recovery window: one reference that is moved forward as it falls out of the
+	//! window, so the last `window` of history stays reachable without anyone remembering to take a
+	//! reference. A window of zero moves it at every checkpoint, which keeps nothing.
+	static constexpr const char *PITR_REFERENCE = "__pitr__";
+	void SetPitr(timestamp_t window, timestamp_t now);
+	//! Put a window read from disk back in place without touching the reference it moves
+	void RestorePitr(timestamp_t window) {
+		pitr_enabled = true;
+		pitr_window = window;
+	}
+	void ClearPitr();
+	bool PitrEnabled() const {
+		return pitr_enabled;
+	}
+	timestamp_t PitrWindow() const {
+		return pitr_window;
+	}
+	//! Move the window forward if it has fallen out of it. Called before a checkpoint works out what
+	//! it may reclaim, so the move is what decides the reach of that checkpoint.
+	void AdvancePitr(timestamp_t now);
 	//! Data branches: references with a parent link, so they can be diffed and merged
 	BranchRegistry branches;
 	transaction_t GetLastCommit() const {
@@ -276,6 +299,8 @@ private:
 private:
 	//! The current start timestamp used by transactions
 	transaction_t current_start_timestamp;
+	bool pitr_enabled = false;
+	timestamp_t pitr_window;
 	//! The current transaction ID used by transactions
 	transaction_t current_transaction_id;
 	//! The lowest bound any active transaction reads at. A version preceding it is visible to

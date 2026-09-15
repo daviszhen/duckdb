@@ -1,0 +1,120 @@
+# name: test/sql/git4data/pitr.test
+# description: A point-in-time recovery window keeps recent history reachable
+# group: [git4data]
+
+load {TEST_DIR}/pitr.db
+
+statement ok
+CREATE TABLE t (k INTEGER PRIMARY KEY, v INTEGER)
+
+statement ok
+INSERT INTO t SELECT range, range FROM range(100)
+
+statement ok
+CHECKPOINT
+
+# A window that will not elapse on its own leaves the reference where it was opened, which is what
+# makes that state reachable without anyone having taken a reference by hand.
+statement ok
+PRAGMA git4data_pitr(3650)
+
+query III
+PRAGMA git4data_pitr_state
+----
+true	3650	true
+
+query I
+SELECT count(*) FROM t AT (SNAPSHOT => '__pitr__')
+----
+100
+
+statement ok
+INSERT INTO t SELECT 100 + range, range FROM range(100)
+
+statement ok
+CHECKPOINT
+
+query I
+SELECT count(*) FROM t
+----
+200
+
+query I
+SELECT count(*) FROM t AT (SNAPSHOT => '__pitr__')
+----
+100
+
+# so a rewind to a time after the window was opened reaches back to it
+statement ok
+PRAGMA git4data_restore_at('t', '2030-01-01 00:00:00')
+
+query III
+SELECT count(*), min(k), max(k) FROM t
+----
+100	0	99
+
+# the policy is part of the file, so the reference is still held back after a reopen
+restart
+
+query III
+PRAGMA git4data_pitr_state
+----
+true	3650	true
+
+query I
+SELECT count(*) FROM t AT (SNAPSHOT => '__pitr__')
+----
+100
+
+# A window of zero keeps nothing: the reference moves to the current state at every checkpoint, so
+# the reach collapses onto the present.
+statement ok
+PRAGMA git4data_pitr_off
+
+statement ok
+PRAGMA git4data_pitr(0)
+
+query III
+PRAGMA git4data_pitr_state
+----
+true	0	true
+
+query I
+SELECT count(*) FROM t AT (SNAPSHOT => '__pitr__')
+----
+100
+
+statement ok
+INSERT INTO t SELECT 200 + range, range FROM range(100)
+
+statement ok
+CHECKPOINT
+
+query I
+SELECT count(*) FROM t
+----
+200
+
+query I
+SELECT count(*) FROM t AT (SNAPSHOT => '__pitr__')
+----
+200
+
+# turning the window off releases the reference it was moving
+statement ok
+PRAGMA git4data_pitr_off
+
+query III
+PRAGMA git4data_pitr_state
+----
+false	0	false
+
+statement error
+SELECT count(*) FROM t AT (SNAPSHOT => '__pitr__')
+----
+<REGEX>:.*__pitr__.*does not exist.*
+
+query I
+SELECT count(*) FROM t
+----
+200

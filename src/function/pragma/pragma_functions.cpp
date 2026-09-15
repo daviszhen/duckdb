@@ -200,6 +200,37 @@ static string BuildGit4DataRestore(ClientContext &context, const string &table_n
 	return result;
 }
 
+//! Keep the last N days of history reachable without anyone taking a reference by hand: one
+//! reference is moved forward as it falls out of the window, at each checkpoint. A window of zero
+//! keeps nothing, which is what a test can rely on.
+static void PragmaGit4DataPitr(ClientContext &context, const FunctionParameters &parameters) {
+	auto days = parameters.values[0].GetValue<int64_t>();
+	if (days < 0) {
+		throw InvalidInputException("A point-in-time recovery window cannot be negative");
+	}
+	constexpr int64_t MICROS_PER_DAY = 24LL * 60 * 60 * 1000000;
+	auto &transaction_manager = GetGit4DataTransactionManager(context);
+	transaction_manager.SetPitr(timestamp_t(days * MICROS_PER_DAY), Timestamp::GetCurrentTimestamp());
+}
+
+static void PragmaGit4DataPitrOff(ClientContext &context, const FunctionParameters &parameters) {
+	GetGit4DataTransactionManager(context).ClearPitr();
+}
+
+static string PragmaGit4DataPitrState(ClientContext &context, const FunctionParameters &parameters) {
+	auto &transaction_manager = GetGit4DataTransactionManager(context);
+	constexpr int64_t MICROS_PER_DAY = 24LL * 60 * 60 * 1000000;
+	auto days = transaction_manager.PitrWindow().value / MICROS_PER_DAY;
+	// when the reference was taken is deliberately not reported here: it is the wall clock, so a
+	// test cannot assert it. It shows in git4data_snapshots, where it belongs.
+	Git4DataSnapshot reference;
+	auto held = transaction_manager.snapshots.Get(DuckTransactionManager::PITR_REFERENCE, reference);
+	return StringUtil::Format("SELECT %s::BOOLEAN AS pitr_enabled, %lld::BIGINT AS window_days, "
+	                          "%s::BOOLEAN AS reference_held",
+	                          transaction_manager.PitrEnabled() ? "true" : "false", (long long)days,
+	                          held ? "true" : "false");
+}
+
 static string PragmaGit4DataRestore(ClientContext &context, const FunctionParameters &parameters) {
 	auto table_name = parameters.values[0].ToString();
 	auto reference = parameters.values[1].ToString();
@@ -590,6 +621,9 @@ void PragmaFunctions::RegisterFunction(BuiltinFunctions &set) {
 	                                           {LogicalType::VARCHAR, LogicalType::VARCHAR}));
 	set.AddFunction(PragmaFunction::PragmaCall("git4data_restore_at", PragmaGit4DataRestoreAt,
 	                                           {LogicalType::VARCHAR, LogicalType::VARCHAR}));
+	set.AddFunction(PragmaFunction::PragmaCall("git4data_pitr", PragmaGit4DataPitr, {LogicalType::BIGINT}));
+	set.AddFunction(PragmaFunction::PragmaStatement("git4data_pitr_off", PragmaGit4DataPitrOff));
+	set.AddFunction(PragmaFunction::PragmaStatement("git4data_pitr_state", PragmaGit4DataPitrState));
 	set.AddFunction(PragmaFunction::PragmaStatement("git4data_state", PragmaGit4DataState));
 	set.AddFunction(PragmaFunction::PragmaCall("git4data_probe", PragmaGit4DataProbe, {LogicalType::VARCHAR}));
 	set.AddFunction(PragmaFunction::PragmaCall("git4data_probe_all", PragmaGit4DataProbeAll, {LogicalType::VARCHAR}));

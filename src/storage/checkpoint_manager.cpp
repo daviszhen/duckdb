@@ -311,6 +311,10 @@ void SingleFileCheckpointWriter::CreateCheckpoint() {
 		BinarySerializer registry_serializer(*registry_writer, SerializationOptions(db));
 		registry_serializer.Begin();
 		registry_serializer.WriteProperty<uint64_t>(99, "start_timestamp", start_timestamp);
+		// the window has to be persisted with the reference it moves, or a restart would leave the
+		// reference behind and never move it again
+		registry_serializer.WriteProperty<bool>(103, "pitr_enabled", transaction_manager.PitrEnabled());
+		registry_serializer.WriteProperty<int64_t>(104, "pitr_window", transaction_manager.PitrWindow().value);
 		registry_serializer.WriteList(100, "snapshots", pinned_snapshots.size(), [&](Serializer::List &list, idx_t i) {
 			list.WriteObject([&](Serializer &obj) {
 				obj.WriteProperty<string>(100, "name", pinned_snapshots[i].name);
@@ -475,6 +479,11 @@ void SingleFileCheckpointReader::LoadFromStorage() {
 		// every commit this process will make
 		auto start_timestamp = registry_deserializer.ReadProperty<uint64_t>(99, "start_timestamp");
 		transaction_manager.SetMinimumStartTimestamp(start_timestamp);
+		auto pitr_enabled = registry_deserializer.ReadPropertyWithExplicitDefault<bool>(103, "pitr_enabled", false);
+		auto pitr_window = registry_deserializer.ReadPropertyWithExplicitDefault<int64_t>(104, "pitr_window", 0);
+		if (pitr_enabled) {
+			transaction_manager.RestorePitr(timestamp_t(pitr_window));
+		}
 		registry_deserializer.ReadList(100, "snapshots", [&](Deserializer::List &list, idx_t i) {
 			return list.ReadObject([&](Deserializer &obj) {
 				auto name = obj.ReadProperty<string>(100, "name");

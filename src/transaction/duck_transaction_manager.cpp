@@ -66,6 +66,16 @@ optional_idx SnapshotRegistry::GetPin(const string &name) const {
 	return optional_idx(entry->second.pin);
 }
 
+bool SnapshotRegistry::Get(const string &name, Git4DataSnapshot &result) const {
+	lock_guard<mutex> guard(lock);
+	auto entry = snapshots.find(name);
+	if (entry == snapshots.end()) {
+		return false;
+	}
+	result = entry->second;
+	return true;
+}
+
 idx_t SnapshotRegistry::Count() const {
 	lock_guard<mutex> guard(lock);
 	return snapshots.size();
@@ -385,10 +395,44 @@ DuckTransactionManager::GetCheckpointType(DuckTransaction &transaction, const Un
 	return CheckpointDecision(checkpoint_type);
 }
 
+void DuckTransactionManager::SetPitr(timestamp_t window, timestamp_t now) {
+	pitr_enabled = true;
+	pitr_window = window;
+	snapshots.Drop(PITR_REFERENCE);
+	snapshots.Create(PITR_REFERENCE, last_commit, now);
+}
+
+void DuckTransactionManager::ClearPitr() {
+	pitr_enabled = false;
+	snapshots.Drop(PITR_REFERENCE);
+}
+
+void DuckTransactionManager::AdvancePitr(timestamp_t now) {
+	if (!pitr_enabled) {
+		return;
+	}
+	Git4DataSnapshot current;
+	if (!snapshots.Get(PITR_REFERENCE, current)) {
+		// the reference was dropped by hand - put it back at the current commit
+		snapshots.Create(PITR_REFERENCE, last_commit, now);
+		return;
+	}
+	if (now.value - current.created.value < pitr_window.value) {
+		// still inside the window: leave it where it is, which is what keeps that history readable
+		return;
+	}
+	// out of the window, so the state it holds is no longer promised - move the window forward
+	snapshots.Drop(PITR_REFERENCE);
+	snapshots.Create(PITR_REFERENCE, last_commit, now);
+}
+
 void DuckTransactionManager::Checkpoint(ClientContext &context, bool force) {
 	if (ValidChecker::IsInvalidated(db)) {
 		throw IOException("%s", ValidChecker::InvalidatedMessage(db));
 	}
+	// before the retention bound is worked out: moving the window is what decides what this
+	// checkpoint may reclaim
+	AdvancePitr(Timestamp::GetCurrentTimestamp());
 	auto &storage_manager = db.GetStorageManager();
 	auto current = Transaction::TryGet(context, db);
 	if (current) {
