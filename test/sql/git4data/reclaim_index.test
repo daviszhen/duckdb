@@ -1,0 +1,104 @@
+# name: test/sql/git4data/reclaim_index.test
+# description: Reclaiming under a reference keeps the table's primary key index consistent
+# group: [git4data]
+
+load {TEST_DIR}/reclaim_index.db
+
+statement ok
+CREATE TABLE t (k INTEGER PRIMARY KEY, v INTEGER)
+
+statement ok
+INSERT INTO t SELECT range, range FROM range(200000)
+
+statement ok
+CHECKPOINT
+
+statement ok
+PRAGMA git4data_create_snapshot('pin')
+
+# Half the table is removed after the reference exists, so the reference still needs every one of
+# those rows and a checkpoint has to keep them. Reclaiming here moves rows between row groups while an
+# index points at them, which is the part the index has to survive.
+statement ok
+DELETE FROM t WHERE k < 100000
+
+# a second round, invisible to the reference
+statement ok
+INSERT INTO t SELECT 1000000 + range, 1000000 + range FROM range(200000)
+
+statement ok
+CHECKPOINT
+
+statement ok
+CHECKPOINT
+
+query III
+SELECT (SELECT count(*) FROM t), (SELECT count(*) FROM t AT (SNAPSHOT => 'pin')),
+       (SELECT count(*) FROM t WHERE v = 150000)
+----
+300000	200000	1
+
+# a point lookup on a row the current view no longer has, and on one it does
+query II
+SELECT (SELECT v FROM t WHERE k = 50000), (SELECT v FROM t WHERE k = 1050000)
+----
+NULL	1050000
+
+# the reference still reads the row it was holding, by key
+query I
+SELECT v FROM t AT (SNAPSHOT => 'pin') WHERE k = 50000
+----
+50000
+
+# The index has followed the rows the checkpoint moved: a key that is there is still refused, and the
+# key of a row the current view deleted is free again.
+statement error
+INSERT INTO t VALUES (1050000, 0)
+----
+<REGEX>:.*Constraint Error.*
+
+statement ok
+INSERT INTO t VALUES (50000, 1)
+
+statement ok
+DELETE FROM t WHERE k = 50000
+
+# The same, after a reopen: the index is rebuilt from the file the checkpoint wrote.
+restart
+
+query II
+SELECT (SELECT count(*) FROM t), (SELECT count(*) FROM t WHERE k = 1050000)
+----
+300000	1
+
+statement error
+INSERT INTO t VALUES (1050000, 0)
+----
+<REGEX>:.*Constraint Error.*
+
+query I
+SELECT v FROM t AT (SNAPSHOT => 'pin') WHERE k = 50000
+----
+50000
+
+# Dropping the reference lets the rows it was holding go, and the index still agrees with the table.
+statement ok
+PRAGMA git4data_drop_snapshot('pin')
+
+statement ok
+CHECKPOINT
+
+query II
+SELECT (SELECT count(*) FROM t), (SELECT count(*) FROM t WHERE k = 1050000)
+----
+300000	1
+
+statement error
+INSERT INTO t VALUES (1050000, 0)
+----
+<REGEX>:.*Constraint Error.*
+
+query I
+SELECT count(*) FROM t WHERE k = 50000
+----
+0
