@@ -167,6 +167,42 @@ static vector<string> Git4DataPrimaryKeyColumnNames(TableCatalogEntry &table) {
 	return result;
 }
 
+//! Restore a table's contents to what a reference saw. Delete every row the reference knows and put
+//! the reference's rows back, rather than comparing them column by column: the table is being rewound,
+//! so rewriting the rows it keeps is the honest reading of that, and it needs no comparison. The
+//! primary key decides which rows those are, as it does for a pick.
+static string PragmaGit4DataRestore(ClientContext &context, const FunctionParameters &parameters) {
+	auto table_name = parameters.values[0].ToString();
+	auto reference = parameters.values[1].ToString();
+	auto &transaction_manager = GetGit4DataTransactionManager(context);
+	auto unit = ResolveGit4DataReference(transaction_manager, reference);
+
+	auto &table = Catalog::GetEntry<TableCatalogEntry>(context, QualifiedName(Identifier(table_name)));
+	auto key_columns = Git4DataPrimaryKeyColumnNames(table);
+	if (key_columns.empty()) {
+		throw InvalidInputException("Table \"%s\" has no primary key, so a restore cannot tell which rows to "
+		                            "replace",
+		                            table_name);
+	}
+	string key_list;
+	for (idx_t i = 0; i < key_columns.size(); i++) {
+		if (i > 0) {
+			key_list += ", ";
+		}
+		key_list += KeywordHelper::WriteOptionallyQuoted(key_columns[i]);
+	}
+	auto quoted_table = KeywordHelper::WriteOptionallyQuoted(table_name);
+	auto at_clause = FormatGit4DataAtClause(table_name, reference, unit);
+
+	// Every row goes, including the ones the reference never had: a restore rewinds the table, so a row
+	// added since the reference is as wrong as a row it changed. The delete runs first, and the reference
+	// scan still reads its own image afterwards because the delete is newer than the reference's bound.
+	string result;
+	result += StringUtil::Format("DELETE FROM %s;\n", quoted_table);
+	result += StringUtil::Format("INSERT INTO %s SELECT * FROM %s;", quoted_table, at_clause);
+	return result;
+}
+
 //! Apply the changes one reference has relative to another onto the live table. Expressed as SQL
 //! rather than as a new physical operator: the read side already exists (the reference scan), the
 //! write side is ordinary DML, and the difference between the two references is what git4data_diff
@@ -506,6 +542,8 @@ void PragmaFunctions::RegisterFunction(BuiltinFunctions &set) {
 	    PragmaFunction::PragmaCall("git4data_lca", PragmaGit4DataLCA, {LogicalType::VARCHAR, LogicalType::VARCHAR}));
 	set.AddFunction(PragmaFunction::PragmaCall("git4data_pick", PragmaGit4DataPick,
 	                                           {LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR}));
+	set.AddFunction(PragmaFunction::PragmaCall("git4data_restore", PragmaGit4DataRestore,
+	                                           {LogicalType::VARCHAR, LogicalType::VARCHAR}));
 	set.AddFunction(PragmaFunction::PragmaStatement("git4data_state", PragmaGit4DataState));
 	set.AddFunction(PragmaFunction::PragmaCall("git4data_probe", PragmaGit4DataProbe, {LogicalType::VARCHAR}));
 	set.AddFunction(PragmaFunction::PragmaCall("git4data_probe_all", PragmaGit4DataProbeAll, {LogicalType::VARCHAR}));

@@ -1,0 +1,137 @@
+# name: test/sql/git4data/restore.test
+# description: Rewind a table to what a reference saw
+# group: [git4data]
+
+load {TEST_DIR}/restore.db
+
+statement ok
+CREATE TABLE t (k INTEGER PRIMARY KEY, v INTEGER)
+
+statement ok
+INSERT INTO t SELECT range, range FROM range(1000)
+
+statement ok
+CHECKPOINT
+
+statement ok
+PRAGMA git4data_create_snapshot('base')
+
+# three kinds of drift from the reference: rows added, rows removed, rows changed
+statement ok
+INSERT INTO t SELECT 1000 + range, range FROM range(500)
+
+statement ok
+DELETE FROM t WHERE k < 200
+
+statement ok
+UPDATE t SET v = v + 99999 WHERE k < 300
+
+query I
+SELECT count(*) FROM t
+----
+1300
+
+statement ok
+PRAGMA git4data_restore('t', 'base')
+
+# A restore rewinds the whole table, so a row added since the reference goes too - not only the rows
+# the reference knows about.
+query III
+SELECT count(*), min(k), max(k) FROM t
+----
+1000	0	999
+
+query I
+SELECT v FROM t WHERE k = 100
+----
+100
+
+query I
+SELECT count(*) FROM t WHERE k >= 1000
+----
+0
+
+query I
+SELECT count(*) FROM t WHERE k < 200
+----
+200
+
+# running it again changes nothing
+statement ok
+PRAGMA git4data_restore('t', 'base')
+
+query I
+SELECT count(*) FROM t
+----
+1000
+
+# the reference still reads its own image - a restore moves the table, not the reference
+query I
+SELECT count(*) FROM t AT (SNAPSHOT => 'base')
+----
+1000
+
+# a branch is a reference too, so it can be restored to
+statement ok
+DELETE FROM t WHERE k < 500
+
+statement ok
+PRAGMA git4data_create_branch('after_delete', '')
+
+statement ok
+CHECKPOINT
+
+statement ok
+DELETE FROM t WHERE k >= 500
+
+query I
+SELECT count(*) FROM t
+----
+0
+
+statement ok
+PRAGMA git4data_restore('t', 'after_delete')
+
+query II
+SELECT count(*), min(k) FROM t
+----
+500	500
+
+# a table without a primary key cannot be rewound: there is nothing to say which rows are which
+statement ok
+CREATE TABLE no_pk (k INTEGER, v INTEGER)
+
+statement ok
+INSERT INTO no_pk SELECT range, range FROM range(10)
+
+statement ok
+CHECKPOINT
+
+statement ok
+PRAGMA git4data_create_snapshot('np_base')
+
+statement error
+PRAGMA git4data_restore('no_pk', 'np_base')
+----
+<REGEX>:.*has no primary key.*
+
+statement error
+PRAGMA git4data_restore('t', 'nope')
+----
+<REGEX>:.*nope.*neither a snapshot nor a branch.*
+
+# the references are durable, so a restore still works after the file is reopened
+restart
+
+query I
+SELECT count(*) FROM t AT (SNAPSHOT => 'base')
+----
+1000
+
+statement ok
+PRAGMA git4data_restore('t', 'base')
+
+query III
+SELECT count(*), min(k), max(k) FROM t
+----
+1000	0	999
