@@ -68,6 +68,16 @@ struct Git4DataSnapshotScanFun {
 	                                               const string &reference_name, Git4DataRefKind kind);
 };
 
+//! The rows that differ between two references, as (row_id, change)
+struct Git4DataDiffFun {
+	static void RegisterFunction(BuiltinFunctions &set);
+	//! The table function itself, so it can be registered on its own
+	static TableFunction GetFunction();
+	//! Bind data for a diff. Throws when either name is neither a snapshot nor a branch.
+	static unique_ptr<FunctionData> CreateBindData(ClientContext &context, const string &table_name,
+	                                               const string &left_name, const string &right_name);
+};
+
 struct DuckDBApproxDatabaseCountFun {
 	static void RegisterFunction(BuiltinFunctions &set);
 };

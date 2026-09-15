@@ -20,6 +20,7 @@ void BuiltinFunctions::RegisterSQLiteFunctions() {
 
 	DuckDBConnectionCountFun::RegisterFunction(*this);
 	Git4DataSnapshotScanFun::RegisterFunction(*this);
+	Git4DataDiffFun::RegisterFunction(*this);
 	DuckDBApproxDatabaseCountFun::RegisterFunction(*this);
 	DuckDBColumnsFun::RegisterFunction(*this);
 	DuckDBConstraintsFun::RegisterFunction(*this);

@@ -1,0 +1,80 @@
+# name: test/sql/git4data/diff.test
+# description: The rows that differ between two references
+# group: [git4data]
+
+load {TEST_DIR}/diff.db
+
+statement ok
+CREATE TABLE t AS SELECT range AS i FROM range(100)
+
+statement ok
+CHECKPOINT
+
+statement ok
+PRAGMA git4data_create_snapshot('before')
+
+# 50 rows appended, 20 removed
+statement ok
+INSERT INTO t SELECT 1000 + range AS i FROM range(50)
+
+statement ok
+DELETE FROM t WHERE i < 20
+
+statement ok
+CHECKPOINT
+
+statement ok
+PRAGMA git4data_create_branch('after', '')
+
+# the registry reaches disk at checkpoint time, so a reference created after the last one is only
+# in memory until this runs
+statement ok
+CHECKPOINT
+
+# the appended rows are new physical rows, so they are additions; the removed ones are row ids the
+# earlier reference can see and this one cannot
+query II
+SELECT change, count(*) FROM git4data_diff('t', 'before', 'after') GROUP BY change ORDER BY change
+----
+added	50
+removed	20
+
+# the row ids are the ones the two bounds produced: the 50 appended rows follow the 100 originals
+query II
+SELECT change, min(row_id) FROM git4data_diff('t', 'before', 'after') GROUP BY change ORDER BY change
+----
+added	100
+removed	0
+
+# swapping the arguments swaps the two sides
+query II
+SELECT change, count(*) FROM git4data_diff('t', 'after', 'before') GROUP BY change ORDER BY change
+----
+added	20
+removed	50
+
+# nothing differs between a reference and itself
+query I
+SELECT count(*) FROM git4data_diff('t', 'before', 'before')
+----
+0
+
+# a snapshot and a branch are both references, so either may be named on either side
+query I
+SELECT count(*) FROM git4data_diff('t', 'after', 'after')
+----
+0
+
+statement error
+SELECT * FROM git4data_diff('t', 'before', 'nope')
+----
+<REGEX>:.*nope.*neither a snapshot nor a branch.*
+
+# a reference is resolved at bind time, so the diff survives a restart
+restart
+
+query II
+SELECT change, count(*) FROM git4data_diff('t', 'before', 'after') GROUP BY change ORDER BY change
+----
+added	50
+removed	20
