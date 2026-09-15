@@ -332,6 +332,78 @@ static string PragmaGit4DataPick(ClientContext &context, const FunctionParameter
 	return result;
 }
 
+//! Give a branch a table of its own for a source table, which is what lets it be written to: a
+//! branch read as the pinned image cannot diverge, because the image is shared with everything else
+//! on the timeline. The copy is made by the statement this returns; the mapping is recorded first so
+//! a read of the branch can see it, and a mapping whose table never appears falls back to the pinned
+//! image instead of failing.
+static string PragmaGit4DataMaterialize(ClientContext &context, const FunctionParameters &parameters) {
+	auto source_table = parameters.values[0].ToString();
+	auto branch_name = parameters.values[1].ToString();
+	auto storage_table = parameters.values[2].ToString();
+	auto &transaction_manager = GetGit4DataTransactionManager(context);
+
+	Git4DataBranch branch;
+	if (!transaction_manager.branches.Get(branch_name, branch)) {
+		throw InvalidInputException("Branch \"%s\" does not exist", branch_name);
+	}
+	// the source has to be there, and the target must not be
+	auto &table = Catalog::GetEntry<TableCatalogEntry>(context, QualifiedName(Identifier(source_table)));
+	auto key_columns = Git4DataPrimaryKeyColumnNames(table);
+	if (Catalog::GetEntry<TableCatalogEntry>(context, QualifiedName(Identifier(storage_table)),
+	                                         OnEntryNotFound::RETURN_NULL)) {
+		throw InvalidInputException("Table \"%s\" already exists", storage_table);
+	}
+	// The mapping is registered by the last statement rather than here: the copy below reads the
+	// branch, and a branch with a mapping already reads its own table - which at that moment is the
+	// empty one just created, so the copy would bring nothing over.
+	//
+	// The columns are spelled out rather than taken with CREATE TABLE AS, because that does not carry
+	// the primary key over - and the key is what tells two rows apart for a diff, a pick or a merge
+	// afterwards. Nothing else of the source's definition is copied.
+	string columns;
+	for (auto &column : table.GetColumns().Logical()) {
+		if (!columns.empty()) {
+			columns += ", ";
+		}
+		columns +=
+		    KeywordHelper::WriteOptionallyQuoted(column.Name().GetIdentifierName()) + " " + column.Type().ToString();
+	}
+	for (idx_t i = 0; i < key_columns.size(); i++) {
+		columns += i == 0 ? ", PRIMARY KEY (" : ", ";
+		columns += KeywordHelper::WriteOptionallyQuoted(key_columns[i]);
+		if (i + 1 == key_columns.size()) {
+			columns += ")";
+		}
+	}
+	auto quoted_storage = KeywordHelper::WriteOptionallyQuoted(storage_table);
+	auto escaped_source = StringUtil::Replace(source_table, "'", "''");
+	auto escaped_branch = StringUtil::Replace(branch_name, "'", "''");
+	auto escaped_storage = StringUtil::Replace(storage_table, "'", "''");
+	return StringUtil::Format("CREATE TABLE %s (%s);\nINSERT INTO %s SELECT * FROM %s AT (BRANCH => '%s');\n"
+	                          "PRAGMA git4data_bind_branch_table('%s', '%s', '%s');",
+	                          quoted_storage, columns, quoted_storage,
+	                          KeywordHelper::WriteOptionallyQuoted(source_table), escaped_branch, escaped_source,
+	                          escaped_branch, escaped_storage);
+}
+
+//! Record that a branch reads a table of its own. Only meaningful as the last statement of a
+//! materialize, once the copy has been made.
+static void PragmaGit4DataBindBranchTable(ClientContext &context, const FunctionParameters &parameters) {
+	auto source_table = parameters.values[0].ToString();
+	auto branch_name = parameters.values[1].ToString();
+	auto storage_table = parameters.values[2].ToString();
+	auto &transaction_manager = GetGit4DataTransactionManager(context);
+	Git4DataBranch branch;
+	if (!transaction_manager.branches.Get(branch_name, branch)) {
+		throw InvalidInputException("Branch \"%s\" does not exist", branch_name);
+	}
+	// both tables have to be there, or the mapping would be a promise the reads then have to break
+	Catalog::GetEntry<TableCatalogEntry>(context, QualifiedName(Identifier(source_table)));
+	Catalog::GetEntry<TableCatalogEntry>(context, QualifiedName(Identifier(storage_table)));
+	transaction_manager.branches.SetStorageTable(branch_name, source_table, storage_table);
+}
+
 static void PragmaGit4DataCreateBranch(ClientContext &context, const FunctionParameters &parameters) {
 	auto name = parameters.values[0].ToString();
 	auto parent = parameters.values[1].ToString();
@@ -613,6 +685,10 @@ void PragmaFunctions::RegisterFunction(BuiltinFunctions &set) {
 	set.AddFunction(
 	    PragmaFunction::PragmaCall("git4data_drop_branch", PragmaGit4DataDropBranch, {LogicalType::VARCHAR}));
 	set.AddFunction(PragmaFunction::PragmaStatement("git4data_branches", PragmaGit4DataBranches));
+	set.AddFunction(PragmaFunction::PragmaCall("git4data_materialize", PragmaGit4DataMaterialize,
+	                                           {LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR}));
+	set.AddFunction(PragmaFunction::PragmaCall("git4data_bind_branch_table", PragmaGit4DataBindBranchTable,
+	                                           {LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR}));
 	set.AddFunction(
 	    PragmaFunction::PragmaCall("git4data_lca", PragmaGit4DataLCA, {LogicalType::VARCHAR, LogicalType::VARCHAR}));
 	set.AddFunction(PragmaFunction::PragmaCall("git4data_pick", PragmaGit4DataPick,

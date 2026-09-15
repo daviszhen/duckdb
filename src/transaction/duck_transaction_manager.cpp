@@ -96,6 +96,23 @@ bool BranchRegistry::Create(const string &name, transaction_t pin, const string 
 	return true;
 }
 
+void BranchRegistry::SetStorageTable(const string &branch, const string &source_table, const string &storage_table) {
+	lock_guard<mutex> guard(lock);
+	auto entry = branches.find(branch);
+	if (entry == branches.end()) {
+		return;
+	}
+	for (auto &pair : entry->second.storage_tables) {
+		if (pair.first == source_table) {
+			pair.second = storage_table;
+			dirty.store(true);
+			return;
+		}
+	}
+	entry->second.storage_tables.emplace_back(source_table, storage_table);
+	dirty.store(true);
+}
+
 void BranchRegistry::Restore(const string &name, transaction_t pin, const string &parent, timestamp_t created) {
 	lock_guard<mutex> guard(lock);
 	branches[name] = Git4DataBranch {name, pin, parent, created};

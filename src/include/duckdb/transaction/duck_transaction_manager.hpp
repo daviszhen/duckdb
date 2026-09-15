@@ -97,6 +97,10 @@ struct Git4DataBranch {
 	string parent;
 	//! When the branch was taken, on the wall clock, as for a snapshot
 	timestamp_t created;
+	//! Tables this branch has a line of its own for: the source table's name and the table backing
+	//! the branch. A branch with no entry for a table is read as the pinned image; one with an entry
+	//! is read as that table, which can be written to and so diverges.
+	vector<pair<string, string>> storage_tables;
 };
 
 //! Registry of data branches. A branch is a reference like a snapshot is - both pin the
@@ -129,6 +133,8 @@ public:
 	void MarkClean() noexcept {
 		dirty.store(false);
 	}
+	//! Give a branch its own table for a source table, so writes to it no longer touch the source
+	void SetStorageTable(const string &branch, const string &source_table, const string &storage_table);
 	//! Restore a branch read from disk without the checks Create performs
 	void Restore(const string &name, transaction_t pin, const string &parent, timestamp_t created);
 

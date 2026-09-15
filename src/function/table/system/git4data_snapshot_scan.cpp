@@ -35,6 +35,24 @@ struct Git4DataSnapshotScanState : public GlobalTableFunctionState {
 	}
 };
 
+//! The table backing a branch for a source table, or empty when the branch has no line of its own
+//! there. A mapping whose table has since been dropped falls back to the pinned image rather than
+//! failing, because the branch itself is still a valid reference.
+static string Git4DataBranchStorageTable(ClientContext &context, const Git4DataBranch &branch,
+                                         const string &table_name) {
+	for (auto &entry : branch.storage_tables) {
+		if (entry.first != table_name) {
+			continue;
+		}
+		auto storage = Catalog::GetEntry<TableCatalogEntry>(context, QualifiedName(Identifier(entry.second)),
+		                                                    OnEntryNotFound::RETURN_NULL);
+		if (storage) {
+			return entry.second;
+		}
+	}
+	return string();
+}
+
 unique_ptr<FunctionData> Git4DataSnapshotScanFun::CreateBindData(ClientContext &context, const string &table_name,
                                                                  const string &reference_name, Git4DataRefKind kind) {
 	auto result = make_uniq<Git4DataSnapshotScanBindData>();
@@ -49,6 +67,14 @@ unique_ptr<FunctionData> Git4DataSnapshotScanFun::CreateBindData(ClientContext &
 		Git4DataBranch branch;
 		if (!transaction_manager.branches.Get(reference_name, branch)) {
 			throw InvalidInputException("Branch \"%s\" does not exist", reference_name);
+		}
+		auto storage = Git4DataBranchStorageTable(context, branch, table_name);
+		if (!storage.empty()) {
+			// the branch has a line of its own here, so read that rather than the pinned image - it
+			// can have been written to since the branch was taken
+			result->table_name = storage;
+			result->bound = VisibilityBound::AllCommitted();
+			return std::move(result);
 		}
 		result->bound = VisibilityBound::Through(branch.pin);
 		return std::move(result);
@@ -141,6 +167,11 @@ struct Git4DataDiffBindData : public TableFunctionData {
 	string table_name;
 	VisibilityBound left_bound;
 	VisibilityBound right_bound;
+	//! The tables the two sides are read from. They are the same table unless a side is a branch
+	//! that has been given a line of its own, which is then read as itself - and a diff that did not
+	//! follow that would compare the pinned image while a pick read the branch's table.
+	string left_table;
+	string right_table;
 	//! The primary key's physical column indexes, empty when the table has no primary key
 	vector<StorageIndex> key_columns;
 	//! The types of those columns, in the same order
@@ -190,13 +221,24 @@ struct Git4DataDiffState : public GlobalTableFunctionState {
 
 //! A reference name may be a snapshot or a branch; both are the same kind of thing, so a diff does
 //! not need to be told which and resolves in either registry.
-static VisibilityBound ResolveReferenceBound(DuckTransactionManager &transaction_manager, const string &name) {
+//! Which table a reference is read from, and at what bound. A snapshot is always the pinned image of
+//! the table; a branch is that too unless it has a table of its own for it, in which case it is read
+//! as that table with everything it holds, because that line can have been written to.
+static VisibilityBound ResolveReferenceBound(ClientContext &context, DuckTransactionManager &transaction_manager,
+                                             const string &table_name, const string &name, string &read_table) {
 	auto pin = transaction_manager.snapshots.GetPin(name);
 	if (pin.IsValid()) {
+		read_table = table_name;
 		return VisibilityBound::Through(pin.GetIndex());
 	}
 	Git4DataBranch branch;
 	if (transaction_manager.branches.Get(name, branch)) {
+		auto storage = Git4DataBranchStorageTable(context, branch, table_name);
+		if (!storage.empty()) {
+			read_table = storage;
+			return VisibilityBound::AllCommitted();
+		}
+		read_table = table_name;
 		return VisibilityBound::Through(branch.pin);
 	}
 	throw InvalidInputException("Reference \"%s\" is neither a snapshot nor a branch", name);
@@ -233,8 +275,9 @@ unique_ptr<FunctionData> Git4DataDiffFun::CreateBindData(ClientContext &context,
 	auto &db_manager = DatabaseManager::Get(context);
 	auto attached = db_manager.GetDatabase(context, DatabaseManager::GetDefaultDatabase(context));
 	auto &transaction_manager = DuckTransactionManager::Get(*attached);
-	result->left_bound = ResolveReferenceBound(transaction_manager, left_name);
-	result->right_bound = ResolveReferenceBound(transaction_manager, right_name);
+	result->left_bound = ResolveReferenceBound(context, transaction_manager, table_name, left_name, result->left_table);
+	result->right_bound =
+	    ResolveReferenceBound(context, transaction_manager, table_name, right_name, result->right_table);
 
 	auto &table = Catalog::GetEntry<TableCatalogEntry>(context, QualifiedName(Identifier(table_name)));
 	Git4DataDiffPrimaryKey(table, result->key_columns, result->key_types, result->key_names);
@@ -301,7 +344,6 @@ static unique_ptr<GlobalTableFunctionState> Git4DataDiffInit(ClientContext &cont
 	result->key_count = bind_data.key_columns.size();
 
 	auto &table = Catalog::GetEntry<TableCatalogEntry>(context, QualifiedName(Identifier(bind_data.table_name)));
-	auto &row_groups = *table.GetStorage().GetRowGroupCollection();
 
 	// the key columns first, then the row id, so a chunk carries everything the diff compares
 	vector<LogicalType> scan_types;
@@ -313,11 +355,17 @@ static unique_ptr<GlobalTableFunctionState> Git4DataDiffInit(ClientContext &cont
 	scan_types.push_back(LogicalType::ROW_TYPE);
 	result->scan_chunk.Initialize(Allocator::Get(context), scan_types);
 
+	// each side is read from its own table, which is the same table unless a side is a branch with a
+	// line of its own
 	QueryContext query_context;
+	auto &left_table = Catalog::GetEntry<TableCatalogEntry>(context, QualifiedName(Identifier(bind_data.left_table)));
+	auto &left_groups = *left_table.GetStorage().GetRowGroupCollection();
 	result->left_scan.Initialize(result->column_ids, nullptr);
-	row_groups.InitializeScan(query_context, result->left_scan.table_state, result->column_ids, nullptr);
+	left_groups.InitializeScan(query_context, result->left_scan.table_state, result->column_ids, nullptr);
+	auto &right_table = Catalog::GetEntry<TableCatalogEntry>(context, QualifiedName(Identifier(bind_data.right_table)));
+	auto &right_groups = *right_table.GetStorage().GetRowGroupCollection();
 	result->right_scan.Initialize(result->column_ids, nullptr);
-	row_groups.InitializeScan(query_context, result->right_scan.table_state, result->column_ids, nullptr);
+	right_groups.InitializeScan(query_context, result->right_scan.table_state, result->column_ids, nullptr);
 	return std::move(result);
 }
 

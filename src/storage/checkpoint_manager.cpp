@@ -330,6 +330,15 @@ void SingleFileCheckpointWriter::CreateCheckpoint() {
 				obj.WriteProperty<uint64_t>(101, "pin", data_branches[i].pin);
 				obj.WriteProperty<string>(102, "parent", data_branches[i].parent);
 				obj.WriteProperty<int64_t>(103, "created", data_branches[i].created.value);
+				obj.WriteList(104, "storage_tables", data_branches[i].storage_tables.size(),
+				              [&](Serializer::List &storage_list, idx_t s) {
+					              storage_list.WriteObject([&](Serializer &storage_obj) {
+						              storage_obj.WriteProperty<string>(100, "source",
+						                                                data_branches[i].storage_tables[s].first);
+						              storage_obj.WriteProperty<string>(101, "storage",
+						                                                data_branches[i].storage_tables[s].second);
+					              });
+				              });
 			});
 		});
 		registry_serializer.End();
@@ -503,6 +512,13 @@ void SingleFileCheckpointReader::LoadFromStorage() {
 				auto parent = obj.ReadProperty<string>(102, "parent");
 				auto created = obj.ReadPropertyWithExplicitDefault<int64_t>(103, "created", 0);
 				transaction_manager.branches.Restore(name, pin, parent, timestamp_t(created));
+				obj.ReadOptionalList(104, "storage_tables", [&](Deserializer::List &storage_list, idx_t s) {
+					return storage_list.ReadObject([&](Deserializer &storage_obj) {
+						auto source = storage_obj.ReadProperty<string>(100, "source");
+						auto storage = storage_obj.ReadProperty<string>(101, "storage");
+						transaction_manager.branches.SetStorageTable(name, source, storage);
+					});
+				});
 			});
 		});
 		registry_deserializer.End();
