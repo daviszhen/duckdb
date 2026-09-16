@@ -1,0 +1,139 @@
+# name: test/sql/git4data/branch_delta.test
+# description: A branch that differs from its base by a delta instead of holding a copy of it
+# group: [git4data]
+
+load {TEST_DIR}/branch_delta.db
+
+statement ok
+CREATE TABLE t (k INTEGER PRIMARY KEY, v INTEGER)
+
+statement ok
+INSERT INTO t SELECT range, range FROM range(100)
+
+statement ok
+CHECKPOINT
+
+statement ok
+PRAGMA git4data_create_branch('base', '')
+
+# the branch is given no copy. What it changes is said with two tables of its own: rows it has that
+# its base does not, and keys it has removed from its base.
+statement ok
+CREATE TABLE t_add (k INTEGER PRIMARY KEY, v INTEGER)
+
+statement ok
+CREATE TABLE t_del (k INTEGER PRIMARY KEY)
+
+statement ok
+PRAGMA git4data_bind_branch_delta('t', 'base', 't_add', 't_del')
+
+# nothing written yet, so the branch still reads exactly its base
+query I
+SELECT count(*) FROM t AT (BRANCH => 'base')
+----
+100
+
+statement ok
+INSERT INTO t_add VALUES (2000, 2000)
+
+statement ok
+INSERT INTO t_del VALUES (5)
+
+# the branch is the base minus the removed keys plus the added rows, and the base itself is untouched
+query IIII
+SELECT (SELECT count(*) FROM t AT (BRANCH => 'base')),
+       (SELECT count(*) FROM t AT (BRANCH => 'base') WHERE k = 5),
+       (SELECT v FROM t AT (BRANCH => 'base') WHERE k = 2000),
+       (SELECT count(*) FROM t)
+----
+100	0	2000	100
+
+query II
+SELECT (SELECT count(*) FROM t WHERE k = 5), (SELECT count(*) FROM t WHERE k = 2000)
+----
+1	0
+
+# a row the branch changed is an added row and a removed key, which is the same shape an update has
+statement ok
+INSERT INTO t_del VALUES (7)
+
+statement ok
+INSERT INTO t_add VALUES (7, 700)
+
+query II
+SELECT (SELECT v FROM t AT (BRANCH => 'base') WHERE k = 7), (SELECT v FROM t WHERE k = 7)
+----
+700	7
+
+# the branch composes with a diff, which reads each side as the reference it names. Against a snapshot
+# of the base the branch shows the row it added, the key it removed, and the key it replaced - the
+# third because a row it added and a key it removed share a key, which is the shape of an update.
+statement ok
+PRAGMA git4data_create_snapshot('was')
+
+query II
+SELECT change, count(*) FROM git4data_diff('t', 'was', 'base') GROUP BY change ORDER BY change
+----
+added	1
+changed	1
+removed	1
+
+# the listing says the branch carries a delta rather than a copy; the column's content is asserted by
+# git4data-retention-check.sh, which can read the pragma's output
+statement ok
+PRAGMA git4data_branches;
+
+# the delta's tables have to be able to stand in for the source's rows and keys
+statement ok
+CREATE TABLE wrong_columns (k INTEGER PRIMARY KEY, x INTEGER)
+
+statement error
+PRAGMA git4data_bind_branch_delta('t', 'base', 'wrong_columns', 't_del')
+----
+<REGEX>:.*so it needs that table's columns in that order.*
+
+statement ok
+CREATE TABLE wrong_keys (k INTEGER PRIMARY KEY, v INTEGER)
+
+statement error
+PRAGMA git4data_bind_branch_delta('t', 'base', 't_add', 'wrong_keys')
+----
+<REGEX>:.*so it needs exactly those 1 key column.*
+
+statement ok
+CREATE TABLE nokey (k INTEGER, v INTEGER)
+
+statement ok
+CREATE TABLE same_columns (k INTEGER, v INTEGER)
+
+statement error
+PRAGMA git4data_bind_branch_delta('nokey', 'base', 'same_columns', 'same_columns')
+----
+<REGEX>:.*has no primary key, so a delta cannot say which rows it removes.*
+
+statement error
+PRAGMA git4data_bind_branch_delta('t', 'missing', 't_add', 't_del')
+----
+<REGEX>:.*Branch "missing" does not exist.*
+
+# the delta is part of the branch, so it comes back with the file
+statement ok
+CHECKPOINT
+
+restart
+
+query III
+SELECT (SELECT count(*) FROM t AT (BRANCH => 'base')),
+       (SELECT v FROM t AT (BRANCH => 'base') WHERE k = 2000),
+       (SELECT count(*) FROM t AT (BRANCH => 'base') WHERE k = 5)
+----
+100	2000	0
+
+# and a copy of the branch's line is still the branch's line, not the base's
+statement ok
+PRAGMA git4data_materialize('t', 'base', 't_base')
+
+query II
+SELECT (SELECT count(*) FROM t_base), (SELECT count(*) FROM t_base WHERE k = 5)
+----
+100	0

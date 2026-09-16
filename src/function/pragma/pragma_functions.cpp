@@ -1,5 +1,7 @@
 #include "duckdb/function/pragma/pragma_functions.hpp"
 
+#include <algorithm>
+
 #include "duckdb/common/enums/output_type.hpp"
 #include "duckdb/common/operator/cast_operators.hpp"
 #include "duckdb/common/string_util.hpp"
@@ -470,6 +472,60 @@ static void PragmaGit4DataBindBranchTable(ClientContext &context, const Function
 	transaction_manager.branches.SetStorageTable(branch_name, source_table, storage_table);
 }
 
+//! Record that a branch differs from its base by a delta rather than by a copy of it. The two tables
+//! are the caller's and are written with ordinary SQL: rows to add with the source table's columns,
+//! keys to remove with the source table's key columns. Reads of the branch then serve the base minus
+//! those keys plus those rows, which is what makes writing to a branch cost the change rather than the
+//! table.
+static void PragmaGit4DataBindBranchDelta(ClientContext &context, const FunctionParameters &parameters) {
+	auto source_table = parameters.values[0].ToString();
+	auto branch_name = parameters.values[1].ToString();
+	auto added_table = parameters.values[2].ToString();
+	auto removed_table = parameters.values[3].ToString();
+	auto &transaction_manager = GetGit4DataTransactionManager(context);
+	Git4DataBranch branch;
+	if (!transaction_manager.branches.Get(branch_name, branch)) {
+		throw InvalidInputException("Branch \"%s\" does not exist", branch_name);
+	}
+	auto &source = Catalog::GetEntry<TableCatalogEntry>(context, QualifiedName(Identifier(source_table)));
+	auto &added = Catalog::GetEntry<TableCatalogEntry>(context, QualifiedName(Identifier(added_table)));
+	auto &removed = Catalog::GetEntry<TableCatalogEntry>(context, QualifiedName(Identifier(removed_table)));
+	// the added rows are read as rows of the source table, so the two have to be interchangeable
+	auto &source_columns = source.GetColumns();
+	// the added rows are read as rows of the source table, so the two have to be interchangeable
+	if (added.GetColumns().GetColumnNames() != source_columns.GetColumnNames() ||
+	    added.GetColumns().GetColumnTypes() != source_columns.GetColumnTypes()) {
+		throw InvalidInputException("Table \"%s\" holds the rows added to \"%s\", so it needs that table's columns "
+		                            "in that order",
+		                            added_table, source_table);
+	}
+	// the removed table names the rows to hide from the base, so it carries exactly the key columns, in
+	// the order the source table declares them
+	auto key_names = Git4DataPrimaryKeyColumnNames(source);
+	if (key_names.empty()) {
+		throw InvalidInputException("Table \"%s\" has no primary key, so a delta cannot say which rows it removes",
+		                            source_table);
+	}
+	vector<string> expected_key_names;
+	vector<LogicalType> expected_key_types;
+	for (idx_t i = 0; i < source_columns.LogicalColumnCount(); i++) {
+		auto &column = source_columns.GetColumn(LogicalIndex(i));
+		auto name = column.Name().GetIdentifierName();
+		if (std::find(key_names.begin(), key_names.end(), name) == key_names.end()) {
+			continue;
+		}
+		expected_key_names.push_back(name);
+		expected_key_types.push_back(column.Type());
+	}
+	if (removed.GetColumns().GetColumnNames() != expected_key_names ||
+	    removed.GetColumns().GetColumnTypes() != expected_key_types) {
+		throw InvalidInputException("Table \"%s\" holds the keys removed from \"%s\", so it needs exactly those "
+		                            "%llu key column(s), in the order the source declares them",
+		                            removed_table, source_table, expected_key_names.size());
+	}
+	transaction_manager.branches.SetDeltaTable(branch_name, source_table, added_table, removed_table);
+}
+
 //! The columns of one image compared against the other's, for telling a real merge conflict from two
 //! branches that made the same change.
 static string BuildGit4DataRowComparison(TableCatalogEntry &table, const string &left_alias,
@@ -828,7 +884,8 @@ static string PragmaGit4DataBranches(ClientContext &context, const FunctionParam
 	auto entries = GetGit4DataTransactionManager(context).branches.List();
 	if (entries.empty()) {
 		return "SELECT NULL::VARCHAR AS branch_name, NULL::UBIGINT AS pinned_commit_id, "
-		       "NULL::VARCHAR AS parent, NULL::TIMESTAMP AS created, NULL::BOOLEAN AS has_storage WHERE false";
+		       "NULL::VARCHAR AS parent, NULL::TIMESTAMP AS created, NULL::BOOLEAN AS has_storage, "
+		       "NULL::BOOLEAN AS has_delta WHERE false";
 	}
 	string query = "SELECT * FROM (VALUES ";
 	for (idx_t i = 0; i < entries.size(); i++) {
@@ -842,11 +899,14 @@ static string PragmaGit4DataBranches(ClientContext &context, const FunctionParam
 		// a table of its own has moved on from the commit it was forked at, which is why a fork from it
 		// and a merge into it are not the simple operations they look like. It is reported so that is
 		// visible rather than something a caller has to infer from a conflict.
-		query += StringUtil::Format("('%s'::VARCHAR, %llu::UBIGINT, '%s'::VARCHAR, '%s'::TIMESTAMP, %s::BOOLEAN)", name,
-		                            entries[i].pin, parent, Timestamp::ToString(entries[i].created),
-		                            entries[i].storage_tables.empty() ? "false" : "true");
+		// has_delta says the branch differs from its base through tables of its own rather than through a
+		// copy of it, which is the cheaper shape to write to and not one the listing should hide
+		query += StringUtil::Format(
+		    "('%s'::VARCHAR, %llu::UBIGINT, '%s'::VARCHAR, '%s'::TIMESTAMP, %s::BOOLEAN, %s::BOOLEAN)", name,
+		    entries[i].pin, parent, Timestamp::ToString(entries[i].created),
+		    entries[i].storage_tables.empty() ? "false" : "true", entries[i].deltas.empty() ? "false" : "true");
 	}
-	query += ") t(branch_name, pinned_commit_id, parent, created, has_storage) ORDER BY pinned_commit_id, "
+	query += ") t(branch_name, pinned_commit_id, parent, created, has_storage, has_delta) ORDER BY pinned_commit_id, "
 	         "branch_name";
 	return query;
 }
@@ -1118,6 +1178,9 @@ void PragmaFunctions::RegisterFunction(BuiltinFunctions &set) {
 	set.AddFunction(PragmaFunction::PragmaStatement("git4data_branches", PragmaGit4DataBranches));
 	set.AddFunction(PragmaFunction::PragmaCall("git4data_materialize", PragmaGit4DataMaterialize,
 	                                           {LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR}));
+	set.AddFunction(PragmaFunction::PragmaCall(
+	    "git4data_bind_branch_delta", PragmaGit4DataBindBranchDelta,
+	    {LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR}));
 	set.AddFunction(PragmaFunction::PragmaCall("git4data_bind_branch_table", PragmaGit4DataBindBranchTable,
 	                                           {LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR}));
 	set.AddFunction(PragmaFunction::PragmaCall(

@@ -94,6 +94,17 @@ private:
 //! A data branch: a named point on the commit timeline that also records where it came from.
 //! The parent link is what turns the branches into a tree, and a tree is what makes a least
 //! common ancestor computable - which diff and merge both need.
+//! What a branch changes about one source table when it holds no copy of it. Both tables are the
+//! caller's: rows to add go into `added`, keys to remove into `removed`, with ordinary SQL.
+struct Git4DataBranchDelta {
+	//! The source table this delta applies to
+	string source;
+	//! Rows this branch has that its base does not, with the source table's columns
+	string added;
+	//! The keys this branch has removed from its base, with the source table's key columns
+	string removed;
+};
+
 struct Git4DataBranch {
 	string name;
 	//! Everything committed up to and including this commit id is this branch's base
@@ -110,6 +121,10 @@ struct Git4DataBranch {
 	//! captured one. The child reads that branch's storage at its pin until it has storage of its own,
 	//! which is what lets a fork take a state rather than only a commit.
 	string base_line;
+	//! Tables this branch differs from its base by, instead of holding a copy of it: a branch with a
+	//! delta reads its base minus the keys in `removed` plus the rows in `added`, so writing to it
+	//! costs what the change costs rather than what the table costs.
+	vector<Git4DataBranchDelta> deltas;
 };
 
 //! Registry of data branches. A branch is a reference like a snapshot is - both pin the
@@ -152,6 +167,8 @@ public:
 	}
 	//! Give a branch its own table for a source table, so writes to it no longer touch the source
 	void SetStorageTable(const string &branch, const string &source_table, const string &storage_table);
+	//! Record that a branch differs from its base by a delta rather than by a copy of it
+	void SetDeltaTable(const string &branch, const string &source_table, const string &added, const string &removed);
 	//! Restore a branch read from disk without the checks Create performs
 	void Restore(const string &name, transaction_t pin, const string &parent, timestamp_t created,
 	             const string &base_line = string());

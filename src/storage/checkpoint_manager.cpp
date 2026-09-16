@@ -334,6 +334,14 @@ void SingleFileCheckpointWriter::CreateCheckpoint() {
 				obj.WriteProperty<string>(102, "parent", data_branches[i].parent);
 				obj.WriteProperty<int64_t>(103, "created", data_branches[i].created.value);
 				obj.WriteProperty<string>(105, "line", data_branches[i].base_line);
+				obj.WriteList(
+				    106, "deltas", data_branches[i].deltas.size(), [&](Serializer::List &delta_list, idx_t d) {
+					    delta_list.WriteObject([&](Serializer &delta_obj) {
+						    delta_obj.WriteProperty<string>(100, "source", data_branches[i].deltas[d].source);
+						    delta_obj.WriteProperty<string>(101, "added", data_branches[i].deltas[d].added);
+						    delta_obj.WriteProperty<string>(102, "removed", data_branches[i].deltas[d].removed);
+					    });
+				    });
 				obj.WriteList(104, "storage_tables", data_branches[i].storage_tables.size(),
 				              [&](Serializer::List &storage_list, idx_t s) {
 					              storage_list.WriteObject([&](Serializer &storage_obj) {
@@ -524,6 +532,14 @@ void SingleFileCheckpointReader::LoadFromStorage() {
 				// empty when the block predates a branch being able to carry a captured line
 				auto base_line = obj.ReadPropertyWithExplicitDefault<string>(105, "line", "");
 				transaction_manager.branches.Restore(name, pin, parent, timestamp_t(created), base_line);
+				obj.ReadOptionalList(106, "deltas", [&](Deserializer::List &delta_list, idx_t d) {
+					return delta_list.ReadObject([&](Deserializer &delta_obj) {
+						auto source = delta_obj.ReadProperty<string>(100, "source");
+						auto added = delta_obj.ReadProperty<string>(101, "added");
+						auto removed = delta_obj.ReadProperty<string>(102, "removed");
+						transaction_manager.branches.SetDeltaTable(name, source, added, removed);
+					});
+				});
 				obj.ReadOptionalList(104, "storage_tables", [&](Deserializer::List &storage_list, idx_t s) {
 					return storage_list.ReadObject([&](Deserializer &storage_obj) {
 						auto source = storage_obj.ReadProperty<string>(100, "source");

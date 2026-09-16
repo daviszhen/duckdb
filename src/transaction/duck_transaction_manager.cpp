@@ -91,7 +91,7 @@ bool BranchRegistry::Create(const string &name, transaction_t pin, const string 
 		// a branch has to descend from something that is there, or its lineage cannot be walked
 		return false;
 	}
-	branches.emplace(name, Git4DataBranch {name, pin, parent, created, {}, base_line});
+	branches.emplace(name, Git4DataBranch {name, pin, parent, created, {}, base_line, {}});
 	RecomputeLowest();
 	dirty.store(true);
 	return true;
@@ -114,10 +114,29 @@ void BranchRegistry::SetStorageTable(const string &branch, const string &source_
 	dirty.store(true);
 }
 
+void BranchRegistry::SetDeltaTable(const string &branch, const string &source_table, const string &added,
+                                   const string &removed) {
+	lock_guard<mutex> guard(lock);
+	auto entry = branches.find(branch);
+	if (entry == branches.end()) {
+		return;
+	}
+	for (auto &delta : entry->second.deltas) {
+		if (delta.source == source_table) {
+			delta.added = added;
+			delta.removed = removed;
+			dirty.store(true);
+			return;
+		}
+	}
+	entry->second.deltas.push_back(Git4DataBranchDelta {source_table, added, removed});
+	dirty.store(true);
+}
+
 void BranchRegistry::Restore(const string &name, transaction_t pin, const string &parent, timestamp_t created,
                              const string &base_line) {
 	lock_guard<mutex> guard(lock);
-	branches[name] = Git4DataBranch {name, pin, parent, created, {}, base_line};
+	branches[name] = Git4DataBranch {name, pin, parent, created, {}, base_line, {}};
 	RecomputeLowest();
 }
 
