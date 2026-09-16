@@ -95,6 +95,27 @@ SELECT count(*) FROM t
 ----
 5
 
+# A reference held across a drop and a recreate does not produce a difference against anything: at the
+# commit it pins, the table that is there now had no rows, so a self-diff is empty and a pick across it
+# applies nothing rather than inventing changes.
+query I
+SELECT count(*) FROM git4data_diff('t', 'pin', 'pin')
+----
+0
+
+query I
+SELECT count(*) FROM git4data_diff('t', 'pin', 'pin')
+----
+0
+
+statement ok
+PRAGMA git4data_pick('t', 'pin', 'pin', 'fail')
+
+query I
+SELECT count(*) FROM t
+----
+5
+
 statement ok
 PRAGMA git4data_drop_snapshot('pin')
 
