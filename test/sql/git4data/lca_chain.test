@@ -1,0 +1,67 @@
+# name: test/sql/git4data/lca_chain.test
+# description: The least common ancestor along a chain, including one forked from a snapshot
+# group: [git4data]
+
+load {TEST_DIR}/lca_chain.db
+
+statement ok
+CREATE TABLE t (k INTEGER PRIMARY KEY, v INTEGER)
+
+statement ok
+INSERT INTO t SELECT range, range FROM range(10)
+
+statement ok
+CHECKPOINT
+
+statement ok
+PRAGMA git4data_create_snapshot('tag')
+
+# a chain rather than a fan: b descends from a, a from root, and c from the tag
+statement ok
+PRAGMA git4data_create_branch('root', '')
+
+statement ok
+PRAGMA git4data_create_branch('a', 'root')
+
+statement ok
+PRAGMA git4data_create_branch('b', 'a')
+
+statement ok
+PRAGMA git4data_create_branch('c', 'tag')
+
+# the least common ancestor of a chain's end and its middle is the middle, at any depth
+query I
+PRAGMA git4data_lca('b', 'a')
+----
+a
+
+query I
+PRAGMA git4data_lca('b', 'root')
+----
+root
+
+query I
+PRAGMA git4data_lca('b', 'b')
+----
+b
+
+# a line forked from a snapshot has no ancestor branch, so it shares none with a line from the root
+query I
+PRAGMA git4data_lca('c', 'root')
+----
+
+query I
+PRAGMA git4data_lca('b', 'c')
+----
+
+# and two lines that do share one still find it
+query I
+PRAGMA git4data_lca('a', 'b')
+----
+a
+
+# a name that is not a branch at all is refused rather than answered with nothing
+statement error
+PRAGMA git4data_lca('a', 'nope')
+----
+<REGEX>:.*nope.*does not exist.*
