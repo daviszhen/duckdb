@@ -758,7 +758,7 @@ static string PragmaGit4DataBranches(ClientContext &context, const FunctionParam
 	auto entries = GetGit4DataTransactionManager(context).branches.List();
 	if (entries.empty()) {
 		return "SELECT NULL::VARCHAR AS branch_name, NULL::UBIGINT AS pinned_commit_id, "
-		       "NULL::VARCHAR AS parent, NULL::TIMESTAMP AS created WHERE false";
+		       "NULL::VARCHAR AS parent, NULL::TIMESTAMP AS created, NULL::BOOLEAN AS has_storage WHERE false";
 	}
 	string query = "SELECT * FROM (VALUES ";
 	for (idx_t i = 0; i < entries.size(); i++) {
@@ -768,10 +768,16 @@ static string PragmaGit4DataBranches(ClientContext &context, const FunctionParam
 		// Branch names are user input, escape them before splicing into SQL
 		auto name = StringUtil::Replace(entries[i].name, "'", "''");
 		auto parent = StringUtil::Replace(entries[i].parent, "'", "''");
-		query += StringUtil::Format("('%s'::VARCHAR, %llu::UBIGINT, '%s'::VARCHAR, '%s'::TIMESTAMP)", name,
-		                            entries[i].pin, parent, Timestamp::ToString(entries[i].created));
+		// has_storage is the precondition both refusals in create_branch and merge key on: a branch with
+		// a table of its own has moved on from the commit it was forked at, which is why a fork from it
+		// and a merge into it are not the simple operations they look like. It is reported so that is
+		// visible rather than something a caller has to infer from a conflict.
+		query += StringUtil::Format("('%s'::VARCHAR, %llu::UBIGINT, '%s'::VARCHAR, '%s'::TIMESTAMP, %s::BOOLEAN)",
+		                            name, entries[i].pin, parent, Timestamp::ToString(entries[i].created),
+		                            entries[i].storage_tables.empty() ? "false" : "true");
 	}
-	query += ") t(branch_name, pinned_commit_id, parent, created) ORDER BY pinned_commit_id, branch_name";
+	query += ") t(branch_name, pinned_commit_id, parent, created, has_storage) ORDER BY pinned_commit_id, "
+	         "branch_name";
 	return query;
 }
 
