@@ -481,8 +481,10 @@ static void PragmaGit4DataBindBranchTable(ClientContext &context, const Function
 	}
 	// both tables have to be there, or the mapping would be a promise the reads then have to break
 	Catalog::GetEntry<TableCatalogEntry>(context, QualifiedName(Identifier(source_table)));
-	Catalog::GetEntry<TableCatalogEntry>(context, QualifiedName(Identifier(storage_table)));
-	transaction_manager.branches.SetStorageTable(branch_name, source_table, storage_table);
+	auto &storage_entry = Catalog::GetEntry<TableCatalogEntry>(context, QualifiedName(Identifier(storage_table)));
+	// the table's oid goes with the mapping, so a read can tell this table from another one that takes
+	// its name after it is dropped
+	transaction_manager.branches.SetStorageTable(branch_name, source_table, storage_table, storage_entry.oid);
 	// the copy is the branch's line from here on, so a delta beside it would be a second one that nothing
 	// reads - the branch reads its own table the moment it has one
 	transaction_manager.branches.ClearDeltaTable(branch_name, source_table);
@@ -540,7 +542,7 @@ static void PragmaGit4DataBindBranchDelta(ClientContext &context, const Function
 		                            removed_table, source_table, expected_key_names.size());
 	}
 	for (auto &storage_entry : branch.storage_tables) {
-		if (storage_entry.first != source_table) {
+		if (storage_entry.source != source_table) {
 			continue;
 		}
 		// one line, one source: a branch that already reads a table of its own reads that, and a delta
@@ -549,7 +551,8 @@ static void PragmaGit4DataBindBranchDelta(ClientContext &context, const Function
 		                            "rather than a delta. A delta is for a branch that has no copy.",
 		                            branch_name, source_table);
 	}
-	transaction_manager.branches.SetDeltaTable(branch_name, source_table, added_table, removed_table);
+	transaction_manager.branches.SetDeltaTable(branch_name, source_table, added_table, removed_table, added.oid,
+	                                           removed.oid);
 }
 
 //! A copy-on-write clone of one file, which is what "zero-copy" means at this level: the copy costs
@@ -602,18 +605,19 @@ static string PragmaGit4DataCloneDatabase(ClientContext &context, const Function
 		throw InvalidInputException("\"%s\" already exists - a clone does not overwrite", target);
 	}
 	Git4DataCloneFile(source, target);
-	// the log is part of the database until the next checkpoint merges it
+	// the log is part of the database until the next checkpoint merges it, so the clone needs it too or
+	// it would be missing whatever the log holds
 	auto wal = source + ".wal";
-	auto cloned_wal = target + ".wal";
+	bool cloned_log = false;
 	if (fs.FileExists(wal)) {
-		Git4DataCloneFile(wal, cloned_wal);
+		Git4DataCloneFile(wal, target + ".wal");
+		cloned_log = true;
 	}
 	auto escape = [](const string &value) {
 		return StringUtil::Replace(value, "'", "''");
 	};
-	return StringUtil::Format("SELECT '%s'::VARCHAR AS source, '%s'::VARCHAR AS clone, "
-	                          "CASE WHEN '%s' = '%s' THEN true ELSE false END AS with_log",
-	                          escape(source), escape(target), escape(cloned_wal), escape(target));
+	return StringUtil::Format("SELECT '%s'::VARCHAR AS source, '%s'::VARCHAR AS clone, %s::BOOLEAN AS with_log",
+	                          escape(source), escape(target), cloned_log ? "true" : "false");
 }
 
 //! The columns of one image compared against the other's, for telling a real merge conflict from two
@@ -657,8 +661,8 @@ static string PragmaGit4DataMerge(ClientContext &context, const FunctionParamete
 	}
 	string merge_into;
 	for (auto &entry : left.storage_tables) {
-		if (entry.first == table_name) {
-			merge_into = entry.second;
+		if (entry.source == table_name) {
+			merge_into = entry.storage;
 		}
 	}
 	if (merge_into.empty()) {
@@ -685,11 +689,11 @@ static string PragmaGit4DataMerge(ClientContext &context, const FunctionParamete
 	bool drop_merge_base = false;
 	if (transaction_manager.branches.Get(ancestor, ancestor_branch)) {
 		for (auto &storage_entry : ancestor_branch.storage_tables) {
-			if (storage_entry.first != table_name) {
+			if (storage_entry.source != table_name) {
 				continue;
 			}
 			auto &storage_table =
-			    Catalog::GetEntry<TableCatalogEntry>(context, QualifiedName(Identifier(storage_entry.second)));
+			    Catalog::GetEntry<TableCatalogEntry>(context, QualifiedName(Identifier(storage_entry.storage)));
 			auto &storage_groups = *storage_table.GetStorage().GetRowGroupCollection();
 			transaction_t copy_commit = 0;
 			bool unwritten = true;
@@ -964,7 +968,7 @@ static string PragmaGit4DataDropBranch(ClientContext &context, const FunctionPar
 	}
 	string result;
 	for (auto &entry : existing.storage_tables) {
-		result += StringUtil::Format("DROP TABLE IF EXISTS %s;\n", KeywordHelper::WriteOptionallyQuoted(entry.second));
+		result += StringUtil::Format("DROP TABLE IF EXISTS %s;\n", KeywordHelper::WriteOptionallyQuoted(entry.storage));
 	}
 	transaction_manager.branches.Drop(name);
 	if (result.empty()) {

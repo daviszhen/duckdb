@@ -305,3 +305,48 @@ statement error
 PRAGMA git4data_bind_branch_delta('t', 'base', 't_add', 't_del')
 ----
 <REGEX>:.*already has a table of its own for "t", so it reads that rather than a delta.*
+
+# A delta's tables carry the same risk as a branch's own: a table that takes the name of one that was
+# dropped is another table, and reading it would apply a delta the caller never made.
+statement ok
+CREATE TABLE t_e_add (k INTEGER PRIMARY KEY, v INTEGER)
+
+statement ok
+CREATE TABLE t_e_del (k INTEGER PRIMARY KEY)
+
+statement ok
+PRAGMA git4data_create_branch('e', 'root')
+
+statement ok
+PRAGMA git4data_bind_branch_delta('t', 'e', 't_e_add', 't_e_del')
+
+statement ok
+INSERT INTO t_e_add VALUES (7000, 7000)
+
+query I
+SELECT count(*) FROM t AT (BRANCH => 'e') WHERE k = 7000
+----
+1
+
+statement ok
+DROP TABLE t_e_add
+
+statement ok
+CREATE TABLE t_e_add (k INTEGER PRIMARY KEY, v INTEGER)
+
+statement ok
+INSERT INTO t_e_add VALUES (8000, 8000)
+
+statement error
+SELECT count(*) FROM t AT (BRANCH => 'e')
+----
+<REGEX>:.*the tables carrying those names now are not them.*
+
+# binding the delta again is the way out
+statement ok
+PRAGMA git4data_bind_branch_delta('t', 'e', 't_e_add', 't_e_del')
+
+query I
+SELECT count(*) FROM t AT (BRANCH => 'e') WHERE k = 8000
+----
+1

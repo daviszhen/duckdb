@@ -99,20 +99,22 @@ bool BranchRegistry::Create(const string &name, transaction_t pin, const string 
 	return true;
 }
 
-void BranchRegistry::SetStorageTable(const string &branch, const string &source_table, const string &storage_table) {
+void BranchRegistry::SetStorageTable(const string &branch, const string &source_table, const string &storage_table,
+                                     idx_t storage_oid) {
 	lock_guard<mutex> guard(lock);
 	auto entry = branches.find(branch);
 	if (entry == branches.end()) {
 		return;
 	}
-	for (auto &pair : entry->second.storage_tables) {
-		if (pair.first == source_table) {
-			pair.second = storage_table;
+	for (auto &existing : entry->second.storage_tables) {
+		if (existing.source == source_table) {
+			existing.storage = storage_table;
+			existing.oid = storage_oid;
 			dirty.store(true);
 			return;
 		}
 	}
-	entry->second.storage_tables.emplace_back(source_table, storage_table);
+	entry->second.storage_tables.push_back(Git4DataStorageTable {source_table, storage_table, storage_oid});
 	dirty.store(true);
 }
 
@@ -134,7 +136,7 @@ void BranchRegistry::ClearDeltaTable(const string &branch, const string &source_
 }
 
 void BranchRegistry::SetDeltaTable(const string &branch, const string &source_table, const string &added,
-                                   const string &removed) {
+                                   const string &removed, idx_t added_oid, idx_t removed_oid) {
 	lock_guard<mutex> guard(lock);
 	auto entry = branches.find(branch);
 	if (entry == branches.end()) {
@@ -144,11 +146,13 @@ void BranchRegistry::SetDeltaTable(const string &branch, const string &source_ta
 		if (delta.source == source_table) {
 			delta.added = added;
 			delta.removed = removed;
+			delta.added_oid = added_oid;
+			delta.removed_oid = removed_oid;
 			dirty.store(true);
 			return;
 		}
 	}
-	entry->second.deltas.push_back(Git4DataBranchDelta {source_table, added, removed});
+	entry->second.deltas.push_back(Git4DataBranchDelta {source_table, added, removed, added_oid, removed_oid});
 	dirty.store(true);
 }
 

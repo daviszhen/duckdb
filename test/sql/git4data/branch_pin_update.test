@@ -82,3 +82,23 @@ SELECT (SELECT v FROM t AT (BRANCH => 'b') WHERE k = 1), (SELECT v FROM t AT (SN
        (SELECT v FROM t WHERE k = 1)
 ----
 1	999	-1
+
+# A vacuum is what the deletes here trigger at the checkpoint, and the pin's pre-image survives it: the
+# branch still reads the row it pinned while the table has moved on, and the probe counts the physical
+# rows that were kept for it - the base's hundred plus the update's own version.
+statement ok
+DELETE FROM t WHERE k BETWEEN 2 AND 50
+
+statement ok
+CHECKPOINT
+
+query III
+SELECT (SELECT v FROM t AT (BRANCH => 'b') WHERE k = 1), (SELECT count(*) FROM t AT (BRANCH => 'b')),
+       (SELECT count(*) FROM t)
+----
+1	100	52
+
+query III
+PRAGMA git4data_probe('t')
+----
+103	0	5000

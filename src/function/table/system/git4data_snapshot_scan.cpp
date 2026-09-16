@@ -110,17 +110,30 @@ struct Git4DataSnapshotScanState : public GlobalTableFunctionState {
 //! The table backing a branch for a source table, or empty when the branch has no line of its own
 //! there. A mapping whose table has since been dropped falls back to the pinned image rather than
 //! failing, because the branch itself is still a valid reference.
+//!
+//! A table with the *name* of one that was dropped is another matter: it is a different table, and
+//! reading it would give the branch a line that has nothing to do with what the branch was given. The
+//! oid recorded when the mapping was made is what tells them apart - within a session, since the
+//! catalog's oids do not survive a reopen.
 static string Git4DataBranchStorageTable(ClientContext &context, const Git4DataBranch &branch,
                                          const string &table_name) {
 	for (auto &entry : branch.storage_tables) {
-		if (entry.first != table_name) {
+		if (entry.source != table_name) {
 			continue;
 		}
-		auto storage = Catalog::GetEntry<TableCatalogEntry>(context, QualifiedName(Identifier(entry.second)),
+		auto storage = Catalog::GetEntry<TableCatalogEntry>(context, QualifiedName(Identifier(entry.storage)),
 		                                                    OnEntryNotFound::RETURN_NULL);
-		if (storage) {
-			return entry.second;
+		if (!storage) {
+			continue;
 		}
+		if (entry.oid != 0 && entry.oid != storage->oid) {
+			throw InvalidInputException(
+			    "Branch \"%s\" was given table \"%s\" for \"%s\", and the table carrying that name now is not it - "
+			    "the table it was given was dropped and another was created with the same name. Point the branch at a "
+			    "table of its own again with git4data_bind_branch_table.",
+			    branch.name, entry.storage, table_name);
+		}
+		return entry.storage;
 	}
 	return string();
 }
@@ -240,6 +253,16 @@ static Git4DataLineState ResolveGit4DataLineState(ClientContext &context, DuckTr
 		auto removed_table = Catalog::GetEntry<TableCatalogEntry>(context, QualifiedName(Identifier(delta.removed)),
 		                                                          OnEntryNotFound::RETURN_NULL);
 		if (added_table && removed_table) {
+			// a table that took the name of one of these after it was dropped is a different table, and
+			// reading it would apply a delta the caller never made
+			if ((delta.added_oid != 0 && delta.added_oid != added_table->oid) ||
+			    (delta.removed_oid != 0 && delta.removed_oid != removed_table->oid)) {
+				throw InvalidInputException(
+				    "Branch \"%s\" was given tables \"%s\" and \"%s\" for \"%s\", and the tables carrying those names "
+				    "now are not them - one was dropped and another was created with the same name. Bind the delta "
+				    "again with git4data_bind_branch_delta.",
+				    branch.name, delta.added, delta.removed, table_name);
+			}
 			auto &source = Catalog::GetEntry<TableCatalogEntry>(context, QualifiedName(Identifier(table_name)));
 			Git4DataCheckDeltaColumns(source, *added_table, *removed_table);
 			added = delta.added;

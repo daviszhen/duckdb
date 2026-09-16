@@ -94,6 +94,18 @@ private:
 //! A data branch: a named point on the commit timeline that also records where it came from.
 //! The parent link is what turns the branches into a tree, and a tree is what makes a least
 //! common ancestor computable - which diff and merge both need.
+//! A table a branch was given for a source table. The oid is what tells that table from another table
+//! that happens to carry the same name later: a name can be dropped and recreated, and a branch that
+//! went on reading it would be reading something that has nothing to do with its line. Zero means no oid
+//! was recorded, which is what a mapping read back from a file has - the catalog's oids do not survive a
+//! reopen, so the check is made within a session and a table swapped while the database was closed is
+//! not caught.
+struct Git4DataStorageTable {
+	string source;
+	string storage;
+	idx_t oid = 0;
+};
+
 //! What a branch changes about one source table when it holds no copy of it. Both tables are the
 //! caller's: rows to add go into `added`, keys to remove into `removed`, with ordinary SQL.
 struct Git4DataBranchDelta {
@@ -103,6 +115,11 @@ struct Git4DataBranchDelta {
 	string added;
 	//! The keys this branch has removed from its base, with the source table's key columns
 	string removed;
+	//! The oids of those two tables when the delta was bound, so a read can tell them from tables that
+	//! take their names after they are dropped. Zero means none was recorded - a delta read back from a
+	//! file, since the catalog's oids do not survive a reopen.
+	idx_t added_oid = 0;
+	idx_t removed_oid = 0;
 };
 
 struct Git4DataBranch {
@@ -116,7 +133,7 @@ struct Git4DataBranch {
 	//! Tables this branch has a line of its own for: the source table's name and the table backing
 	//! the branch. A branch with no entry for a table is read as the pinned image; one with an entry
 	//! is read as that table, which can be written to and so diverges.
-	vector<pair<string, string>> storage_tables;
+	vector<Git4DataStorageTable> storage_tables;
 	//! The branch whose line this one was forked from, when it was forked from a reference that
 	//! captured one. The child reads that branch's storage at its pin until it has storage of its own,
 	//! which is what lets a fork take a state rather than only a commit.
@@ -165,11 +182,14 @@ public:
 	void MarkClean() noexcept {
 		dirty.store(false);
 	}
-	//! Give a branch its own table for a source table, so writes to it no longer touch the source
-	void SetStorageTable(const string &branch, const string &source_table, const string &storage_table);
+	//! Give a branch its own table for a source table, so writes to it no longer touch the source. The
+	//! oid is the table's, and is checked again on every read.
+	void SetStorageTable(const string &branch, const string &source_table, const string &storage_table,
+	                     idx_t storage_oid = 0);
 	//! Record that a branch differs from its base by a delta rather than by a copy of it. A branch with a
 	//! table of its own for this source keeps that instead: one line, one source of truth.
-	void SetDeltaTable(const string &branch, const string &source_table, const string &added, const string &removed);
+	void SetDeltaTable(const string &branch, const string &source_table, const string &added, const string &removed,
+	                   idx_t added_oid = 0, idx_t removed_oid = 0);
 	//! Forget a branch's delta for a source table, which is what giving it a table of its own does - the
 	//! copy is the line from then on, and a delta beside it would be read by nothing.
 	void ClearDeltaTable(const string &branch, const string &source_table);

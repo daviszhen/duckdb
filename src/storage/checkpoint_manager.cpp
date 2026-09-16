@@ -346,9 +346,9 @@ void SingleFileCheckpointWriter::CreateCheckpoint() {
 				              [&](Serializer::List &storage_list, idx_t s) {
 					              storage_list.WriteObject([&](Serializer &storage_obj) {
 						              storage_obj.WriteProperty<string>(100, "source",
-						                                                data_branches[i].storage_tables[s].first);
+						                                                data_branches[i].storage_tables[s].source);
 						              storage_obj.WriteProperty<string>(101, "storage",
-						                                                data_branches[i].storage_tables[s].second);
+						                                                data_branches[i].storage_tables[s].storage);
 					              });
 				              });
 			});

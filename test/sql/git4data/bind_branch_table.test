@@ -64,6 +64,40 @@ PRAGMA git4data_bind_branch_table('nowhere', 'b', 't_alt')
 ----
 <REGEX>:.*Table with name nowhere does not exist.*
 
+# A table that is dropped and another created with its name is not the same table, and a branch that went
+# on reading it would be reading something the caller never pointed it at. The mapping carries the oid of
+# the table it was given, and the read checks it - within a session, because a name is all that survives
+# a reopen.
+statement ok
+DROP TABLE t_alt
+
+# with no table of that name at all the branch falls back to the image it pins, which is the rule for a
+# mapping whose table is gone
+query I
+SELECT count(*) FROM t AT (BRANCH => 'b')
+----
+10
+
+statement ok
+CREATE TABLE t_alt (k INTEGER PRIMARY KEY, v INTEGER)
+
+statement ok
+INSERT INTO t_alt VALUES (5000, 5000)
+
+statement error
+SELECT count(*) FROM t AT (BRANCH => 'b')
+----
+<REGEX>:.*the table carrying that name now is not it.*
+
+# pointing the branch at a table again is the way out, and it works
+statement ok
+PRAGMA git4data_bind_branch_table('t', 'b', 't_alt')
+
+query II
+SELECT (SELECT count(*) FROM t AT (BRANCH => 'b')), (SELECT v FROM t AT (BRANCH => 'b') WHERE k = 5000)
+----
+1	5000
+
 # and the binding survives a reopen, because it is part of the branch
 statement ok
 CHECKPOINT
@@ -71,6 +105,6 @@ CHECKPOINT
 restart
 
 query II
-SELECT (SELECT count(*) FROM t AT (BRANCH => 'b')), (SELECT v FROM t AT (BRANCH => 'b') WHERE k = 1)
+SELECT (SELECT count(*) FROM t AT (BRANCH => 'b')), (SELECT v FROM t AT (BRANCH => 'b') WHERE k = 5000)
 ----
-1	999
+1	5000

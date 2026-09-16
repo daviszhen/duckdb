@@ -1,0 +1,86 @@
+# name: test/sql/git4data/delta_large.test
+# description: A delta branch over several row groups, which is where the pin defect hid before
+# group: [git4data]
+
+load {TEST_DIR}/delta_large.db
+
+# Three hundred thousand rows is more than one row group (122,880), so the removals below span row
+# groups and the reads have to be right across all of them. The defect this feature started with - a pin
+# that did not hide rows appended into a row group created after it - was only visible above that size,
+# which is why this case is here at all.
+statement ok
+CREATE TABLE t AS SELECT range AS k, hash(range) AS v FROM range(300000)
+
+statement ok
+ALTER TABLE t ADD PRIMARY KEY (k)
+
+statement ok
+CHECKPOINT
+
+statement ok
+PRAGMA git4data_create_branch('r', '')
+
+statement ok
+PRAGMA git4data_create_branch('d', 'r')
+
+statement ok
+CREATE TABLE d_add (k BIGINT PRIMARY KEY, v UBIGINT)
+
+statement ok
+CREATE TABLE d_del (k BIGINT PRIMARY KEY)
+
+statement ok
+PRAGMA git4data_bind_branch_delta('t', 'd', 'd_add', 'd_del')
+
+# every third key goes, across all of the row groups, and a thousand rows arrive
+statement ok
+INSERT INTO d_del SELECT range FROM range(0, 300000, 3)
+
+statement ok
+INSERT INTO d_add SELECT range + 1000000, hash(range) FROM range(1000)
+
+query III
+SELECT count(*), min(k), max(k) FROM t AT (BRANCH => 'd')
+----
+201000	1	1000999
+
+# none of the removed keys is readable, and the base is untouched
+query II
+SELECT (SELECT count(*) FROM t AT (BRANCH => 'd') WHERE k % 3 = 0 AND k < 300000), (SELECT count(*) FROM t)
+----
+0	300000
+
+# a capture of that line and a fork from it both hold it, and the delta moving on afterwards stays out
+statement ok
+PRAGMA git4data_create_snapshot('cap', 'd')
+
+statement ok
+PRAGMA git4data_create_branch('f', 'd')
+
+statement ok
+INSERT INTO d_del VALUES (1)
+
+statement ok
+INSERT INTO d_add VALUES (2000000, 0)
+
+query III
+SELECT (SELECT count(*) FROM t AT (SNAPSHOT => 'cap')), (SELECT count(*) FROM t AT (BRANCH => 'f')),
+       (SELECT count(*) FROM t AT (BRANCH => 'd'))
+----
+201000	201000	201000
+
+query III
+SELECT (SELECT count(*) FROM t AT (SNAPSHOT => 'cap') WHERE k = 1), (SELECT count(*) FROM t AT (BRANCH => 'f') WHERE k = 1),
+       (SELECT count(*) FROM t AT (BRANCH => 'd') WHERE k = 1)
+----
+1	1	0
+
+# and a checkpoint leaves all three where they are
+statement ok
+CHECKPOINT
+
+query III
+SELECT (SELECT count(*) FROM t AT (SNAPSHOT => 'cap')), (SELECT count(*) FROM t AT (BRANCH => 'f')),
+       (SELECT count(*) FROM t AT (BRANCH => 'd'))
+----
+201000	201000	201000
