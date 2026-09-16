@@ -47,7 +47,7 @@ DELETE FROM t WHERE k >= 90
 # the branch is read as itself, so what it holds is what the diff reports, and the main line's own
 # changes since the base do not leak into it
 query II
-SELECT change, count(*) FROM git4data_diff('t', 'base', 'feature') GROUP BY change ORDER BY change
+SELECT g4d_change, count(*) FROM git4data_diff('t', 'base', 'feature') GROUP BY g4d_change ORDER BY g4d_change
 ----
 added	1
 changed	10
@@ -62,7 +62,7 @@ SELECT count(*) FROM git4data_diff('t', 'base', 'feature') WHERE k = 50
 # the keys the branch carried forward are the ones it changed, and the removed ones are the ones it
 # dropped - not the ones the main line dropped since the base
 query I
-SELECT string_agg(change || ':' || k::VARCHAR, ' ' ORDER BY change, k)
+SELECT string_agg(g4d_change || ':' || k::VARCHAR, ' ' ORDER BY g4d_change, k)
 FROM git4data_diff('t', 'base', 'feature') WHERE k IN (0, 5, 15, 95, 200)
 ----
 added:200 changed:0 changed:5 removed:15
@@ -70,7 +70,7 @@ added:200 changed:0 changed:5 removed:15
 # Both directions are answered from the branch's side: comparing the references the other way round
 # reports the same rows with the two kinds swapped.
 query II
-SELECT change, count(*) FROM git4data_diff('t', 'feature', 'base') GROUP BY change ORDER BY change
+SELECT g4d_change, count(*) FROM git4data_diff('t', 'feature', 'base') GROUP BY g4d_change ORDER BY g4d_change
 ----
 added	10
 changed	10
@@ -125,7 +125,7 @@ statement ok
 PRAGMA git4data_create_branch('u_plain', '')
 
 query II
-SELECT change, count(*) FROM git4data_diff('u', 'u_base', 'u_plain') GROUP BY change ORDER BY change
+SELECT g4d_change, count(*) FROM git4data_diff('u', 'u_base', 'u_plain') GROUP BY g4d_change ORDER BY g4d_change
 ----
 added	1
 removed	1

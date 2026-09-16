@@ -57,7 +57,7 @@ SELECT (SELECT count(*) FROM t AT (SNAPSHOT => 'v1')), (SELECT v FROM t WHERE k 
 
 # 5. what the branch did, read as a diff against the tag it forked from
 query II
-SELECT change, count(*) FROM git4data_diff('t', 'v1', 'feature') GROUP BY change ORDER BY change
+SELECT g4d_change, count(*) FROM git4data_diff('t', 'v1', 'feature') GROUP BY g4d_change ORDER BY g4d_change
 ----
 added	1
 changed	10

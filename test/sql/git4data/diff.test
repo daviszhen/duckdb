@@ -34,21 +34,21 @@ CHECKPOINT
 # the appended rows are new physical rows, so they are additions; the removed ones are row ids the
 # earlier reference can see and this one cannot
 query II
-SELECT change, count(*) FROM git4data_diff('t', 'before', 'after') GROUP BY change ORDER BY change
+SELECT g4d_change, count(*) FROM git4data_diff('t', 'before', 'after') GROUP BY g4d_change ORDER BY g4d_change
 ----
 added	50
 removed	20
 
 # the row ids are the ones the two bounds produced: the 50 appended rows follow the 100 originals
 query II
-SELECT change, min(row_id) FROM git4data_diff('t', 'before', 'after') GROUP BY change ORDER BY change
+SELECT g4d_change, min(g4d_row_id) FROM git4data_diff('t', 'before', 'after') GROUP BY g4d_change ORDER BY g4d_change
 ----
 added	100
 removed	0
 
 # swapping the arguments swaps the two sides
 query II
-SELECT change, count(*) FROM git4data_diff('t', 'after', 'before') GROUP BY change ORDER BY change
+SELECT g4d_change, count(*) FROM git4data_diff('t', 'after', 'before') GROUP BY g4d_change ORDER BY g4d_change
 ----
 added	20
 removed	50
@@ -74,7 +74,7 @@ SELECT * FROM git4data_diff('t', 'before', 'nope')
 restart
 
 query II
-SELECT change, count(*) FROM git4data_diff('t', 'before', 'after') GROUP BY change ORDER BY change
+SELECT g4d_change, count(*) FROM git4data_diff('t', 'before', 'after') GROUP BY g4d_change ORDER BY g4d_change
 ----
 added	50
 removed	20

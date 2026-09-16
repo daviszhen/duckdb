@@ -37,7 +37,7 @@ CHECKPOINT
 
 # the primary key says the removed pre-image and the added post-image are the same row
 query II
-SELECT change, count(*) FROM git4data_diff('pk_t', 'before', 'after') GROUP BY change ORDER BY change
+SELECT g4d_change, count(*) FROM git4data_diff('pk_t', 'before', 'after') GROUP BY g4d_change ORDER BY g4d_change
 ----
 added	1
 changed	10
@@ -46,14 +46,14 @@ removed	1
 # every changed row carries the row it became
 query I
 SELECT count(*) FROM git4data_diff('pk_t', 'before', 'after')
-WHERE change = 'changed' AND counterpart_row_id IS NOT NULL
+WHERE g4d_change = 'changed' AND g4d_counterpart_row_id IS NOT NULL
 ----
 10
 
 # the rows that only appeared or only went away have no counterpart
 query I
 SELECT count(*) FROM git4data_diff('pk_t', 'before', 'after')
-WHERE change <> 'changed' AND counterpart_row_id IS NULL
+WHERE g4d_change <> 'changed' AND g4d_counterpart_row_id IS NULL
 ----
 2
 
@@ -84,12 +84,12 @@ statement ok
 CHECKPOINT
 
 query II
-SELECT change, count(*) FROM git4data_diff('no_pk', 'np_before', 'np_after') GROUP BY change ORDER BY change
+SELECT g4d_change, count(*) FROM git4data_diff('no_pk', 'np_before', 'np_after') GROUP BY g4d_change ORDER BY g4d_change
 ----
 added	10
 removed	10
 
 query I
-SELECT count(*) FROM git4data_diff('no_pk', 'np_before', 'np_after') WHERE change = 'changed'
+SELECT count(*) FROM git4data_diff('no_pk', 'np_before', 'np_after') WHERE g4d_change = 'changed'
 ----
 0

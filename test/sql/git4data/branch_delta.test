@@ -75,7 +75,7 @@ statement ok
 PRAGMA git4data_create_snapshot('was')
 
 query II
-SELECT change, count(*) FROM git4data_diff('t', 'was', 'base') GROUP BY change ORDER BY change
+SELECT g4d_change, count(*) FROM git4data_diff('t', 'was', 'base') GROUP BY g4d_change ORDER BY g4d_change
 ----
 added	1
 changed	1
@@ -390,7 +390,7 @@ PRAGMA git4data_create_snapshot('comp_base')
 
 # both differences are reported: the row the delta removed and the row it added
 query III
-SELECT change, a, b FROM git4data_diff('comp', 'comp_base', 'cd') ORDER BY change, a, b
+SELECT g4d_change, a, b FROM git4data_diff('comp', 'comp_base', 'cd') ORDER BY g4d_change, a, b
 ----
 added	9	9
 removed	2	3

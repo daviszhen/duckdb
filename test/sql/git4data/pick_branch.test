@@ -81,7 +81,7 @@ FROM t AT (BRANCH => 'feature') WHERE k IN (0, 1, 5, 9, 200)
 # The branch is a line of its own, and the pick copied its changes rather than moving them: the diff
 # between the reference and the branch still reports exactly what the branch did.
 query II
-SELECT change, count(*) FROM git4data_diff('t', 'base', 'feature') GROUP BY change ORDER BY change
+SELECT g4d_change, count(*) FROM git4data_diff('t', 'base', 'feature') GROUP BY g4d_change ORDER BY g4d_change
 ----
 added	1
 changed	10

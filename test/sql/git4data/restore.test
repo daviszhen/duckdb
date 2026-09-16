@@ -97,7 +97,9 @@ SELECT count(*), min(k) FROM t
 ----
 500	500
 
-# a table without a primary key cannot be rewound: there is nothing to say which rows are which
+# A table without a primary key can be rewound too: a restore deletes every row and puts the reference's
+# image back, so there is nothing to match row by row. It used to refuse these tables, which was a
+# requirement the generated statements never had.
 statement ok
 CREATE TABLE no_pk (k INTEGER, v INTEGER)
 
@@ -110,10 +112,28 @@ CHECKPOINT
 statement ok
 PRAGMA git4data_create_snapshot('np_base')
 
-statement error
-PRAGMA git4data_restore('no_pk', 'np_base')
+statement ok
+UPDATE no_pk SET v = -1 WHERE k = 1
+
+statement ok
+DELETE FROM no_pk WHERE k = 5
+
+statement ok
+INSERT INTO no_pk VALUES (100, 100)
+
+query II
+SELECT (SELECT v FROM no_pk WHERE k = 1), (SELECT count(*) FROM no_pk)
 ----
-<REGEX>:.*has no primary key.*
+-1	10
+
+statement ok
+PRAGMA git4data_restore('no_pk', 'np_base')
+
+query III
+SELECT (SELECT v FROM no_pk WHERE k = 1), (SELECT count(*) FROM no_pk WHERE k = 5),
+       (SELECT count(*) FROM no_pk WHERE k = 100)
+----
+1	1	0
 
 statement error
 PRAGMA git4data_restore('t', 'nope')

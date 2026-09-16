@@ -693,11 +693,11 @@ static unique_ptr<FunctionData> Git4DataDiffBind(ClientContext &context, TableFu
 	auto result =
 	    Git4DataDiffFun::CreateBindData(context, input.inputs[0].GetValue<string>(), input.inputs[1].GetValue<string>(),
 	                                    input.inputs[2].GetValue<string>());
-	names.emplace_back("change");
+	names.emplace_back("g4d_change");
 	return_types.emplace_back(LogicalType::VARCHAR);
-	names.emplace_back("row_id");
+	names.emplace_back("g4d_row_id");
 	return_types.emplace_back(LogicalType::UBIGINT);
-	names.emplace_back("counterpart_row_id");
+	names.emplace_back("g4d_counterpart_row_id");
 	return_types.emplace_back(LogicalType::UBIGINT);
 	// the key follows, so a caller can match a changed row against the live table by key rather
 	// than by a physical row id that the reference scan does not expose

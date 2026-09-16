@@ -189,20 +189,9 @@ static vector<string> Git4DataPrimaryKeyColumnNames(TableCatalogEntry &table) {
 //! The statements that rewind a table to a reference, shared by the by-name and by-time forms
 static string BuildGit4DataRestore(ClientContext &context, const string &table_name, const string &reference,
                                    const char *unit) {
-	auto &table = Catalog::GetEntry<TableCatalogEntry>(context, QualifiedName(Identifier(table_name)));
-	auto key_columns = Git4DataPrimaryKeyColumnNames(table);
-	if (key_columns.empty()) {
-		throw InvalidInputException("Table \"%s\" has no primary key, so a restore cannot tell which rows to "
-		                            "replace",
-		                            table_name);
-	}
-	string key_list;
-	for (idx_t i = 0; i < key_columns.size(); i++) {
-		if (i > 0) {
-			key_list += ", ";
-		}
-		key_list += KeywordHelper::WriteOptionallyQuoted(key_columns[i]);
-	}
+	// A restore does not need a key: every row goes and the reference's own image comes back, so there is
+	// nothing to match row by row. It used to insist on one, which refused tables it could have served.
+	Catalog::GetEntry<TableCatalogEntry>(context, QualifiedName(Identifier(table_name)));
 	auto quoted_table = KeywordHelper::WriteOptionallyQuoted(table_name);
 	auto at_clause = FormatGit4DataAtClause(table_name, reference, unit);
 
@@ -377,7 +366,7 @@ static string PragmaGit4DataPick(ClientContext &context, const FunctionParameter
 		auto differs_from_source = StringUtil::Format("((%s) OR (%s IS NOT NULL AND NOT (%s)))", presence_source,
 		                                              live_key, BuildGit4DataRowComparison(table, "g4d_l", "g4d_s"));
 		conflict_table = StringUtil::Format(
-		    "CREATE OR REPLACE TEMP TABLE g4d_pick_conflicts AS WITH g4d_tk AS (SELECT %s FROM %s WHERE change IN "
+		    "CREATE OR REPLACE TEMP TABLE g4d_pick_conflicts AS WITH g4d_tk AS (SELECT %s FROM %s WHERE g4d_change IN "
 		    "('added', 'removed', 'changed')), g4d_l AS (SELECT * FROM %s), g4d_b AS (SELECT * FROM %s), g4d_s AS "
 		    "(SELECT * FROM %s) SELECT %s FROM g4d_tk LEFT JOIN g4d_l ON (%s) LEFT JOIN g4d_b ON (%s) LEFT JOIN "
 		    "g4d_s ON (%s) WHERE (%s) AND (%s);\n",
@@ -396,14 +385,14 @@ static string PragmaGit4DataPick(ClientContext &context, const FunctionParameter
 	auto conflict_filter = policy == "skip" ? StringUtil::Format(" AND (%s) NOT IN (SELECT %s FROM g4d_pick_conflicts)",
 	                                                             key_list, key_list)
 	                                        : string();
-	result += StringUtil::Format("DELETE FROM %s WHERE (%s) IN (SELECT %s FROM %s WHERE change IN ('removed', "
+	result += StringUtil::Format("DELETE FROM %s WHERE (%s) IN (SELECT %s FROM %s WHERE g4d_change IN ('removed', "
 	                             "'changed')%s);\n",
 	                             quoted_table, key_list, key_list, diff, conflict_filter);
 	// Only the keys the live table is actually missing: a row the source added may well still be there,
 	// because the live table is usually the source's own continuation, and inserting it again would
 	// collide with its primary key instead of restoring anything. The keys of changed rows were removed
 	// by the statement above, so they are missing by the time this runs and take the source's values.
-	result += StringUtil::Format("INSERT INTO %s SELECT * FROM %s WHERE (%s) IN (SELECT %s FROM %s WHERE change "
+	result += StringUtil::Format("INSERT INTO %s SELECT * FROM %s WHERE (%s) IN (SELECT %s FROM %s WHERE g4d_change "
 	                             "IN ('added', 'changed')%s) AND (%s) NOT IN (SELECT %s FROM %s);",
 	                             quoted_table, source_image, key_list, key_list, diff, conflict_filter, key_list,
 	                             key_list, quoted_table);
@@ -815,10 +804,10 @@ static string PragmaGit4DataMerge(ClientContext &context, const FunctionParamete
 	// the right side added it and the left also has one - so every key the right touched is cleared
 	// first, not only the ones it removed or changed.
 	result += StringUtil::Format(
-	    "DELETE FROM %s WHERE (%s) IN (SELECT %s FROM %s WHERE change IN (%s)%s);\n", quoted_into, key_list, key_list,
+	    "DELETE FROM %s WHERE (%s) IN (SELECT %s FROM %s WHERE g4d_change IN (%s)%s);\n", quoted_into, key_list, key_list,
 	    diff_right, policy == "accept" ? "'added', 'removed', 'changed'" : "'removed', 'changed'", conflict_filter);
 	result += StringUtil::Format(
-	    "INSERT INTO %s SELECT * FROM %s WHERE (%s) IN (SELECT %s FROM %s WHERE change IN (%s)%s) AND (%s) NOT IN "
+	    "INSERT INTO %s SELECT * FROM %s WHERE (%s) IN (SELECT %s FROM %s WHERE g4d_change IN (%s)%s) AND (%s) NOT IN "
 	    "(SELECT %s FROM %s);\n",
 	    quoted_into, right_image, key_list, key_list, diff_right, "'added', 'changed'", conflict_filter, key_list,
 	    key_list, quoted_into);
