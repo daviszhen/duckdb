@@ -722,9 +722,23 @@ static string PragmaGit4DataLimits(ClientContext &context, const FunctionParamet
 	    (long long)transaction_manager.branch_limit, (unsigned long long)transaction_manager.branches.Count());
 }
 
+//! A name beginning with two underscores is one of the feature's own internal references - the
+//! recovery window, a merge's base. Those are looked up by exact name, so a user reference sharing one
+//! would be dropped by the machinery that manages them.
+static void CheckGit4DataReferenceName(const string &name) {
+	if (StringUtil::StartsWith(name, "__")) {
+		throw InvalidInputException(
+		    "\"%s\" begins with two underscores, which this feature reserves for references it manages "
+		    "itself: the point-in-time recovery window and the base a merge reads against. Choose another "
+		    "name.",
+		    name);
+	}
+}
+
 static void PragmaGit4DataCreateBranch(ClientContext &context, const FunctionParameters &parameters) {
 	auto name = parameters.values[0].ToString();
 	auto parent = parameters.values[1].ToString();
+	CheckGit4DataReferenceName(name);
 	auto &transaction_manager = GetGit4DataTransactionManager(context);
 	// A branch descends from another branch when one is named; otherwise it starts at the newest
 	// commit. Either way the branch holds its base down exactly as a pin does.
@@ -845,6 +859,7 @@ static string PragmaGit4DataLCA(ClientContext &context, const FunctionParameters
 
 static void PragmaGit4DataCreateSnapshot(ClientContext &context, const FunctionParameters &parameters) {
 	auto name = parameters.values[0].ToString();
+	CheckGit4DataReferenceName(name);
 	auto &transaction_manager = GetGit4DataTransactionManager(context);
 	// Pin at the newest commit, keep everything committed so far readable
 	CheckGit4DataReferenceLimit("snapshots", transaction_manager.UserSnapshotCount(),

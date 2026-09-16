@@ -1,0 +1,86 @@
+# name: test/sql/git4data/reserved_names.test
+# description: The names the feature keeps for its own internal references are refused to users
+# group: [git4data]
+
+load {TEST_DIR}/reserved_names.db
+
+statement ok
+CREATE TABLE t (k INTEGER PRIMARY KEY, v INTEGER)
+
+statement ok
+INSERT INTO t SELECT range, range FROM range(10)
+
+statement ok
+CHECKPOINT
+
+# A reference the feature manages itself is looked up by exact name, so one a user happened to take
+# would be dropped by the machinery that manages it - silent data loss rather than a conflict. Measured
+# before this guard: a snapshot called __merge_base__ was gone after one merge, and the point-in-time
+# recovery window manages __pitr__ the same way.
+statement error
+PRAGMA git4data_create_snapshot('__merge_base__')
+----
+<REGEX>:.*reserves for references it manages itself.*
+
+statement error
+PRAGMA git4data_create_snapshot('__pitr__')
+----
+<REGEX>:.*reserves for references it manages itself.*
+
+statement error
+PRAGMA git4data_create_branch('__pitr__', '')
+----
+<REGEX>:.*reserves for references it manages itself.*
+
+# one underscore is not the feature's, and neither is a doubled one inside a name
+statement ok
+PRAGMA git4data_create_snapshot('_one')
+
+statement ok
+PRAGMA git4data_create_branch('root', '')
+
+statement ok
+PRAGMA git4data_create_branch('a__b', 'root')
+
+statement ok
+PRAGMA git4data_create_branch('c', 'root')
+
+# the refusals left nothing behind: one snapshot of the user's and three branches
+query IIII
+PRAGMA git4data_limits
+----
+-1	1	-1	3
+
+# the same change on both sides, so the merge has nothing to resolve
+statement ok
+PRAGMA git4data_materialize('t', 'a__b', 't_ab')
+
+statement ok
+PRAGMA git4data_materialize('t', 'c', 't_c')
+
+statement ok
+UPDATE t_ab SET v = 7 WHERE k = 1
+
+statement ok
+UPDATE t_c SET v = 7 WHERE k = 1
+
+# This merge needs an internal reference of its own, at the ancestor's pin. The user's snapshot is a
+# different name, so it is not the one that gets dropped - which is what the counts and the read below
+# are here to say, and what was wrong before the guard existed.
+statement ok
+PRAGMA git4data_merge('t', 'c', 'a__b', 'fail')
+
+query IIII
+PRAGMA git4data_limits
+----
+-1	1	-1	3
+
+query II
+SELECT (SELECT count(*) FROM t AT (SNAPSHOT => '_one')), (SELECT count(*) FROM t)
+----
+10	10
+
+query II
+SELECT (SELECT v FROM t_c WHERE k = 1), (SELECT count(*) FROM t_c)
+----
+7	10
