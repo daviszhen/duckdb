@@ -1,0 +1,80 @@
+# name: test/sql/git4data/limits_lineage.test
+# description: What the quotas count, given references of both shapes
+# group: [git4data]
+
+load {TEST_DIR}/limits_lineage.db
+
+statement ok
+CREATE TABLE t (k INTEGER PRIMARY KEY, v INTEGER)
+
+statement ok
+INSERT INTO t SELECT range, range FROM range(10)
+
+statement ok
+CHECKPOINT
+
+statement ok
+PRAGMA git4data_create_snapshot('base')
+
+# one branch forked from a snapshot, one from the newest commit: the quota counts references, not the
+# shape of their lineage
+statement ok
+PRAGMA git4data_create_branch('from_snapshot', 'base')
+
+statement ok
+PRAGMA git4data_create_branch('from_root', '')
+
+query IIII
+PRAGMA git4data_limits
+----
+-1	1	-1	2
+
+# the two kinds are counted apart, so a full branch quota does not stop a snapshot
+statement ok
+PRAGMA git4data_limit('branch', 2)
+
+statement error
+PRAGMA git4data_create_branch('third', '')
+----
+<REGEX>:.*At most 2 branches are allowed for this database, and 2 already exist.*
+
+statement ok
+PRAGMA git4data_create_snapshot('second')
+
+query IIII
+PRAGMA git4data_limits
+----
+-1	2	2	2
+
+# and a full snapshot quota does not stop a branch: raising the branch limit is what lets one
+# through, with the snapshot quota untouched
+statement ok
+PRAGMA git4data_limit('snapshot', 2)
+
+statement error
+PRAGMA git4data_create_snapshot('third')
+----
+<REGEX>:.*At most 2 snapshots are allowed for this database, and 2 already exist.*
+
+statement ok
+PRAGMA git4data_limit('branch', 3)
+
+statement ok
+PRAGMA git4data_create_branch('still_branches', 'base')
+
+query IIII
+PRAGMA git4data_limits
+----
+2	2	3	3
+
+# Raising a limit is what lets the next one through, and the counts are what the listing reports.
+statement ok
+PRAGMA git4data_limit('branch', 4)
+
+statement ok
+PRAGMA git4data_create_branch('fourth', '')
+
+query IIII
+PRAGMA git4data_limits
+----
+2	2	4	4
