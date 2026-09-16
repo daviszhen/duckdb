@@ -82,10 +82,10 @@ SELECT (SELECT v FROM t_a WHERE k = 1), (SELECT count(*) FROM t_a WHERE k = 5),
 # A merge into a branch given its table and not written to since is unaffected: root's table is
 # exactly what it was given, so it is still the state the lines parted at.
 statement ok
-PRAGMA git4data_materialize('t', 'root', 't_root')
+PRAGMA git4data_create_branch('c', 'root')
 
 statement ok
-PRAGMA git4data_create_branch('c', 'root')
+PRAGMA git4data_materialize('t', 'root', 't_root')
 
 statement ok
 PRAGMA git4data_materialize('t', 'c', 't_c')

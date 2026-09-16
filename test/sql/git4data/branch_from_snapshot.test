@@ -45,6 +45,12 @@ SELECT count(*), sum(v) FROM t
 ----
 100	14950
 
+# A line forked from fix while fix is still only its base: this is the last moment a fork from it can
+# mean what it looks like, because after it is written to, fix has moved on from the commit a child
+# would inherit.
+statement ok
+PRAGMA git4data_create_branch('fix2', 'fix')
+
 # giving it a table of its own makes it writable, and the three lines stay independent
 statement ok
 PRAGMA git4data_materialize('t', 'fix', 't_fix')
@@ -61,11 +67,7 @@ SELECT (SELECT v FROM t AT (BRANCH => 'fix') WHERE k = 0), (SELECT v FROM t WHER
 ----
 -1	1000	0
 
-# a branch forked from the branch inherits its state, and the least common ancestor of the two is the
-# branch they share
-statement ok
-PRAGMA git4data_create_branch('fix2', 'fix')
-
+# the least common ancestor of fix2 and fix is the branch they share
 query I
 SELECT count(*) FROM t AT (BRANCH => 'fix2')
 ----
@@ -85,6 +87,14 @@ PRAGMA git4data_branches
 # A line forked from a snapshot has no ancestor *branch* to share with a line that was not, so a merge
 # that has to find one refuses rather than inventing a base. A pick names its base explicitly and is
 # unaffected.
+# A fork from a branch that has been written to is refused rather than silently taken from that
+# branch's base: measured, a parent whose row reads -1 forks a child whose row reads 0. The honest way
+# to cut a line from a written state is to tag it first, which is what the snapshot above is.
+statement error
+PRAGMA git4data_create_branch('another', 'fix')
+----
+<REGEX>:.*has a table of its own, so it has moved on from the commit it was forked at.*
+
 statement ok
 PRAGMA git4data_create_branch('other', '')
 

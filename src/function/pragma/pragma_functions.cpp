@@ -699,6 +699,17 @@ static void PragmaGit4DataCreateBranch(ClientContext &context, const FunctionPar
 	} else {
 		Git4DataBranch parent_branch;
 		if (transaction_manager.branches.Get(parent, parent_branch)) {
+			// A branch with a table of its own has moved on from the commit it was forked at, and a child
+			// inherits that commit - so the child would start at the parent's base rather than at what the
+			// parent has done since. Measured: a parent whose row reads 111 forks a child whose row reads 1.
+			// Refusing is the honest answer until a fork can take a branch's *state* rather than its base.
+			if (!parent_branch.storage_tables.empty()) {
+				throw InvalidInputException(
+				    "Branch \"%s\" has a table of its own, so it has moved on from the commit it was forked at. A "
+				    "branch from it would start there rather than at what it has done since. Fork from a snapshot of "
+				    "the state you want, or from the branch before it is written to.",
+				    parent);
+			}
 			pin = parent_branch.pin;
 		} else {
 			auto snapshot_pin = transaction_manager.snapshots.GetPin(parent);
