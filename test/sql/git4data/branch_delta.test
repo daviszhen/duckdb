@@ -119,13 +119,6 @@ PRAGMA git4data_bind_branch_delta('t', 'missing', 't_add', 't_del')
 ----
 <REGEX>:.*Branch "missing" does not exist.*
 
-# A bare fork carries a commit, and what makes this branch differ from its own commit is a delta it
-# has nowhere to hand a child, so that fork is refused and says what to do instead.
-statement error
-PRAGMA git4data_create_branch('child', 'base')
-----
-<REGEX>:.*differs from its base by a delta.*Capture its line and fork from that.*
-
 # Capturing the line does work, and it reads the delta at the commit it captured rather than at now:
 # the base is fixed and the delta is not, which is why the two are read at different bounds.
 statement ok
@@ -210,6 +203,33 @@ SELECT (SELECT count(*) FROM t AT (BRANCH => 'base')),
        (SELECT count(*) FROM t AT (BRANCH => 'base') WHERE k = 5)
 ----
 99	2000	0
+
+# A fork from a branch that differs by a delta takes the state that branch holds: the child carries the
+# line and reads the delta at the commit it forked at. Measured: the parent's own added row is there and
+# the key its delta removed is gone.
+statement ok
+PRAGMA git4data_create_branch('forked', 'base')
+
+query III
+SELECT (SELECT count(*) FROM t AT (BRANCH => 'forked')),
+       (SELECT v FROM t AT (BRANCH => 'forked') WHERE k = 2000),
+       (SELECT count(*) FROM t AT (BRANCH => 'forked') WHERE k = 5)
+----
+99	2000	0
+
+# and what the delta does afterwards is outside that pin
+statement ok
+INSERT INTO t_add VALUES (5000, 5000)
+
+query II
+SELECT (SELECT count(*) FROM t AT (BRANCH => 'forked') WHERE k = 5000),
+       (SELECT count(*) FROM t AT (BRANCH => 'base') WHERE k = 5000)
+----
+0	1
+
+# taken back out, so the counts the rest of this file asserts are the ones it was written against
+statement ok
+DELETE FROM t_add WHERE k = 5000
 
 # A read after DDL lands on the delta's tables, and those have to be able to stand in for the source:
 # the added rows are read as the source's rows. Saying so is better than the index-out-of-range the read

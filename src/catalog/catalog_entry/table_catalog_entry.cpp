@@ -307,13 +307,13 @@ void TableCatalogEntry::BindUpdateConstraints(Binder &binder, LogicalGet &get, L
 	// If the returning keyword is used, we need access to the whole row in case the user requests it.
 	// Therefore switch the update to a delete and insert.
 	update.update_is_del_and_insert = Settings::Get<ForceUpdateToDelAndInsertSetting>(context);
-	// A pinned snapshot has to be able to read the pre-image of this row. An in-place
-	// update keeps the pre-image only in the base column, which the next checkpoint
-	// rewrites away when it merges the update, so route the update through
-	// delete + insert while any snapshot is pinned.
+	// A pinned reference has to be able to read the pre-image of this row, and a branch is a reference
+	// in the same sense a snapshot is. An in-place update keeps the pre-image only in the base column,
+	// which the next checkpoint rewrites away when it merges the update, so route the update through
+	// delete + insert while anything is pinned - a snapshot or a branch.
 	if (!update.update_is_del_and_insert) {
 		auto &transaction_manager = DuckTransactionManager::Get(ParentCatalog().GetAttached());
-		update.update_is_del_and_insert = transaction_manager.snapshots.Count() > 0;
+		update.update_is_del_and_insert = transaction_manager.HasReferences();
 	}
 	TableStorageInfo table_storage_info = GetStorageInfo(context);
 	for (auto index : table_storage_info.index_info) {

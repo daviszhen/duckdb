@@ -824,28 +824,24 @@ static void PragmaGit4DataCreateBranch(ClientContext &context, const FunctionPar
 	} else {
 		Git4DataBranch parent_branch;
 		if (transaction_manager.branches.Get(parent, parent_branch)) {
-			// A branch with a table of its own has moved on from the commit it was forked at, and a child
-			// inherits that commit - so the child would start at the parent's base rather than at what the
-			// parent has done since. Measured: a parent whose row reads 111 forks a child whose row reads 1.
-			// Refusing is the honest answer until a fork can take a branch's *state* rather than its base.
-			if (!parent_branch.storage_tables.empty()) {
-				throw InvalidInputException(
-				    "Branch \"%s\" has a table of its own. A branch forked from it would inherit the commit it was "
-				    "forked at rather than the state it holds now, and those are the same only while it has not been "
-				    "written to since it was given that table - which this check cannot tell from here, so it refuses "
-				    "either way. Fork from it before it is written to. A snapshot cannot stand in: a snapshot reads "
-				    "the table the branch was forked from, not the line the branch has of its own.",
-				    parent);
+			// A fork takes the state the parent holds, not the commit the parent was pinned at, whenever
+			// the two differ - which they do the moment the parent has a table of its own or a delta. The
+			// child carries the parent as the line it started from and pins the commit it forked at, so
+			// what it reads is that line as it stood then, and whatever the parent does afterwards is
+			// outside the pin. Without this the child reads the parent's base: measured, a parent whose row
+			// read 111 forked a child whose row read 1.
+			if (!parent_branch.storage_tables.empty() || !parent_branch.deltas.empty()) {
+				// A fork takes the state the parent holds, not the commit the parent was pinned at,
+				// whenever the two differ - which they do the moment the parent has a table of its own or a
+				// delta. The child carries the parent as the line it started from and pins the commit it
+				// forked at, so what it reads is that line as it stood then, and whatever the parent does
+				// afterwards is outside the pin. Without this the child reads the parent's base: measured, a
+				// parent whose row read 111 forked a child whose row read 1.
+				base_line = parent;
+				pin = transaction_manager.GetLastCommit();
+			} else {
+				pin = parent_branch.pin;
 			}
-			if (!parent_branch.deltas.empty()) {
-				// the child would read the branch's *base*, which is not what the branch holds: its own
-				// delta is what makes the two differ, and a child has nowhere to carry it yet
-				throw InvalidInputException(
-				    "Branch \"%s\" differs from its base by a delta, and a branch forked from it would read that base "
-				    "rather than what the branch holds. Capture its line and fork from that.",
-				    parent);
-			}
-			pin = parent_branch.pin;
 		} else {
 			Git4DataSnapshot parent_snapshot;
 			if (!transaction_manager.snapshots.Get(parent, parent_snapshot)) {

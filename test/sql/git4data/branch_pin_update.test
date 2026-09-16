@@ -1,0 +1,84 @@
+# name: test/sql/git4data/branch_pin_update.test
+# description: A branch pin holds the pre-image of an update, across a checkpoint
+# group: [git4data]
+
+load {TEST_DIR}/branch_pin_update.db
+
+statement ok
+CREATE TABLE t (k INTEGER PRIMARY KEY, v INTEGER)
+
+statement ok
+INSERT INTO t SELECT range, range FROM range(100)
+
+statement ok
+CHECKPOINT
+
+# A branch is a reference, and a reference reads the state it pins. An update used to be routed through
+# delete + insert only while a *snapshot* was pinned; with a branch pinned the new values stayed in the
+# update segment and the checkpoint merged them into the base, so the branch read the update instead of
+# the state it pins. Measured before the fix: 999 where the branch should have read 1.
+statement ok
+PRAGMA git4data_create_branch('b', '')
+
+statement ok
+UPDATE t SET v = 999 WHERE k = 1
+
+query II
+SELECT (SELECT v FROM t AT (BRANCH => 'b') WHERE k = 1), (SELECT v FROM t WHERE k = 1)
+----
+1	999
+
+# and it survives the checkpoint, which is where the pre-image used to be merged away
+statement ok
+CHECKPOINT
+
+query II
+SELECT (SELECT v FROM t AT (BRANCH => 'b') WHERE k = 1), (SELECT v FROM t WHERE k = 1)
+----
+1	999
+
+# the same holds for a delete after the pin and for rows added after it
+statement ok
+DELETE FROM t WHERE k = 2
+
+statement ok
+INSERT INTO t VALUES (5000, 5000)
+
+statement ok
+CHECKPOINT
+
+query III
+SELECT (SELECT count(*) FROM t AT (BRANCH => 'b')),
+       (SELECT count(*) FROM t AT (BRANCH => 'b') WHERE k = 2),
+       (SELECT count(*) FROM t AT (BRANCH => 'b') WHERE k = 5000)
+----
+100	1	0
+
+# Two references, two pins, each reading its own state: the snapshot is taken after all of that, so it
+# reads the updated row and the branch reads the row it pinned.
+statement ok
+PRAGMA git4data_create_snapshot('s')
+
+query II
+SELECT (SELECT v FROM t AT (SNAPSHOT => 's') WHERE k = 1), (SELECT v FROM t AT (BRANCH => 'b') WHERE k = 1)
+----
+999	1
+
+# an update after both pins still leaves each of them where it was
+statement ok
+UPDATE t SET v = -1 WHERE k = 1
+
+query III
+SELECT (SELECT v FROM t AT (BRANCH => 'b') WHERE k = 1), (SELECT v FROM t AT (SNAPSHOT => 's') WHERE k = 1),
+       (SELECT v FROM t WHERE k = 1)
+----
+1	999	-1
+
+statement ok
+CHECKPOINT
+
+query III
+SELECT (SELECT v FROM t AT (BRANCH => 'b') WHERE k = 1), (SELECT v FROM t AT (SNAPSHOT => 's') WHERE k = 1),
+       (SELECT v FROM t WHERE k = 1)
+----
+1	999	-1
