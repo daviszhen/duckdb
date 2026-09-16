@@ -93,7 +93,7 @@ PRAGMA git4data_branches
 statement error
 PRAGMA git4data_create_branch('another', 'fix')
 ----
-<REGEX>:.*has a table of its own, so it has moved on from the commit it was forked at.*
+<REGEX>:.*has a table of its own. A branch forked from it would inherit the commit it was forked at.*
 
 # A snapshot cannot stand in for the branch, and it is worth asserting rather than assuming: a
 # snapshot pins a commit and reads the *table*, while what the branch has done since lives in a table

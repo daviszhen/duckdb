@@ -705,10 +705,11 @@ static void PragmaGit4DataCreateBranch(ClientContext &context, const FunctionPar
 			// Refusing is the honest answer until a fork can take a branch's *state* rather than its base.
 			if (!parent_branch.storage_tables.empty()) {
 				throw InvalidInputException(
-				    "Branch \"%s\" has a table of its own, so it has moved on from the commit it was forked at. A "
-				    "branch from it would start there rather than at what it has done since. Fork from the branch "
-				    "before it is written to: a snapshot cannot stand in for it, because a snapshot reads the table "
-				    "the branch was forked from rather than the line the branch has of its own.",
+				    "Branch \"%s\" has a table of its own. A branch forked from it would inherit the commit it was "
+				    "forked at rather than the state it holds now, and those are the same only while it has not been "
+				    "written to since it was given that table - which this check cannot tell from here, so it refuses "
+				    "either way. Fork from it before it is written to. A snapshot cannot stand in: a snapshot reads "
+				    "the table the branch was forked from, not the line the branch has of its own.",
 				    parent);
 			}
 			pin = parent_branch.pin;
