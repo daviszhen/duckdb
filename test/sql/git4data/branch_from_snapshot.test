@@ -95,6 +95,21 @@ PRAGMA git4data_create_branch('another', 'fix')
 ----
 <REGEX>:.*has a table of its own, so it has moved on from the commit it was forked at.*
 
+# A snapshot cannot stand in for the branch, and it is worth asserting rather than assuming: a
+# snapshot pins a commit and reads the *table*, while what the branch has done since lives in a table
+# of its own. So a line forked from a snapshot of this moment starts from the main line's state, which
+# is 1000 for this key - not the -1 the branch's own table holds.
+statement ok
+PRAGMA git4data_create_snapshot('now')
+
+statement ok
+PRAGMA git4data_create_branch('from_now', 'now')
+
+query II
+SELECT (SELECT v FROM t AT (BRANCH => 'from_now') WHERE k = 0), (SELECT v FROM t AT (BRANCH => 'fix') WHERE k = 0)
+----
+1000	-1
+
 statement ok
 PRAGMA git4data_create_branch('other', '')
 

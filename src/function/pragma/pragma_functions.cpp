@@ -706,8 +706,9 @@ static void PragmaGit4DataCreateBranch(ClientContext &context, const FunctionPar
 			if (!parent_branch.storage_tables.empty()) {
 				throw InvalidInputException(
 				    "Branch \"%s\" has a table of its own, so it has moved on from the commit it was forked at. A "
-				    "branch from it would start there rather than at what it has done since. Fork from a snapshot of "
-				    "the state you want, or from the branch before it is written to.",
+				    "branch from it would start there rather than at what it has done since. Fork from the branch "
+				    "before it is written to: a snapshot cannot stand in for it, because a snapshot reads the table "
+				    "the branch was forked from rather than the line the branch has of its own.",
 				    parent);
 			}
 			pin = parent_branch.pin;
