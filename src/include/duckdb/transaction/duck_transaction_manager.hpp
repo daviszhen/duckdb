@@ -106,6 +106,10 @@ struct Git4DataBranch {
 	//! the branch. A branch with no entry for a table is read as the pinned image; one with an entry
 	//! is read as that table, which can be written to and so diverges.
 	vector<pair<string, string>> storage_tables;
+	//! The branch whose line this one was forked from, when it was forked from a reference that
+	//! captured one. The child reads that branch's storage at its pin until it has storage of its own,
+	//! which is what lets a fork take a state rather than only a commit.
+	string base_line;
 };
 
 //! Registry of data branches. A branch is a reference like a snapshot is - both pin the
@@ -119,12 +123,15 @@ public:
 	//! branch has no ancestor *branch*, so a walk that needs one - a merge looking for a least common
 	//! ancestor - stops at it rather than inventing one.
 	bool Create(const string &name, transaction_t pin, const string &parent, timestamp_t created,
-	            bool parent_is_snapshot = false);
+	            bool parent_is_snapshot = false, const string &base_line = string());
 	//! Drop a branch. Returns false if the name is unknown, or if it still has children -
 	//! removing it would leave those children's lineage dangling.
 	bool Drop(const string &name);
 	//! Whether dropping this name would be refused because other branches descend from it
 	bool HasChildren(const string &name) const;
+	//! Whether any branch was forked from a reference that captured this branch's line. Such a child
+	//! reads this branch's storage, so dropping it would leave the child reading a table that is gone.
+	bool HasLineDependents(const string &name) const;
 	vector<Git4DataBranch> List() const;
 	idx_t Count() const;
 	//! Look a branch up by name. Returns false when there is none.
@@ -146,7 +153,8 @@ public:
 	//! Give a branch its own table for a source table, so writes to it no longer touch the source
 	void SetStorageTable(const string &branch, const string &source_table, const string &storage_table);
 	//! Restore a branch read from disk without the checks Create performs
-	void Restore(const string &name, transaction_t pin, const string &parent, timestamp_t created);
+	void Restore(const string &name, transaction_t pin, const string &parent, timestamp_t created,
+	             const string &base_line = string());
 
 private:
 	//! Recompute the cached minimum pin. Caller must hold the lock.

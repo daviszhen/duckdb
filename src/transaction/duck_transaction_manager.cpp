@@ -82,7 +82,7 @@ idx_t SnapshotRegistry::Count() const {
 }
 
 bool BranchRegistry::Create(const string &name, transaction_t pin, const string &parent, timestamp_t created,
-                            bool parent_is_snapshot) {
+                            bool parent_is_snapshot, const string &base_line) {
 	lock_guard<mutex> guard(lock);
 	if (branches.find(name) != branches.end()) {
 		return false;
@@ -91,7 +91,7 @@ bool BranchRegistry::Create(const string &name, transaction_t pin, const string 
 		// a branch has to descend from something that is there, or its lineage cannot be walked
 		return false;
 	}
-	branches.emplace(name, Git4DataBranch {name, pin, parent, created});
+	branches.emplace(name, Git4DataBranch {name, pin, parent, created, {}, base_line});
 	RecomputeLowest();
 	dirty.store(true);
 	return true;
@@ -114,9 +114,10 @@ void BranchRegistry::SetStorageTable(const string &branch, const string &source_
 	dirty.store(true);
 }
 
-void BranchRegistry::Restore(const string &name, transaction_t pin, const string &parent, timestamp_t created) {
+void BranchRegistry::Restore(const string &name, transaction_t pin, const string &parent, timestamp_t created,
+                             const string &base_line) {
 	lock_guard<mutex> guard(lock);
-	branches[name] = Git4DataBranch {name, pin, parent, created};
+	branches[name] = Git4DataBranch {name, pin, parent, created, {}, base_line};
 	RecomputeLowest();
 }
 
@@ -124,6 +125,16 @@ bool BranchRegistry::HasChildren(const string &name) const {
 	lock_guard<mutex> guard(lock);
 	for (auto &entry : branches) {
 		if (entry.second.parent == name) {
+			return true;
+		}
+	}
+	return false;
+}
+
+bool BranchRegistry::HasLineDependents(const string &name) const {
+	lock_guard<mutex> guard(lock);
+	for (auto &entry : branches) {
+		if (entry.second.base_line == name) {
 			return true;
 		}
 	}

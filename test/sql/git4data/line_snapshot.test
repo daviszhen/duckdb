@@ -77,24 +77,60 @@ PRAGMA git4data_create_snapshot('base_only', 'root')
 ----
 <REGEX>:.*has no table of its own, so it has no line to capture.*
 
-# Forking from a captured line is refused rather than quietly taking the table instead: a child would
-# have to carry the line with it, which is a separate piece of work.
-statement error
+# A fork from the captured line takes that state, which is what the reference is for: the child carries
+# the line and reads it as it stood at the pin
+statement ok
 PRAGMA git4data_create_branch('child', 'of_b')
-----
-<REGEX>:.*is a captured line.*
 
-# the reference survives a reopen, which is the half of it that the registry block carries
+query I
+SELECT v FROM t AT (BRANCH => 'child') WHERE k = 1
+----
+-1
+
+# the branch the line came from moves on, and the child's state does not: the pin is what it reads at
+statement ok
+UPDATE t_b SET v = -9 WHERE k = 1
+
+query II
+SELECT (SELECT v FROM t AT (BRANCH => 'child') WHERE k = 1),
+       (SELECT v FROM t AT (BRANCH => 'b') WHERE k = 1)
+----
+-1	-9
+
+# a fork taking a state is what the child's own storage then starts from
+statement ok
+PRAGMA git4data_materialize('t', 'child', 't_child')
+
+query II
+SELECT (SELECT v FROM t_child WHERE k = 1), (SELECT count(*) FROM t_child)
+----
+-1	100
+
+# the line the child carries is held down by it
+statement error
+PRAGMA git4data_drop_branch('b')
+----
+<REGEX>:.*captured its line.*
+
+# the reference and the line the child carries both survive a reopen, which is the half of it the
+# registry block does
 statement ok
 CHECKPOINT
 
 restart
 
-query II
+query III
 SELECT (SELECT v FROM t AT (SNAPSHOT => 'of_b') WHERE k = 1),
-       (SELECT v FROM t AT (SNAPSHOT => 'plain') WHERE k = 1)
+       (SELECT v FROM t AT (SNAPSHOT => 'plain') WHERE k = 1),
+       (SELECT v FROM t AT (BRANCH => 'child') WHERE k = 1)
 ----
--1	1
+-1	1	-1
+
+# and dropping is still held back by the child after the reopen
+statement error
+PRAGMA git4data_drop_branch('b')
+----
+<REGEX>:.*captured its line.*
 
 statement ok
 PRAGMA git4data_snapshots;

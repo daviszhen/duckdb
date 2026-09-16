@@ -92,6 +92,19 @@ static void ResolveGit4DataRead(ClientContext &context, DuckTransactionManager &
 		bound = VisibilityBound::AllCommitted();
 		return;
 	}
+	if (!branch.base_line.empty()) {
+		// forked from a reference that captured another branch's line: read that line as it stood at
+		// this pin, which is what makes a fork take a state rather than only a commit
+		Git4DataBranch line_branch;
+		if (transaction_manager.branches.Get(branch.base_line, line_branch)) {
+			auto line_storage = Git4DataBranchStorageTable(context, line_branch, table_name);
+			if (!line_storage.empty()) {
+				read_table = line_storage;
+				bound = VisibilityBound::Through(branch.pin);
+				return;
+			}
+		}
+	}
 	read_table = table_name;
 	bound = VisibilityBound::Through(branch.pin);
 }

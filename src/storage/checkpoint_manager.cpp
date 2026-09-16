@@ -333,6 +333,7 @@ void SingleFileCheckpointWriter::CreateCheckpoint() {
 				obj.WriteProperty<uint64_t>(101, "pin", data_branches[i].pin);
 				obj.WriteProperty<string>(102, "parent", data_branches[i].parent);
 				obj.WriteProperty<int64_t>(103, "created", data_branches[i].created.value);
+				obj.WriteProperty<string>(105, "line", data_branches[i].base_line);
 				obj.WriteList(104, "storage_tables", data_branches[i].storage_tables.size(),
 				              [&](Serializer::List &storage_list, idx_t s) {
 					              storage_list.WriteObject([&](Serializer &storage_obj) {
@@ -520,7 +521,9 @@ void SingleFileCheckpointReader::LoadFromStorage() {
 				auto pin = obj.ReadProperty<uint64_t>(101, "pin");
 				auto parent = obj.ReadProperty<string>(102, "parent");
 				auto created = obj.ReadPropertyWithExplicitDefault<int64_t>(103, "created", 0);
-				transaction_manager.branches.Restore(name, pin, parent, timestamp_t(created));
+				// empty when the block predates a branch being able to carry a captured line
+				auto base_line = obj.ReadPropertyWithExplicitDefault<string>(105, "line", "");
+				transaction_manager.branches.Restore(name, pin, parent, timestamp_t(created), base_line);
 				obj.ReadOptionalList(104, "storage_tables", [&](Deserializer::List &storage_list, idx_t s) {
 					return storage_list.ReadObject([&](Deserializer &storage_obj) {
 						auto source = storage_obj.ReadProperty<string>(100, "source");

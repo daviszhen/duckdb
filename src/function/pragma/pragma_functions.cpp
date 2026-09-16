@@ -749,6 +749,7 @@ static void PragmaGit4DataCreateBranch(ClientContext &context, const FunctionPar
 	// branch still refuses; a pick takes its base explicitly and works.
 	transaction_t pin;
 	bool parent_is_snapshot = false;
+	string base_line;
 	if (parent.empty()) {
 		pin = transaction_manager.GetLastCommit();
 	} else {
@@ -776,19 +777,18 @@ static void PragmaGit4DataCreateBranch(ClientContext &context, const FunctionPar
 				                            parent);
 			}
 			if (!parent_snapshot.line.empty()) {
-				// What such a reference names is a branch's own state, and a child would have to carry that
-				// line with it to read the same rows. A pin alone would leave it reading the table.
-				throw InvalidInputException(
-				    "Snapshot \"%s\" is a captured line rather than the table at a commit, and a branch forked "
-				    "from it would read the table instead of that line. Fork from the branch itself instead.",
-				    parent);
+				// What such a reference names is a branch's own state, so the child carries that line: it
+				// reads the line's storage at this pin, which is the state the reference captured, and
+				// changes the other branch makes later are outside the pin and stay out.
+				base_line = parent_snapshot.line;
 			}
 			pin = parent_snapshot.pin;
 			parent_is_snapshot = true;
 		}
 	}
 	CheckGit4DataReferenceLimit("branches", transaction_manager.branches.Count(), transaction_manager.branch_limit);
-	if (!transaction_manager.branches.Create(name, pin, parent, Timestamp::GetCurrentTimestamp(), parent_is_snapshot)) {
+	if (!transaction_manager.branches.Create(name, pin, parent, Timestamp::GetCurrentTimestamp(), parent_is_snapshot,
+	                                         base_line)) {
 		throw InvalidInputException("Branch \"%s\" already exists", name);
 	}
 }
@@ -805,6 +805,12 @@ static string PragmaGit4DataDropBranch(ClientContext &context, const FunctionPar
 	if (transaction_manager.branches.HasChildren(name)) {
 		// a descendant still walks through this name to reach its ancestors
 		throw InvalidInputException("Branch \"%s\" still has branches descending from it", name);
+	}
+	if (transaction_manager.branches.HasLineDependents(name)) {
+		// those branches read this one's storage at their fork pin, which dropping it would take away
+		throw InvalidInputException("Branch \"%s\" still has branches forked from a reference that captured its "
+		                            "line. Drop those branches first.",
+		                            name);
 	}
 	string result;
 	for (auto &entry : existing.storage_tables) {
