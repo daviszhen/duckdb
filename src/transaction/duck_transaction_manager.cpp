@@ -24,12 +24,12 @@
 
 namespace duckdb {
 
-bool SnapshotRegistry::Create(const string &name, transaction_t pin, timestamp_t created) {
+bool SnapshotRegistry::Create(const string &name, transaction_t pin, timestamp_t created, const string &line) {
 	lock_guard<mutex> guard(lock);
 	if (snapshots.find(name) != snapshots.end()) {
 		return false;
 	}
-	snapshots.emplace(name, Git4DataSnapshot {name, pin, created});
+	snapshots.emplace(name, Git4DataSnapshot {name, pin, created, line});
 	RecomputeLowest();
 	dirty.store(true);
 	return true;

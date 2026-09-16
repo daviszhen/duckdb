@@ -322,6 +322,7 @@ void SingleFileCheckpointWriter::CreateCheckpoint() {
 				obj.WriteProperty<string>(100, "name", pinned_snapshots[i].name);
 				obj.WriteProperty<uint64_t>(101, "pin", pinned_snapshots[i].pin);
 				obj.WriteProperty<int64_t>(102, "created", pinned_snapshots[i].created.value);
+				obj.WriteProperty<string>(103, "line", pinned_snapshots[i].line);
 			});
 		});
 		// branches go beside the snapshots because they are references in the same sense: each
@@ -505,7 +506,9 @@ void SingleFileCheckpointReader::LoadFromStorage() {
 				auto pin = obj.ReadProperty<uint64_t>(101, "pin");
 				// zero when the block predates the timestamp being recorded
 				auto created = obj.ReadPropertyWithExplicitDefault<int64_t>(102, "created", 0);
-				transaction_manager.snapshots.Create(name, pin, timestamp_t(created));
+				// empty when the block predates a reference being able to capture a line
+				auto line = obj.ReadPropertyWithExplicitDefault<string>(103, "line", "");
+				transaction_manager.snapshots.Create(name, pin, timestamp_t(created), line);
 			});
 		});
 		// optional, because the block predates branches in files written before they existed.

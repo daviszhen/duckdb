@@ -53,6 +53,67 @@ static string Git4DataBranchStorageTable(ClientContext &context, const Git4DataB
 	return string();
 }
 
+//! The table a reference reads and the bound it reads it at. The scan and the diff both come here, so
+//! the two cannot disagree about which table a reference means - a disagreement that compares row ids
+//! of different tables and reports no change at all.
+static void ResolveGit4DataRead(ClientContext &context, DuckTransactionManager &transaction_manager,
+                                const string &table_name, const string &name, Git4DataRefKind kind, string &read_table,
+                                VisibilityBound &bound) {
+	if (kind == Git4DataRefKind::SNAPSHOT) {
+		Git4DataSnapshot snapshot;
+		if (!transaction_manager.snapshots.Get(name, snapshot)) {
+			throw InvalidInputException("Snapshot \"%s\" does not exist", name);
+		}
+		read_table = table_name;
+		bound = VisibilityBound::Through(snapshot.pin);
+		if (!snapshot.line.empty()) {
+			// It captured a branch's own line, which lives in that branch's storage table once it has
+			// been written to. A line whose table is gone falls back to the pinned image, the same way a
+			// branch whose storage was dropped does.
+			Git4DataBranch line_branch;
+			if (transaction_manager.branches.Get(snapshot.line, line_branch)) {
+				auto storage = Git4DataBranchStorageTable(context, line_branch, table_name);
+				if (!storage.empty()) {
+					read_table = storage;
+				}
+			}
+		}
+		return;
+	}
+	Git4DataBranch branch;
+	if (!transaction_manager.branches.Get(name, branch)) {
+		throw InvalidInputException("Branch \"%s\" does not exist", name);
+	}
+	auto storage = Git4DataBranchStorageTable(context, branch, table_name);
+	if (!storage.empty()) {
+		// the branch has a line of its own here, so read that rather than the pinned image - it can
+		// have been written to since the branch was taken
+		read_table = storage;
+		bound = VisibilityBound::AllCommitted();
+		return;
+	}
+	read_table = table_name;
+	bound = VisibilityBound::Through(branch.pin);
+}
+
+static VisibilityBound ResolveReferenceBound(ClientContext &context, DuckTransactionManager &transaction_manager,
+                                             const string &table_name, const string &name, string &read_table) {
+	Git4DataRefKind kind;
+	if (transaction_manager.snapshots.GetPin(name).IsValid()) {
+		kind = Git4DataRefKind::SNAPSHOT;
+	} else {
+		// the name has to be in one of the two registries, and a caller that passed neither wants to be
+		// told that rather than which of the two was looked in
+		Git4DataBranch branch;
+		if (!transaction_manager.branches.Get(name, branch)) {
+			throw InvalidInputException("Reference \"%s\" is neither a snapshot nor a branch", name);
+		}
+		kind = Git4DataRefKind::BRANCH;
+	}
+	VisibilityBound bound;
+	ResolveGit4DataRead(context, transaction_manager, table_name, name, kind, read_table, bound);
+	return bound;
+}
 unique_ptr<FunctionData> Git4DataSnapshotScanFun::CreateBindData(ClientContext &context, const string &table_name,
                                                                  const string &reference_name, Git4DataRefKind kind) {
 	auto result = make_uniq<Git4DataSnapshotScanBindData>();
@@ -63,27 +124,11 @@ unique_ptr<FunctionData> Git4DataSnapshotScanFun::CreateBindData(ClientContext &
 	auto &db_manager = DatabaseManager::Get(context);
 	auto attached = db_manager.GetDatabase(context, DatabaseManager::GetDefaultDatabase(context));
 	auto &transaction_manager = DuckTransactionManager::Get(*attached);
-	if (kind == Git4DataRefKind::BRANCH) {
-		Git4DataBranch branch;
-		if (!transaction_manager.branches.Get(reference_name, branch)) {
-			throw InvalidInputException("Branch \"%s\" does not exist", reference_name);
-		}
-		auto storage = Git4DataBranchStorageTable(context, branch, table_name);
-		if (!storage.empty()) {
-			// the branch has a line of its own here, so read that rather than the pinned image - it
-			// can have been written to since the branch was taken
-			result->table_name = storage;
-			result->bound = VisibilityBound::AllCommitted();
-			return std::move(result);
-		}
-		result->bound = VisibilityBound::Through(branch.pin);
-		return std::move(result);
-	}
-	auto pin = transaction_manager.snapshots.GetPin(reference_name);
-	if (!pin.IsValid()) {
-		throw InvalidInputException("Snapshot \"%s\" does not exist", reference_name);
-	}
-	result->bound = VisibilityBound::Through(pin.GetIndex());
+	auto read_table = table_name;
+	VisibilityBound bound;
+	ResolveGit4DataRead(context, transaction_manager, table_name, reference_name, kind, read_table, bound);
+	result->table_name = read_table;
+	result->bound = bound;
 	return std::move(result);
 }
 
@@ -240,25 +285,6 @@ struct Git4DataDiffState : public GlobalTableFunctionState {
 //! Which table a reference is read from, and at what bound. A snapshot is always the pinned image of
 //! the table; a branch is that too unless it has a table of its own for it, in which case it is read
 //! as that table with everything it holds, because that line can have been written to.
-static VisibilityBound ResolveReferenceBound(ClientContext &context, DuckTransactionManager &transaction_manager,
-                                             const string &table_name, const string &name, string &read_table) {
-	auto pin = transaction_manager.snapshots.GetPin(name);
-	if (pin.IsValid()) {
-		read_table = table_name;
-		return VisibilityBound::Through(pin.GetIndex());
-	}
-	Git4DataBranch branch;
-	if (transaction_manager.branches.Get(name, branch)) {
-		auto storage = Git4DataBranchStorageTable(context, branch, table_name);
-		if (!storage.empty()) {
-			read_table = storage;
-			return VisibilityBound::AllCommitted();
-		}
-		read_table = table_name;
-		return VisibilityBound::Through(branch.pin);
-	}
-	throw InvalidInputException("Reference \"%s\" is neither a snapshot nor a branch", name);
-}
 
 //! The primary key of a table as physical column indexes plus their types, both empty when it has
 //! none. A key is what makes two physical rows recognisably the same row.

@@ -1,0 +1,100 @@
+# name: test/sql/git4data/line_snapshot.test
+# description: A reference that captures a branch's own line rather than the table at a commit
+# group: [git4data]
+
+load {TEST_DIR}/line_snapshot.db
+
+statement ok
+CREATE TABLE t (k INTEGER PRIMARY KEY, v INTEGER)
+
+statement ok
+INSERT INTO t SELECT range, range FROM range(100)
+
+statement ok
+CHECKPOINT
+
+statement ok
+PRAGMA git4data_create_branch('b', '')
+
+statement ok
+PRAGMA git4data_materialize('t', 'b', 't_b')
+
+# b's own line now differs from the table, in a table of its own. A pin cannot point at that, which is
+# the gap this reference closes: a snapshot of the table at this commit reads the main line, and a
+# snapshot that names b reads what b holds.
+statement ok
+UPDATE t_b SET v = -1 WHERE k = 1
+
+statement ok
+PRAGMA git4data_create_snapshot('plain')
+
+statement ok
+PRAGMA git4data_create_snapshot('of_b', 'b')
+
+query II
+SELECT (SELECT v FROM t AT (SNAPSHOT => 'plain') WHERE k = 1),
+       (SELECT v FROM t AT (SNAPSHOT => 'of_b') WHERE k = 1)
+----
+1	-1
+
+# the branch itself reads the same thing the captured line does
+query I
+SELECT v FROM t AT (BRANCH => 'b') WHERE k = 1
+----
+-1
+
+# both are still references to the same source table, and neither sees a row added after its pin
+statement ok
+INSERT INTO t VALUES (2000, 2000)
+
+query II
+SELECT (SELECT count(*) FROM t AT (SNAPSHOT => 'plain')), (SELECT count(*) FROM t AT (SNAPSHOT => 'of_b'))
+----
+100	100
+
+# a captured line composes with the diff, because a diff reads each side as the reference it names
+query I
+SELECT count(*) FROM git4data_diff('t', 'plain', 'of_b')
+----
+1
+
+# the listing gains a column saying which references capture a line; its content is asserted by
+# git4data-retention-check.sh, which can read the pragma's output directly
+statement ok
+PRAGMA git4data_snapshots;
+
+# a line has to exist before it can be captured
+statement ok
+PRAGMA git4data_create_branch('root', '')
+
+statement error
+PRAGMA git4data_create_snapshot('nosuch', 'missing')
+----
+<REGEX>:.*Branch "missing" does not exist.*
+
+statement error
+PRAGMA git4data_create_snapshot('base_only', 'root')
+----
+<REGEX>:.*has no table of its own, so it has no line to capture.*
+
+# Forking from a captured line is refused rather than quietly taking the table instead: a child would
+# have to carry the line with it, which is a separate piece of work.
+statement error
+PRAGMA git4data_create_branch('child', 'of_b')
+----
+<REGEX>:.*is a captured line.*
+
+# the reference survives a reopen, which is the half of it that the registry block carries
+statement ok
+CHECKPOINT
+
+restart
+
+query II
+SELECT (SELECT v FROM t AT (SNAPSHOT => 'of_b') WHERE k = 1),
+       (SELECT v FROM t AT (SNAPSHOT => 'plain') WHERE k = 1)
+----
+-1	1
+
+statement ok
+PRAGMA git4data_snapshots;

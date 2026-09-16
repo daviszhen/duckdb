@@ -769,13 +769,21 @@ static void PragmaGit4DataCreateBranch(ClientContext &context, const FunctionPar
 			}
 			pin = parent_branch.pin;
 		} else {
-			auto snapshot_pin = transaction_manager.snapshots.GetPin(parent);
-			if (!snapshot_pin.IsValid()) {
+			Git4DataSnapshot parent_snapshot;
+			if (!transaction_manager.snapshots.Get(parent, parent_snapshot)) {
 				throw InvalidInputException("Reference \"%s\" is neither a branch nor a snapshot, so a branch "
 				                            "cannot descend from it",
 				                            parent);
 			}
-			pin = snapshot_pin.GetIndex();
+			if (!parent_snapshot.line.empty()) {
+				// What such a reference names is a branch's own state, and a child would have to carry that
+				// line with it to read the same rows. A pin alone would leave it reading the table.
+				throw InvalidInputException(
+				    "Snapshot \"%s\" is a captured line rather than the table at a commit, and a branch forked "
+				    "from it would read the table instead of that line. Fork from the branch itself instead.",
+				    parent);
+			}
+			pin = parent_snapshot.pin;
 			parent_is_snapshot = true;
 		}
 	}
@@ -861,11 +869,27 @@ static void PragmaGit4DataCreateSnapshot(ClientContext &context, const FunctionP
 	auto name = parameters.values[0].ToString();
 	CheckGit4DataReferenceName(name);
 	auto &transaction_manager = GetGit4DataTransactionManager(context);
-	// Pin at the newest commit, keep everything committed so far readable
 	CheckGit4DataReferenceLimit("snapshots", transaction_manager.UserSnapshotCount(),
 	                            transaction_manager.snapshot_limit);
+	// A second argument names a branch, and the reference then captures that branch's own line rather
+	// than the table: a branch that has been written to keeps its state in a table of its own, which a
+	// pin alone cannot point at. Without it the reference is the table as this commit saw it.
+	string line;
+	if (parameters.values.size() > 1) {
+		line = parameters.values[1].ToString();
+		Git4DataBranch branch;
+		if (!transaction_manager.branches.Get(line, branch)) {
+			throw InvalidInputException("Branch \"%s\" does not exist", line);
+		}
+		if (branch.storage_tables.empty()) {
+			throw InvalidInputException("Branch \"%s\" has no table of its own, so it has no line to capture "
+			                            "- it reads the table exactly as a snapshot does",
+			                            line);
+		}
+	}
+	// Pin at the newest commit, keep everything committed so far readable
 	if (!transaction_manager.snapshots.Create(name, transaction_manager.GetLastCommit(),
-	                                          Timestamp::GetCurrentTimestamp())) {
+	                                          Timestamp::GetCurrentTimestamp(), line)) {
 		throw InvalidInputException("Snapshot \"%s\" already exists", name);
 	}
 }
@@ -882,7 +906,7 @@ static string PragmaGit4DataSnapshots(ClientContext &context, const FunctionPara
 	auto entries = GetGit4DataTransactionManager(context).snapshots.List();
 	if (entries.empty()) {
 		return "SELECT NULL::VARCHAR AS snapshot_name, NULL::UBIGINT AS pinned_commit_id, "
-		       "NULL::TIMESTAMP AS created WHERE false";
+		       "NULL::TIMESTAMP AS created, NULL::VARCHAR AS line WHERE false";
 	}
 	string query = "SELECT * FROM (VALUES ";
 	for (idx_t i = 0; i < entries.size(); i++) {
@@ -891,10 +915,15 @@ static string PragmaGit4DataSnapshots(ClientContext &context, const FunctionPara
 		}
 		// Snapshot names are user input, escape them before splicing into SQL
 		auto name = StringUtil::Replace(entries[i].name, "'", "''");
-		query += StringUtil::Format("('%s'::VARCHAR, %llu::UBIGINT, '%s'::TIMESTAMP)", name, entries[i].pin,
-		                            Timestamp::ToString(entries[i].created));
+		// NULL rather than an empty string for the main line, so a listing says which references
+		// capture a branch's own state and which are the table at a commit
+		auto line = entries[i].line.empty()
+		                ? string("NULL::VARCHAR")
+		                : StringUtil::Format("'%s'::VARCHAR", StringUtil::Replace(entries[i].line, "'", "''"));
+		query += StringUtil::Format("('%s'::VARCHAR, %llu::UBIGINT, '%s'::TIMESTAMP, %s)", name, entries[i].pin,
+		                            Timestamp::ToString(entries[i].created), line);
 	}
-	query += ") t(snapshot_name, pinned_commit_id, created) ORDER BY pinned_commit_id";
+	query += ") t(snapshot_name, pinned_commit_id, created, line) ORDER BY pinned_commit_id";
 	return query;
 }
 
@@ -1069,8 +1098,10 @@ void PragmaFunctions::RegisterFunction(BuiltinFunctions &set) {
 
 	set.AddFunction(PragmaFunction::PragmaStatement("force_checkpoint", PragmaForceCheckpoint));
 
-	set.AddFunction(
-	    PragmaFunction::PragmaCall("git4data_create_snapshot", PragmaGit4DataCreateSnapshot, {LogicalType::VARCHAR}));
+	// the branch whose line to capture is optional, so a snapshot of the table as a commit saw it
+	// keeps working with one argument
+	set.AddFunction(PragmaFunction::PragmaCall("git4data_create_snapshot", PragmaGit4DataCreateSnapshot,
+	                                           {LogicalType::VARCHAR}, LogicalType::VARCHAR));
 	set.AddFunction(
 	    PragmaFunction::PragmaCall("git4data_drop_snapshot", PragmaGit4DataDropSnapshot, {LogicalType::VARCHAR}));
 	set.AddFunction(PragmaFunction::PragmaStatement("git4data_snapshots", PragmaGit4DataSnapshots));

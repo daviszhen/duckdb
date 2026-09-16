@@ -43,14 +43,19 @@ struct Git4DataSnapshot {
 	//! When the reference was taken, on the wall clock. Commit ids are a counter, not a time, so a
 	//! restore by time ("rewind to how it was at 14:30") has to be answered from this.
 	timestamp_t created;
+	//! The branch whose own line this captured, empty when it captured the table as a commit saw it.
+	//! A branch that has been written to lives in a table of its own, so a pin alone cannot name what
+	//! it holds; naming the branch is what makes that state readable as a reference.
+	string line;
 };
 
 //! Registry of pinned snapshots. Pinned bounds fold into the transaction manager's
 //! lowest visibility bound, which is what keeps superseded versions alive.
 class SnapshotRegistry {
 public:
-	//! Pin a new snapshot at the given commit id. Returns false if the name exists.
-	bool Create(const string &name, transaction_t pin, timestamp_t created);
+	//! Pin a new snapshot at the given commit id. Returns false if the name exists. When line names a
+	//! branch, the reference reads that branch's own line at the pin rather than the table.
+	bool Create(const string &name, transaction_t pin, timestamp_t created, const string &line = string());
 	//! Release a pinned snapshot. Returns false if the name is unknown.
 	bool Drop(const string &name);
 	vector<Git4DataSnapshot> List() const;
