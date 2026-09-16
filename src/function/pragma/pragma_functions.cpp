@@ -1,6 +1,18 @@
 #include "duckdb/function/pragma/pragma_functions.hpp"
 
 #include <algorithm>
+#include <cerrno>
+#include <cstring>
+
+#ifdef __APPLE__
+#include <sys/clonefile.h>
+#endif
+#ifdef __linux__
+#include <fcntl.h>
+#include <linux/fs.h>
+#include <sys/ioctl.h>
+#include <unistd.h>
+#endif
 
 #include "duckdb/common/enums/output_type.hpp"
 #include "duckdb/common/operator/cast_operators.hpp"
@@ -9,6 +21,7 @@
 #include "duckdb/main/client_context.hpp"
 #include "duckdb/main/database.hpp"
 #include "duckdb/main/database_manager.hpp"
+#include "duckdb/main/attached_database.hpp"
 #include "duckdb/main/query_profiler.hpp"
 #include "duckdb/main/secret/secret_manager.hpp"
 #include "duckdb/parallel/task_scheduler.hpp"
@@ -537,6 +550,70 @@ static void PragmaGit4DataBindBranchDelta(ClientContext &context, const Function
 		                            branch_name, source_table);
 	}
 	transaction_manager.branches.SetDeltaTable(branch_name, source_table, added_table, removed_table);
+}
+
+//! A copy-on-write clone of one file, which is what "zero-copy" means at this level: the copy costs
+//! nothing at the moment it is made and shares its blocks with the original until either side writes.
+static void Git4DataCloneFile(const string &source, const string &target) {
+#ifdef __APPLE__
+	if (clonefile(source.c_str(), target.c_str(), 0) != 0) {
+		throw InvalidInputException("Could not clone \"%s\" to \"%s\": %s", source, target, strerror(errno));
+	}
+#elif defined(__linux__)
+	auto source_fd = open(source.c_str(), O_RDONLY);
+	if (source_fd < 0) {
+		throw InvalidInputException("Could not open \"%s\": %s", source, strerror(errno));
+	}
+	auto target_fd = open(target.c_str(), O_WRONLY | O_CREAT | O_EXCL, 0644);
+	if (target_fd < 0) {
+		close(source_fd);
+		throw InvalidInputException("Could not create \"%s\": %s", target, strerror(errno));
+	}
+	auto result = ioctl(target_fd, FICLONE, source_fd);
+	auto saved_errno = errno;
+	close(target_fd);
+	close(source_fd);
+	if (result != 0) {
+		throw InvalidInputException("Could not clone \"%s\" to \"%s\": %s", source, target, strerror(saved_errno));
+	}
+#else
+	throw NotImplementedException("A zero-copy clone needs a file system that can do one, and this platform has no "
+	                              "clone call - the database can still be copied with the file system's own tools");
+#endif
+}
+
+//! Clone the database into a file of its own. The clone is a copy of the *file*, so it holds everything
+//! committed; the write-ahead log comes with it when there is one, or the clone would be missing what
+//! the log holds. Writing to the clone afterwards leaves the original alone and the other way round,
+//! which is the file system's copy-on-write and not something this feature has to maintain.
+static string PragmaGit4DataCloneDatabase(ClientContext &context, const FunctionParameters &parameters) {
+	auto target = parameters.values[0].ToString();
+	if (target.empty()) {
+		throw InvalidInputException("A clone needs a path to write to");
+	}
+	auto &db_manager = DatabaseManager::Get(context);
+	auto attached = db_manager.GetDatabase(context, DatabaseManager::GetDefaultDatabase(context));
+	auto source = attached->StoredPath();
+	if (source.empty()) {
+		throw InvalidInputException("This database has no file of its own, so there is nothing to clone");
+	}
+	auto &fs = FileSystem::GetFileSystem(context);
+	if (fs.FileExists(target)) {
+		throw InvalidInputException("\"%s\" already exists - a clone does not overwrite", target);
+	}
+	Git4DataCloneFile(source, target);
+	// the log is part of the database until the next checkpoint merges it
+	auto wal = source + ".wal";
+	auto cloned_wal = target + ".wal";
+	if (fs.FileExists(wal)) {
+		Git4DataCloneFile(wal, cloned_wal);
+	}
+	auto escape = [](const string &value) {
+		return StringUtil::Replace(value, "'", "''");
+	};
+	return StringUtil::Format("SELECT '%s'::VARCHAR AS source, '%s'::VARCHAR AS clone, "
+	                          "CASE WHEN '%s' = '%s' THEN true ELSE false END AS with_log",
+	                          escape(source), escape(target), escape(cloned_wal), escape(target));
 }
 
 //! The columns of one image compared against the other's, for telling a real merge conflict from two
@@ -1195,6 +1272,8 @@ void PragmaFunctions::RegisterFunction(BuiltinFunctions &set) {
 	set.AddFunction(PragmaFunction::PragmaStatement("git4data_branches", PragmaGit4DataBranches));
 	set.AddFunction(PragmaFunction::PragmaCall("git4data_materialize", PragmaGit4DataMaterialize,
 	                                           {LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR}));
+	set.AddFunction(
+	    PragmaFunction::PragmaCall("git4data_clone_database", PragmaGit4DataCloneDatabase, {LogicalType::VARCHAR}));
 	set.AddFunction(PragmaFunction::PragmaCall(
 	    "git4data_bind_branch_delta", PragmaGit4DataBindBranchDelta,
 	    {LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR}));
