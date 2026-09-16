@@ -42,6 +42,13 @@ SELECT count(*), min(k) FROM t
 ----
 700	400
 
+# probe_all is the same shape of answer over every physical row rather than over the rows a bound
+# reaches, so it sees the deleted ones too
+query III
+PRAGMA git4data_probe_all('t')
+----
+1100	0	5099
+
 # state reports the timeline, so it is asserted as running and not as values
 statement ok
 PRAGMA git4data_state
