@@ -1,0 +1,119 @@
+# name: test/sql/git4data/multi_table_branch.test
+# description: One branch holding a line for more than one source table
+# group: [git4data]
+
+load {TEST_DIR}/multi_table_branch.db
+
+statement ok
+CREATE TABLE t1 (k INTEGER PRIMARY KEY, v INTEGER)
+
+statement ok
+CREATE TABLE t2 (k INTEGER PRIMARY KEY, v INTEGER)
+
+statement ok
+INSERT INTO t1 SELECT range, range FROM range(10)
+
+statement ok
+INSERT INTO t2 SELECT range, range * 2 FROM range(10)
+
+statement ok
+CHECKPOINT
+
+# A branch is a line, not a line for one table: the storage mapping is keyed by the source table, so a
+# branch can have a table of its own for each of them and be read as either.
+statement ok
+PRAGMA git4data_create_branch('b', '')
+
+statement ok
+PRAGMA git4data_materialize('t1', 'b', 't1_b')
+
+statement ok
+PRAGMA git4data_materialize('t2', 'b', 't2_b')
+
+statement ok
+UPDATE t1_b SET v = -1 WHERE k = 1
+
+statement ok
+UPDATE t2_b SET v = -2 WHERE k = 2
+
+query IIII
+SELECT (SELECT v FROM t1 AT (BRANCH => 'b') WHERE k = 1), (SELECT v FROM t2 AT (BRANCH => 'b') WHERE k = 2),
+       (SELECT count(*) FROM t1 AT (BRANCH => 'b')), (SELECT count(*) FROM t2 AT (BRANCH => 'b'))
+----
+-1	-2	10	10
+
+# and a fork takes both of those lines, because it takes what the branch holds
+statement ok
+PRAGMA git4data_create_branch('c', 'b')
+
+query IIII
+SELECT (SELECT v FROM t1 AT (BRANCH => 'c') WHERE k = 1), (SELECT v FROM t2 AT (BRANCH => 'c') WHERE k = 2),
+       (SELECT count(*) FROM t1 AT (BRANCH => 'c')), (SELECT count(*) FROM t2 AT (BRANCH => 'c'))
+----
+-1	-2	10	10
+
+# a delta works per source table too: one branch can differ from t1 by removing a key and from t2 by
+# adding a row, and each read applies only its own
+statement ok
+PRAGMA git4data_create_branch('e', '')
+
+statement ok
+CREATE TABLE e1_add (k INTEGER PRIMARY KEY, v INTEGER)
+
+statement ok
+CREATE TABLE e1_del (k INTEGER PRIMARY KEY)
+
+statement ok
+CREATE TABLE e2_add (k INTEGER PRIMARY KEY, v INTEGER)
+
+statement ok
+CREATE TABLE e2_del (k INTEGER PRIMARY KEY)
+
+statement ok
+PRAGMA git4data_bind_branch_delta('t1', 'e', 'e1_add', 'e1_del')
+
+statement ok
+PRAGMA git4data_bind_branch_delta('t2', 'e', 'e2_add', 'e2_del')
+
+statement ok
+INSERT INTO e1_del VALUES (1)
+
+statement ok
+INSERT INTO e2_add VALUES (500, 500)
+
+query IIII
+SELECT (SELECT count(*) FROM t1 AT (BRANCH => 'e')), (SELECT count(*) FROM t2 AT (BRANCH => 'e')),
+       (SELECT count(*) FROM t1 AT (BRANCH => 'e') WHERE k = 1), (SELECT v FROM t2 AT (BRANCH => 'e') WHERE k = 500)
+----
+9	11	0	500
+
+# dropping a branch with two lines drops the tables it was given and leaves its sources alone
+statement ok
+PRAGMA git4data_drop_branch('c')
+
+statement ok
+PRAGMA git4data_drop_branch('b')
+
+query II
+SELECT (SELECT count(*) FROM t1), (SELECT count(*) FROM t2)
+----
+10	10
+
+statement error
+SELECT count(*) FROM t1_b
+----
+<REGEX>:.*Table with name t1_b does not exist.*
+
+statement error
+SELECT count(*) FROM t2_b
+----
+<REGEX>:.*Table with name t2_b does not exist.*
+
+# the delta's tables are the caller's, so dropping that branch leaves them where they are
+statement ok
+PRAGMA git4data_drop_branch('e')
+
+query II
+SELECT (SELECT count(*) FROM e1_del), (SELECT count(*) FROM e2_add)
+----
+1	1

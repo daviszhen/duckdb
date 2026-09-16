@@ -363,24 +363,24 @@ static string PragmaGit4DataPick(ClientContext &context, const FunctionParameter
 				presence_base += " OR ";
 				presence_source += " OR ";
 			}
-			key_list_joined += "tk." + quoted;
-			join_live += StringUtil::Format("l.%s = tk.%s", quoted, quoted);
-			join_base += StringUtil::Format("b.%s = tk.%s", quoted, quoted);
-			join_source += StringUtil::Format("s.%s = tk.%s", quoted, quoted);
+			key_list_joined += "g4d_tk." + quoted;
+			join_live += StringUtil::Format("g4d_l.%s = g4d_tk.%s", quoted, quoted);
+			join_base += StringUtil::Format("g4d_b.%s = g4d_tk.%s", quoted, quoted);
+			join_source += StringUtil::Format("g4d_s.%s = g4d_tk.%s", quoted, quoted);
 			// a key is never null, so a null one in an outer join means that side has no such row
-			presence_base += StringUtil::Format("(l.%s IS NULL) <> (b.%s IS NULL)", quoted, quoted);
-			presence_source += StringUtil::Format("(l.%s IS NULL) <> (s.%s IS NULL)", quoted, quoted);
+			presence_base += StringUtil::Format("(g4d_l.%s IS NULL) <> (g4d_b.%s IS NULL)", quoted, quoted);
+			presence_source += StringUtil::Format("(g4d_l.%s IS NULL) <> (g4d_s.%s IS NULL)", quoted, quoted);
 		}
-		auto live_key = "l." + KeywordHelper::WriteOptionallyQuoted(key_columns[0]);
+		auto live_key = "g4d_l." + KeywordHelper::WriteOptionallyQuoted(key_columns[0]);
 		auto changed_from_base = StringUtil::Format("((%s) OR (%s IS NOT NULL AND NOT (%s)))", presence_base, live_key,
-		                                            BuildGit4DataRowComparison(table, "l", "b"));
+		                                            BuildGit4DataRowComparison(table, "g4d_l", "g4d_b"));
 		auto differs_from_source = StringUtil::Format("((%s) OR (%s IS NOT NULL AND NOT (%s)))", presence_source,
-		                                              live_key, BuildGit4DataRowComparison(table, "l", "s"));
+		                                              live_key, BuildGit4DataRowComparison(table, "g4d_l", "g4d_s"));
 		conflict_table = StringUtil::Format(
-		    "CREATE OR REPLACE TEMP TABLE g4d_pick_conflicts AS WITH tk AS (SELECT %s FROM %s WHERE change IN "
-		    "('added', 'removed', 'changed')), l AS (SELECT * FROM %s), b AS (SELECT * FROM %s), s AS (SELECT * "
-		    "FROM %s) SELECT %s FROM tk LEFT JOIN l ON (%s) LEFT JOIN b ON (%s) LEFT JOIN s ON (%s) WHERE (%s) AND "
-		    "(%s);\n",
+		    "CREATE OR REPLACE TEMP TABLE g4d_pick_conflicts AS WITH g4d_tk AS (SELECT %s FROM %s WHERE change IN "
+		    "('added', 'removed', 'changed')), g4d_l AS (SELECT * FROM %s), g4d_b AS (SELECT * FROM %s), g4d_s AS "
+		    "(SELECT * FROM %s) SELECT %s FROM g4d_tk LEFT JOIN g4d_l ON (%s) LEFT JOIN g4d_b ON (%s) LEFT JOIN "
+		    "g4d_s ON (%s) WHERE (%s) AND (%s);\n",
 		    key_list, diff, quoted_table, base_image, source_image, key_list_joined, join_live, join_base, join_source,
 		    changed_from_base, differs_from_source);
 	}
@@ -782,9 +782,9 @@ static string PragmaGit4DataMerge(ClientContext &context, const FunctionParamete
 			key_match_by += " AND ";
 		}
 		key_list += quoted;
-		key_list_both += "b." + quoted;
-		key_match_xy += "x." + quoted + " = y." + quoted;
-		key_match_by += "y." + quoted + " = b." + quoted;
+		key_list_both += "g4d_b." + quoted;
+		key_match_xy += "g4d_x." + quoted + " = g4d_y." + quoted;
+		key_match_by += "g4d_y." + quoted + " = g4d_b." + quoted;
 	}
 	auto quoted_table = KeywordHelper::WriteOptionallyQuoted(table_name);
 	auto quoted_into = KeywordHelper::WriteOptionallyQuoted(merge_into);
@@ -796,12 +796,12 @@ static string PragmaGit4DataMerge(ClientContext &context, const FunctionParamete
 	    FormatGit4DataAtClause(table_name, right_name, ResolveGit4DataReference(transaction_manager, right_name));
 
 	string result =
-	    StringUtil::Format("CREATE OR REPLACE TEMP TABLE g4d_merge_conflicts AS WITH l AS (SELECT %s FROM %s), "
-	                       "r AS (SELECT %s FROM %s), both_sides AS (SELECT %s FROM l INTERSECT SELECT %s FROM r) "
-	                       "SELECT %s FROM both_sides b WHERE NOT EXISTS (SELECT 1 FROM (SELECT * FROM %s) x JOIN "
-	                       "(SELECT * FROM %s) y ON (%s) WHERE %s AND (%s));\n",
+	    StringUtil::Format("CREATE OR REPLACE TEMP TABLE g4d_merge_conflicts AS WITH g4d_l AS (SELECT %s FROM %s), "
+	                       "g4d_r AS (SELECT %s FROM %s), g4d_both AS (SELECT %s FROM g4d_l INTERSECT SELECT %s FROM "
+	                       "g4d_r) SELECT %s FROM g4d_both g4d_b WHERE NOT EXISTS (SELECT 1 FROM (SELECT * FROM %s) "
+	                       "g4d_x JOIN (SELECT * FROM %s) g4d_y ON (%s) WHERE %s AND (%s));\n",
 	                       key_list, diff_left, key_list, diff_right, key_list, key_list, key_list_both, quoted_into,
-	                       right_image, key_match_xy, key_match_by, BuildGit4DataRowComparison(table, "x", "y"));
+	                       right_image, key_match_xy, key_match_by, BuildGit4DataRowComparison(table, "g4d_x", "g4d_y"));
 	if (policy == "fail") {
 		result += "SELECT CASE WHEN EXISTS (SELECT 1 FROM g4d_merge_conflicts) THEN error('merge conflict: use "
 		          "policy skip or accept, or resolve it first') ELSE 0 END;\n";

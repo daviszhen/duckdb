@@ -719,6 +719,22 @@ static vector<Value> Git4DataDiffRowKey(DataChunk &chunk, idx_t key_count, idx_t
 	return key;
 }
 
+//! A key as one string, for remembering which left rows a right row accounted for. The hash of a key is
+//! only a bucket - two keys that share one are different rows, and treating them as the same row loses
+//! the rows one of them had: a composite key whose parts combined to the same hash made a diff report no
+//! removal at all, measured. Length-prefixed, so two different tuples cannot produce the same string.
+static string Git4DataDiffKeyString(const vector<Value> &key) {
+	string result;
+	for (auto &value : key) {
+		auto text = value.ToString();
+		result += to_string(text.size());
+		result += ':';
+		result += text;
+		result += '|';
+	}
+	return result;
+}
+
 static bool Git4DataDiffSameKey(const vector<Value> &left, const vector<Value> &right) {
 	if (left.size() != right.size()) {
 		return false;
@@ -942,7 +958,8 @@ static void Git4DataDiffFunction(ClientContext &context, TableFunctionInput &dat
 			state.phase = Git4DataDiffState::Phase::RIGHT;
 		}
 		if (state.phase == Git4DataDiffState::Phase::RIGHT) {
-			unordered_set<hash_t> matched;
+			// which left rows a right row accounted for, by the key itself rather than by its hash
+			unordered_set<string> matched;
 			Git4DataDiffCollect(
 			    context, state, state.right_scan, state.right_bound, state.right_added_table, state.right_delta_bound,
 			    &state.right_removed_keys, [&](DataChunk &chunk, row_t row_id, idx_t row) {
@@ -954,7 +971,7 @@ static void Git4DataDiffFunction(ClientContext &context, TableFunctionInput &dat
 						    if (!Git4DataDiffSameKey(candidate.key, key)) {
 							    continue;
 						    }
-						    matched.insert(hash);
+						    matched.insert(Git4DataDiffKeyString(key));
 						    auto values = Git4DataDiffRowValues(chunk, state.key_count, state.value_count, row);
 						    if (!Git4DataDiffSameValues(candidate.values, values)) {
 							    state.changed.push_back(Git4DataDiffState::Change {candidate.row_id, row_id, key});
@@ -965,10 +982,10 @@ static void Git4DataDiffFunction(ClientContext &context, TableFunctionInput &dat
 				    state.added.push_back(Git4DataDiffState::Change {row_id, NO_COUNTERPART, key});
 			    });
 			for (auto &entry : state.left_by_key) {
-				if (matched.find(entry.first) != matched.end()) {
-					continue;
-				}
 				for (auto &candidate : entry.second) {
+					if (matched.find(Git4DataDiffKeyString(candidate.key)) != matched.end()) {
+						continue;
+					}
 					state.removed.push_back(
 					    Git4DataDiffState::Change {candidate.row_id, NO_COUNTERPART, candidate.key});
 				}

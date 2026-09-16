@@ -350,3 +350,53 @@ query I
 SELECT count(*) FROM t AT (BRANCH => 'e') WHERE k = 8000
 ----
 1
+
+# A composite key is a key like any other, and the diff has to report a removal under one. It did not:
+# which left rows a right row had accounted for was remembered by the *hash* of the key, and two
+# composite keys that share a hash are two rows - so once one of them matched, the other's removal was
+# dropped. Measured before the fix: a delta that removed a key reported `added` only, no `removed`.
+statement ok
+CREATE TABLE comp (a INTEGER, b INTEGER, v INTEGER, PRIMARY KEY (a, b))
+
+statement ok
+INSERT INTO comp SELECT CAST(floor(range / 5) AS INTEGER) AS a, range % 5 AS b, range AS v FROM range(25)
+
+statement ok
+CHECKPOINT
+
+statement ok
+PRAGMA git4data_create_branch('cr', '')
+
+statement ok
+PRAGMA git4data_create_branch('cd', 'cr')
+
+statement ok
+CREATE TABLE cd_add (a INTEGER, b INTEGER, v INTEGER)
+
+statement ok
+CREATE TABLE cd_del (a INTEGER, b INTEGER)
+
+statement ok
+PRAGMA git4data_bind_branch_delta('comp', 'cd', 'cd_add', 'cd_del')
+
+statement ok
+INSERT INTO cd_del VALUES (2, 3)
+
+statement ok
+INSERT INTO cd_add VALUES (9, 9, 999)
+
+statement ok
+PRAGMA git4data_create_snapshot('comp_base')
+
+# both differences are reported: the row the delta removed and the row it added
+query III
+SELECT change, a, b FROM git4data_diff('comp', 'comp_base', 'cd') ORDER BY change, a, b
+----
+added	9	9
+removed	2	3
+
+# and the branch itself reads 25 rows, the base's 25 less one plus one
+query I
+SELECT count(*) FROM comp AT (BRANCH => 'cd')
+----
+25
