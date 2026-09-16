@@ -561,6 +561,31 @@ static string PragmaGit4DataMerge(ClientContext &context, const FunctionParamete
 					break;
 				}
 			}
+			if (unwritten) {
+				// One unchanged insertion cannot tell an empty copy from one that has had rows inserted
+				// since, so ask the source instead: a branch's table is made from the branch's pinned
+				// image, so if the source table held no rows at that commit then the copy held none
+				// either - and a table that holds rows now has been written to.
+				idx_t rows_at_copy = 0;
+				if (storage_groups.GetTotalRows() > 0 || storage_groups.GetRowGroupCount() > 0) {
+					auto &source_table =
+					    Catalog::GetEntry<TableCatalogEntry>(context, QualifiedName(Identifier(table_name)));
+					auto &source_groups = *source_table.GetStorage().GetRowGroupCollection();
+					ScanOptions pinned(
+					    TransactionData(MAX_TRANSACTION_ID, VisibilityBound::Through(ancestor_branch.pin)));
+					pinned.insert_type = InsertedScanType::ALL_ROWS;
+					pinned.delete_type = DeletedScanType::OMIT_COMMITTED_DELETES;
+					for (idx_t i = 0; i < source_groups.GetRowGroupCount(); i++) {
+						auto row_group = source_groups.GetRowGroup(NumericCast<int64_t>(i));
+						if (row_group) {
+							rows_at_copy += row_group->GetRowCountFor(pinned);
+						}
+					}
+					if (rows_at_copy == 0) {
+						unwritten = false;
+					}
+				}
+			}
 			if (!unwritten) {
 				throw InvalidInputException(
 				    "Ancestor \"%s\" has been written to since it was given table \"%s\", so its state at the "
@@ -773,8 +798,8 @@ static string PragmaGit4DataBranches(ClientContext &context, const FunctionParam
 		// a table of its own has moved on from the commit it was forked at, which is why a fork from it
 		// and a merge into it are not the simple operations they look like. It is reported so that is
 		// visible rather than something a caller has to infer from a conflict.
-		query += StringUtil::Format("('%s'::VARCHAR, %llu::UBIGINT, '%s'::VARCHAR, '%s'::TIMESTAMP, %s::BOOLEAN)",
-		                            name, entries[i].pin, parent, Timestamp::ToString(entries[i].created),
+		query += StringUtil::Format("('%s'::VARCHAR, %llu::UBIGINT, '%s'::VARCHAR, '%s'::TIMESTAMP, %s::BOOLEAN)", name,
+		                            entries[i].pin, parent, Timestamp::ToString(entries[i].created),
 		                            entries[i].storage_tables.empty() ? "false" : "true");
 	}
 	query += ") t(branch_name, pinned_commit_id, parent, created, has_storage) ORDER BY pinned_commit_id, "

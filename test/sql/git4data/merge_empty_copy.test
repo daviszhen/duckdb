@@ -1,0 +1,64 @@
+# name: test/sql/git4data/merge_empty_copy.test
+# description: A merge whose ancestor was given an empty copy and has been written to since
+# group: [git4data]
+
+load {TEST_DIR}/merge_empty_copy.db
+
+statement ok
+CREATE TABLE t (k INTEGER PRIMARY KEY, v INTEGER)
+
+statement ok
+CHECKPOINT
+
+# a line and a child of it, forked while the line still has no table of its own
+statement ok
+PRAGMA git4data_create_branch('p', '')
+
+statement ok
+PRAGMA git4data_create_branch('c', 'p')
+
+# the table p is given is empty, because the source is: this is the shape that "every row shares one
+# insert id" cannot tell from a copy that has had rows inserted since
+statement ok
+PRAGMA git4data_materialize('t', 'p', 't_p')
+
+statement ok
+CHECKPOINT
+
+query I
+SELECT count(*) FROM t AT (BRANCH => 'p')
+----
+0
+
+# one insert into p's own table, in one statement
+statement ok
+INSERT INTO t_p VALUES (1, 1)
+
+statement ok
+CHECKPOINT
+
+query I
+SELECT count(*) FROM t AT (BRANCH => 'p')
+----
+1
+
+# The state p and c parted at is the empty table, and p's table no longer holds that state, so a merge
+# would use p's row as its base. It is refused before anything is applied.
+statement error
+PRAGMA git4data_merge('t', 'p', 'c', 'fail')
+----
+<REGEX>:.*Ancestor "p" has been written to since it was given table "t_p".*
+
+query II
+SELECT (SELECT count(*) FROM t_p), (SELECT count(*) FROM t)
+----
+1	0
+
+# A second insert changes nothing about that, and a merge is still refused.
+statement ok
+INSERT INTO t_p VALUES (2, 2)
+
+statement error
+PRAGMA git4data_merge('t', 'p', 'c', 'fail')
+----
+<REGEX>:.*Ancestor "p" has been written to since it was given table "t_p".*
