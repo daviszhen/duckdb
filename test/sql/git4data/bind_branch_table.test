@@ -1,0 +1,76 @@
+# name: test/sql/git4data/bind_branch_table.test
+# description: Binding a branch to a table of its own, which is what materialize does last
+# group: [git4data]
+
+load {TEST_DIR}/bind_branch_table.db
+
+statement ok
+CREATE TABLE t (k INTEGER PRIMARY KEY, v INTEGER)
+
+statement ok
+INSERT INTO t SELECT range, range FROM range(10)
+
+statement ok
+CHECKPOINT
+
+statement ok
+PRAGMA git4data_create_branch('b', '')
+
+query I
+SELECT count(*) FROM t AT (BRANCH => 'b')
+----
+10
+
+# a second table with the same shape, for the branch to be pointed at
+statement ok
+CREATE TABLE t_alt (k INTEGER PRIMARY KEY, v INTEGER)
+
+statement ok
+INSERT INTO t_alt VALUES (1, 999)
+
+statement ok
+CHECKPOINT
+
+# binding is what tells the reads that the branch has a line of its own, so the branch answers from
+# that table from here on - which is why materialize does the copy first and binds afterwards
+statement ok
+PRAGMA git4data_bind_branch_table('t', 'b', 't_alt')
+
+query II
+SELECT (SELECT count(*) FROM t AT (BRANCH => 'b')), (SELECT v FROM t AT (BRANCH => 'b') WHERE k = 1)
+----
+1	999
+
+# the table the branch was forked from is untouched
+query I
+SELECT count(*) FROM t
+----
+10
+
+# a binding that names a branch or a table that is not there is refused rather than promised, because
+# the reads would then have to break
+statement error
+PRAGMA git4data_bind_branch_table('t', 'nope', 't_alt')
+----
+<REGEX>:.*Branch "nope" does not exist.*
+
+statement error
+PRAGMA git4data_bind_branch_table('t', 'b', 'nowhere')
+----
+<REGEX>:.*Table with name nowhere does not exist.*
+
+statement error
+PRAGMA git4data_bind_branch_table('nowhere', 'b', 't_alt')
+----
+<REGEX>:.*Table with name nowhere does not exist.*
+
+# and the binding survives a reopen, because it is part of the branch
+statement ok
+CHECKPOINT
+
+restart
+
+query II
+SELECT (SELECT count(*) FROM t AT (BRANCH => 'b')), (SELECT v FROM t AT (BRANCH => 'b') WHERE k = 1)
+----
+1	999
