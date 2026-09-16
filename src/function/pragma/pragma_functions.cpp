@@ -470,6 +470,9 @@ static void PragmaGit4DataBindBranchTable(ClientContext &context, const Function
 	Catalog::GetEntry<TableCatalogEntry>(context, QualifiedName(Identifier(source_table)));
 	Catalog::GetEntry<TableCatalogEntry>(context, QualifiedName(Identifier(storage_table)));
 	transaction_manager.branches.SetStorageTable(branch_name, source_table, storage_table);
+	// the copy is the branch's line from here on, so a delta beside it would be a second one that nothing
+	// reads - the branch reads its own table the moment it has one
+	transaction_manager.branches.ClearDeltaTable(branch_name, source_table);
 }
 
 //! Record that a branch differs from its base by a delta rather than by a copy of it. The two tables
@@ -522,6 +525,16 @@ static void PragmaGit4DataBindBranchDelta(ClientContext &context, const Function
 		throw InvalidInputException("Table \"%s\" holds the keys removed from \"%s\", so it needs exactly those "
 		                            "%llu key column(s), in the order the source declares them",
 		                            removed_table, source_table, expected_key_names.size());
+	}
+	for (auto &storage_entry : branch.storage_tables) {
+		if (storage_entry.first != source_table) {
+			continue;
+		}
+		// one line, one source: a branch that already reads a table of its own reads that, and a delta
+		// beside it would be a second answer to the same question
+		throw InvalidInputException("Branch \"%s\" already has a table of its own for \"%s\", so it reads that "
+		                            "rather than a delta. A delta is for a branch that has no copy.",
+		                            branch_name, source_table);
 	}
 	transaction_manager.branches.SetDeltaTable(branch_name, source_table, added_table, removed_table);
 }

@@ -1,4 +1,6 @@
 #include "duckdb/transaction/duck_transaction_manager.hpp"
+
+#include "duckdb/common/numeric_utils.hpp"
 #include "duckdb/logging/log_manager.hpp"
 
 #include "duckdb/main/client_data.hpp"
@@ -112,6 +114,23 @@ void BranchRegistry::SetStorageTable(const string &branch, const string &source_
 	}
 	entry->second.storage_tables.emplace_back(source_table, storage_table);
 	dirty.store(true);
+}
+
+void BranchRegistry::ClearDeltaTable(const string &branch, const string &source_table) {
+	lock_guard<mutex> guard(lock);
+	auto entry = branches.find(branch);
+	if (entry == branches.end()) {
+		return;
+	}
+	auto &deltas = entry->second.deltas;
+	for (idx_t i = 0; i < deltas.size(); i++) {
+		if (deltas[i].source != source_table) {
+			continue;
+		}
+		deltas.erase(deltas.begin() + NumericCast<int64_t>(i));
+		dirty.store(true);
+		return;
+	}
 }
 
 void BranchRegistry::SetDeltaTable(const string &branch, const string &source_table, const string &added,

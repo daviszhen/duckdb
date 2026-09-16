@@ -155,6 +155,48 @@ struct Git4DataLineState {
 	bool has_delta = false;
 };
 
+//! A delta's two tables have to be able to stand in for the source: the added rows are read as rows of
+//! it, and the removed table names its rows by key. Checked when the delta is named and again on every
+//! read, because DDL afterwards can leave either of them unable to - which the read would otherwise
+//! discover as an index out of range rather than as a sentence.
+static void Git4DataCheckDeltaColumns(TableCatalogEntry &source, TableCatalogEntry &added, TableCatalogEntry &removed) {
+	auto &source_columns = source.GetColumns();
+	if (added.GetColumns().GetColumnNames() != source_columns.GetColumnNames() ||
+	    added.GetColumns().GetColumnTypes() != source_columns.GetColumnTypes()) {
+		throw InvalidInputException("Table \"%s\" holds the rows added to \"%s\", and it no longer has that table's "
+		                            "columns",
+		                            added.name.GetIdentifierName(), source.name.GetIdentifierName());
+	}
+	vector<StorageIndex> key_columns;
+	vector<LogicalType> key_types;
+	vector<Identifier> key_names;
+	Git4DataDiffPrimaryKey(source, key_columns, key_types, key_names);
+	vector<string> expected_names;
+	vector<LogicalType> expected_types;
+	for (idx_t i = 0; i < source_columns.LogicalColumnCount(); i++) {
+		auto &column = source_columns.GetColumn(LogicalIndex(i));
+		auto name = column.Name().GetIdentifierName();
+		bool is_key = false;
+		for (auto &key_name : key_names) {
+			if (key_name.GetIdentifierName() == name) {
+				is_key = true;
+				break;
+			}
+		}
+		if (!is_key) {
+			continue;
+		}
+		expected_names.push_back(name);
+		expected_types.push_back(column.Type());
+	}
+	if (removed.GetColumns().GetColumnNames() != expected_names ||
+	    removed.GetColumns().GetColumnTypes() != expected_types) {
+		throw InvalidInputException("Table \"%s\" holds the keys removed from \"%s\", and it no longer has that "
+		                            "table's key columns",
+		                            removed.name.GetIdentifierName(), source.name.GetIdentifierName());
+	}
+}
+
 static Git4DataLineState ResolveGit4DataLineState(ClientContext &context, DuckTransactionManager &transaction_manager,
                                                   const string &table_name, const Git4DataBranch &branch,
                                                   VisibilityBound at) {
@@ -198,6 +240,8 @@ static Git4DataLineState ResolveGit4DataLineState(ClientContext &context, DuckTr
 		auto removed_table = Catalog::GetEntry<TableCatalogEntry>(context, QualifiedName(Identifier(delta.removed)),
 		                                                          OnEntryNotFound::RETURN_NULL);
 		if (added_table && removed_table) {
+			auto &source = Catalog::GetEntry<TableCatalogEntry>(context, QualifiedName(Identifier(table_name)));
+			Git4DataCheckDeltaColumns(source, *added_table, *removed_table);
 			added = delta.added;
 			removed = delta.removed;
 		}

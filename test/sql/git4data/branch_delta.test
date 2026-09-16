@@ -14,7 +14,10 @@ statement ok
 CHECKPOINT
 
 statement ok
-PRAGMA git4data_create_branch('base', '')
+PRAGMA git4data_create_branch('root', '')
+
+statement ok
+PRAGMA git4data_create_branch('base', 'root')
 
 # the branch is given no copy. What it changes is said with two tables of its own: rows it has that
 # its base does not, and keys it has removed from its base.
@@ -155,6 +158,46 @@ SELECT (SELECT count(*) FROM t AT (BRANCH => 'child')),
 ----
 100	0	1	2000
 
+# A delta branch is an ordinary reference to everything else, and worth measuring rather than assuming:
+# a merge takes its changes into a branch that has a table of its own,
+statement ok
+PRAGMA git4data_create_branch('target', 'root')
+
+statement ok
+PRAGMA git4data_materialize('t', 'target', 't_target')
+
+statement ok
+INSERT INTO t_del VALUES (11)
+
+statement ok
+PRAGMA git4data_merge('t', 'target', 'base', 'fail')
+
+query II
+SELECT (SELECT count(*) FROM t_target WHERE k = 11), (SELECT v FROM t_target WHERE k = 3000)
+----
+0	3000
+
+# a pick applies them to the live table,
+statement ok
+PRAGMA git4data_create_snapshot('before_pick')
+
+statement ok
+PRAGMA git4data_pick('t', 'base', 'before_pick', 'overwrite')
+
+query II
+SELECT (SELECT v FROM t WHERE k = 3000), (SELECT count(*) FROM t WHERE k = 11)
+----
+3000	0
+
+# and a restore rewinds it to that line
+statement ok
+PRAGMA git4data_restore('t', 'base')
+
+query II
+SELECT (SELECT v FROM t WHERE k = 3000), (SELECT count(*) FROM t WHERE k = 11)
+----
+3000	0
+
 # the delta is part of the branch, so it comes back with the file
 statement ok
 CHECKPOINT
@@ -166,14 +209,79 @@ SELECT (SELECT count(*) FROM t AT (BRANCH => 'base')),
        (SELECT v FROM t AT (BRANCH => 'base') WHERE k = 2000),
        (SELECT count(*) FROM t AT (BRANCH => 'base') WHERE k = 5)
 ----
-100	2000	0
+99	2000	0
 
-# materializing turns the delta into a copy of the branch's line, and that line is not the base's
+# A read after DDL lands on the delta's tables, and those have to be able to stand in for the source:
+# the added rows are read as the source's rows. Saying so is better than the index-out-of-range the read
+# used to raise, and the read recovers as soon as the schemas match again. It runs here because dropping
+# a column discards its data, which the assertions above are about.
+statement ok
+ALTER TABLE t_add DROP COLUMN v
+
+statement error
+SELECT count(*) FROM t AT (BRANCH => 'base')
+----
+<REGEX>:.*holds the rows added to "t", and it no longer has that table's columns.*
+
+statement ok
+ALTER TABLE t_add ADD COLUMN v INTEGER
+
+query I
+SELECT count(*) FROM t AT (BRANCH => 'base')
+----
+99
+
+# the source's schema is the other half of that
+statement ok
+ALTER TABLE t DROP COLUMN v
+
+statement error
+SELECT count(*) FROM t AT (BRANCH => 'base')
+----
+<REGEX>:.*holds the rows added to "t", and it no longer has that table's columns.*
+
+statement ok
+ALTER TABLE t ADD COLUMN v INTEGER
+
+# An addition whose key the base already has is two rows: a delta says what to add and what to remove
+# rather than what to replace, so a changed row is an added row and a removed key, as above. It is
+# removed again here because a copy enforces the key, and this line is about to be copied.
+statement ok
+INSERT INTO t_add VALUES (12, 1200)
+
+query I
+SELECT count(*) FROM t AT (BRANCH => 'base') WHERE k = 12
+----
+2
+
+statement ok
+DELETE FROM t_add WHERE k = 12
+
+# materializing turns the delta into a copy of the branch's line, and that line is not the base's: the
+# removed key is still gone and the added row is there, which is what the counts say
 statement ok
 PRAGMA git4data_materialize('t', 'base', 't_base')
 
 query III
 SELECT (SELECT count(*) FROM t_base), (SELECT count(*) FROM t_base WHERE k = 5),
-       (SELECT v FROM t_base WHERE k = 3000)
+       (SELECT count(*) FROM t_base WHERE k = 3000)
 ----
-100	0	3000
+99	0	1
+
+# The copy is the branch's line from then on, so the delta is cleared rather than left beside it: two
+# answers to "what does this branch hold" is what silence looks like. The delta's tables are the
+# caller's and stay where they are.
+statement ok
+INSERT INTO t_add VALUES (4000, 4000)
+
+query II
+SELECT (SELECT count(*) FROM t AT (BRANCH => 'base') WHERE k = 4000),
+       (SELECT count(*) FROM t_add WHERE k = 4000)
+----
+0	1
+
+# and a delta cannot be bound to a branch that already has a table of its own
+statement error
+PRAGMA git4data_bind_branch_delta('t', 'base', 't_add', 't_del')
+----
+<REGEX>:.*already has a table of its own for "t", so it reads that rather than a delta.*

@@ -167,8 +167,12 @@ public:
 	}
 	//! Give a branch its own table for a source table, so writes to it no longer touch the source
 	void SetStorageTable(const string &branch, const string &source_table, const string &storage_table);
-	//! Record that a branch differs from its base by a delta rather than by a copy of it
+	//! Record that a branch differs from its base by a delta rather than by a copy of it. A branch with a
+	//! table of its own for this source keeps that instead: one line, one source of truth.
 	void SetDeltaTable(const string &branch, const string &source_table, const string &added, const string &removed);
+	//! Forget a branch's delta for a source table, which is what giving it a table of its own does - the
+	//! copy is the line from then on, and a delta beside it would be read by nothing.
+	void ClearDeltaTable(const string &branch, const string &source_table);
 	//! Restore a branch read from disk without the checks Create performs
 	void Restore(const string &name, transaction_t pin, const string &parent, timestamp_t created,
 	             const string &base_line = string());
