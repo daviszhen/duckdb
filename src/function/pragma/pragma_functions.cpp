@@ -829,23 +829,38 @@ static string Git4DataProbe(ClientContext &context, const string &table_name, Ta
 			break;
 		}
 		count += scan_chunk.size();
-		// Track value extremes of the first column so tests can tell the pre-image
-		// apart from the post-image, not just count rows
-		if (scan_chunk.data.empty() || scan_chunk.data[0].GetType().id() != LogicalTypeId::BIGINT) {
+		// Track value extremes of the first column so tests can tell the pre-image apart from the
+		// post-image, not just count rows. Any integer width, because a key is as likely to be an
+		// INTEGER as a BIGINT and the extremes are only reported when the column is integral at all.
+		if (scan_chunk.data.empty()) {
 			continue;
 		}
-		for (auto entry : scan_chunk.data[0].Values<int64_t>()) {
-			if (!entry.IsValid()) {
-				continue;
+		auto &first = scan_chunk.data[0];
+		switch (first.GetType().id()) {
+		case LogicalTypeId::TINYINT:
+		case LogicalTypeId::SMALLINT:
+		case LogicalTypeId::INTEGER:
+		case LogicalTypeId::BIGINT: {
+			// read one value at a time: the typed iterator insists on the column's own width, and this
+			// is a diagnostic rather than a hot path
+			for (idx_t row = 0; row < first.size(); row++) {
+				auto entry = first.GetValue(row);
+				if (entry.IsNull()) {
+					continue;
+				}
+				auto value = entry.GetValue<int64_t>();
+				if (!have_value) {
+					min_value = max_value = value;
+					have_value = true;
+				} else {
+					min_value = MinValue(min_value, value);
+					max_value = MaxValue(max_value, value);
+				}
 			}
-			auto value = entry.GetValue();
-			if (!have_value) {
-				min_value = max_value = value;
-				have_value = true;
-			} else {
-				min_value = MinValue(min_value, value);
-				max_value = MaxValue(max_value, value);
-			}
+			break;
+		}
+		default:
+			break;
 		}
 	}
 	return StringUtil::Format("SELECT %llu::UBIGINT AS rows_at_retention_bound, %lld::BIGINT AS min_col0, "
