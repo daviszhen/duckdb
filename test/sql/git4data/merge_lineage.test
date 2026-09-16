@@ -1,0 +1,102 @@
+# name: test/sql/git4data/merge_lineage.test
+# description: A merge whose ancestor has been written to since it was given its table
+# group: [git4data]
+
+load {TEST_DIR}/merge_lineage.db
+
+statement ok
+CREATE TABLE t (k INTEGER PRIMARY KEY, v INTEGER)
+
+statement ok
+INSERT INTO t SELECT range, range FROM range(100)
+
+statement ok
+CHECKPOINT
+
+# a chain rather than a fan: b descends from a, a from root
+statement ok
+PRAGMA git4data_create_branch('root', '')
+
+statement ok
+PRAGMA git4data_create_branch('a', 'root')
+
+statement ok
+PRAGMA git4data_create_branch('b', 'a')
+
+statement ok
+PRAGMA git4data_materialize('t', 'a', 't_a')
+
+statement ok
+PRAGMA git4data_materialize('t', 'b', 't_b')
+
+# the least common ancestor of a chain's end and its middle is the middle
+query I
+PRAGMA git4data_lca('b', 'a')
+----
+a
+
+query I
+PRAGMA git4data_lca('b', 'root')
+----
+root
+
+# b changes its own row; a has not been written to yet, so its table is still exactly what it was
+# given and it is the state the two lines parted at
+statement ok
+UPDATE t_b SET v = 22 WHERE k = 2
+
+statement ok
+PRAGMA git4data_merge('t', 'a', 'b', 'fail')
+
+query III
+SELECT (SELECT v FROM t_a WHERE k = 2), (SELECT count(*) FROM t_a), (SELECT count(*) FROM t WHERE k = 2)
+----
+22	100	1
+
+# now a is written to, and the state it was given is no longer what it holds. A diff reads the
+# ancestor as its head, so a merge would apply a's own change backwards - measured, silently. It is
+# refused instead, and refused before anything is applied.
+statement ok
+UPDATE t_a SET v = 11 WHERE k = 1
+
+statement ok
+DELETE FROM t_a WHERE k = 5
+
+statement ok
+INSERT INTO t_a VALUES (2000, 2000)
+
+statement ok
+UPDATE t_b SET v = 2222 WHERE k = 3
+
+statement error
+PRAGMA git4data_merge('t', 'a', 'b', 'fail')
+----
+<REGEX>:.*Ancestor "a" has been written to since it was given table.*
+
+query IIII
+SELECT (SELECT v FROM t_a WHERE k = 1), (SELECT count(*) FROM t_a WHERE k = 5),
+       (SELECT count(*) FROM t_a WHERE k = 2000), (SELECT v FROM t_a WHERE k = 3)
+----
+11	0	1	3
+
+# A merge into a branch given its table and not written to since is unaffected: root's table is
+# exactly what it was given, so it is still the state the lines parted at.
+statement ok
+PRAGMA git4data_materialize('t', 'root', 't_root')
+
+statement ok
+PRAGMA git4data_create_branch('c', 'root')
+
+statement ok
+PRAGMA git4data_materialize('t', 'c', 't_c')
+
+statement ok
+UPDATE t_c SET v = 33 WHERE k = 3
+
+statement ok
+PRAGMA git4data_merge('t', 'root', 'c', 'fail')
+
+query II
+SELECT (SELECT count(*) FROM t_root), (SELECT v FROM t_root WHERE k = 3)
+----
+100	33

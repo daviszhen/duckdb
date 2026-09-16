@@ -1553,6 +1553,17 @@ idx_t RowGroup::GetCommittedRowCount() {
 	return vinfo->GetRowCount(options, count);
 }
 
+bool RowGroup::OneUnchangedInsertion(transaction_t &result) {
+	// GetVersionInfo, not the cached pointer: a row group whose deletes are still on disk would
+	// otherwise look untouched, and "untouched" is the answer that has to be earned here
+	auto vinfo = GetVersionInfo();
+	if (!vinfo) {
+		// nothing has an id or a delete of its own here
+		return true;
+	}
+	return vinfo->OneUnchangedInsertion(result);
+}
+
 idx_t RowGroup::GetRowCountFor(ScanOptions options) {
 	auto vinfo = GetVersionInfo();
 	if (!vinfo) {

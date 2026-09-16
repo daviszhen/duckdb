@@ -123,6 +123,10 @@ public:
 	//! The same for the delete side: a row deleted at or after the retention bound has to keep the id
 	//! that says so, or a reader pinned there loses a row it still sees.
 	void SetDeleteIds(idx_t start, idx_t count, const transaction_t *ids);
+	//! Whether every row of this vector was inserted with one and the same id and none of them has been
+	//! deleted. A table built by a single INSERT .. SELECT looks like that in every vector, which is
+	//! what makes "has anything happened to this table since it was created" a question with an answer.
+	bool OneUnchangedInsertion(transaction_t &result) const;
 	//! Whether any insert id is at or after the given bound, so a reader pinned there still
 	//! needs the insert side written out. Without this the checkpoint would skip a vector that
 	//! holds only freshly inserted rows and they would read as visible to everyone on reload.

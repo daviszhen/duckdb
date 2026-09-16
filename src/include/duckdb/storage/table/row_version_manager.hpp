@@ -41,6 +41,11 @@ public:
 	idx_t DeleteRows(idx_t vector_idx, transaction_t transaction_id, row_t rows[], idx_t count);
 	void CommitDelete(idx_t vector_idx, transaction_t commit_id, const DeleteInfo &info);
 
+	//! Whether every row here was inserted with one and the same id and none has been deleted, which
+	//! reports that id. A table written by a single statement looks like that; a table that has been
+	//! written to since does not, which is the question a three-way merge has to ask of a branch's
+	//! storage before it can be used as the state two lines parted at.
+	bool OneUnchangedInsertion(transaction_t &result);
 	//! The insert and delete ids of a run of rows of one vector, for a caller carrying the version
 	//! information of those rows into another row group. sel names the rows; null means the run is the
 	//! whole vector from its first row.

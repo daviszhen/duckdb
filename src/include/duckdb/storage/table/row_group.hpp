@@ -213,6 +213,9 @@ public:
 	RowGroupWriteData WriteToDisk(RowGroupWriteInfo &info) const;
 	//! Returns the number of committed rows (count - committed deletes)
 	idx_t GetCommittedRowCount();
+	//! Whether every row of this row group was inserted with one and the same id and none has been
+	//! deleted, which reports that id. See RowVersionManager::OneUnchangedInsertion.
+	bool OneUnchangedInsertion(transaction_t &result);
 	//! The number of rows a scan with these options would return. A vacuum pass plans with the options
 	//! it scans with, so the row groups it creates have room for exactly the rows that come.
 	idx_t GetRowCountFor(ScanOptions options);

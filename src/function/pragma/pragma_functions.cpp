@@ -526,6 +526,52 @@ static string PragmaGit4DataMerge(ClientContext &context, const FunctionParamete
 		                            right_name);
 	}
 
+	// The base a three-way merge needs is the state the two lines parted at. When the ancestor is a
+	// branch with a table of its own, that table can offer it only while it is still what it was given:
+	// materializing is a single INSERT .. SELECT, so every row of it carries one insert id and none is
+	// deleted, and a write to the ancestor after that is exactly what breaks the correspondence. A diff
+	// reads the ancestor as its head, so without this check the merge would apply the ancestor's own
+	// changes backwards - measured, silently.
+	Git4DataBranch ancestor_branch;
+	if (transaction_manager.branches.Get(ancestor, ancestor_branch)) {
+		for (auto &storage_entry : ancestor_branch.storage_tables) {
+			if (storage_entry.first != table_name) {
+				continue;
+			}
+			auto &storage_table =
+			    Catalog::GetEntry<TableCatalogEntry>(context, QualifiedName(Identifier(storage_entry.second)));
+			auto &storage_groups = *storage_table.GetStorage().GetRowGroupCollection();
+			transaction_t copy_commit = 0;
+			bool unwritten = true;
+			for (idx_t i = 0; i < storage_groups.GetRowGroupCount(); i++) {
+				auto row_group = storage_groups.GetRowGroup(NumericCast<int64_t>(i));
+				if (!row_group) {
+					continue;
+				}
+				transaction_t insertion = 0;
+				if (!row_group->OneUnchangedInsertion(insertion)) {
+					unwritten = false;
+					break;
+				}
+				if (i == 0) {
+					copy_commit = insertion;
+				} else if (insertion != copy_commit) {
+					// written in more than one statement, so it is not the copy it was given
+					unwritten = false;
+					break;
+				}
+			}
+			if (!unwritten) {
+				throw InvalidInputException(
+				    "Ancestor \"%s\" has been written to since it was given table \"%s\", so its state at the "
+				    "commit the two lines parted at can no longer be read from it and a merge would undo what it "
+				    "has done since. Merge from a branch whose ancestor has no storage of its own, or pick with an "
+				    "explicit base.",
+				    ancestor, storage_entry.second);
+			}
+		}
+	}
+
 	auto &table = Catalog::GetEntry<TableCatalogEntry>(context, QualifiedName(Identifier(table_name)));
 	auto key_columns = Git4DataPrimaryKeyColumnNames(table);
 	if (key_columns.empty()) {

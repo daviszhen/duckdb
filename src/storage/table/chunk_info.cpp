@@ -768,6 +768,15 @@ bool ChunkVectorInfo::HasUncommittedChanges() const {
 	}
 }
 
+bool ChunkVectorInfo::OneUnchangedInsertion(transaction_t &result) const {
+	if (!HasConstantInsertionId() || AnyDeleted()) {
+		// either the rows came in at different times, or at least one of them is gone
+		return false;
+	}
+	result = ConstantInsertId();
+	return true;
+}
+
 bool ChunkVectorInfo::AnyDeleted() const {
 	switch (delete_state) {
 	case DeleteIdState::CONSTANT:

@@ -201,6 +201,23 @@ idx_t RowVersionManager::DeleteRows(idx_t vector_idx, transaction_t transaction_
 	return GetVectorInfo(vector_idx).Delete(transaction_id, rows, count);
 }
 
+bool RowVersionManager::OneUnchangedInsertion(transaction_t &result) {
+	lock_guard<mutex> lock(version_lock);
+	for (auto &info : vector_info) {
+		if (!info) {
+			// no version info for this vector: its rows read as visible to everyone, which is what a
+			// row group the checkpoint has already compressed looks like
+			continue;
+		}
+		transaction_t id;
+		if (!info->OneUnchangedInsertion(id)) {
+			return false;
+		}
+		result = id;
+	}
+	return true;
+}
+
 void RowVersionManager::GetVersionIdsForRows(idx_t vector_idx, const SelectionVector *sel, idx_t count,
                                              transaction_t *insert_ids, transaction_t *delete_ids) {
 	lock_guard<mutex> lock(version_lock);
