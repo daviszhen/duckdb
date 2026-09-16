@@ -53,9 +53,11 @@ SELECT (SELECT v FROM t_a WHERE k = 2), (SELECT count(*) FROM t_a), (SELECT coun
 ----
 22	100	1
 
-# now a is written to, and the state it was given is no longer what it holds. A diff reads the
-# ancestor as its head, so a merge would apply a's own change backwards - measured, silently. It is
-# refused instead, and refused before anything is applied.
+# now a is written to, so its table no longer holds the state the two lines parted at. That state is
+# still namable, though: a branch with a table of its own cannot be forked from at all, so b must have
+# been forked before a was given this table, and the state they parted at is a's pinned image - the
+# commit a reads. The merge names that commit with an internal reference instead of reading a's table
+# as the base, which is what would apply a's own changes backwards.
 statement ok
 UPDATE t_a SET v = 11 WHERE k = 1
 
@@ -68,16 +70,22 @@ INSERT INTO t_a VALUES (2000, 2000)
 statement ok
 UPDATE t_b SET v = 2222 WHERE k = 3
 
-statement error
+statement ok
 PRAGMA git4data_merge('t', 'a', 'b', 'fail')
-----
-<REGEX>:.*Ancestor "a" has been written to since it was given table.*
 
-query IIII
-SELECT (SELECT v FROM t_a WHERE k = 1), (SELECT count(*) FROM t_a WHERE k = 5),
-       (SELECT count(*) FROM t_a WHERE k = 2000), (SELECT v FROM t_a WHERE k = 3)
+# a's own writes are all still there (11, the deletion, the appended row), b's change lands on k = 3,
+# and the key both sides set to the same value keeps that value
+query IIIII
+SELECT (SELECT count(*) FROM t_a), (SELECT v FROM t_a WHERE k = 1), (SELECT v FROM t_a WHERE k = 3),
+       (SELECT count(*) FROM t_a WHERE k = 5), (SELECT v FROM t_a WHERE k = 2000)
 ----
-11	0	1	3
+100	11	2222	0	2000
+
+# and the internal reference the merge needed is not left behind
+query IIII
+PRAGMA git4data_limits
+----
+-1	0	-1	3
 
 # A merge into a branch given its table and not written to since is unaffected: root's table is
 # exactly what it was given, so it is still the state the lines parted at.

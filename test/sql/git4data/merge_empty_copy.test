@@ -42,23 +42,36 @@ SELECT count(*) FROM t AT (BRANCH => 'p')
 ----
 1
 
-# The state p and c parted at is the empty table, and p's table no longer holds that state, so a merge
-# would use p's row as its base. It is refused before anything is applied.
-statement error
+# The state p and c parted at is the empty table, and p's table no longer holds that state. The pin
+# does, and it is named as the base, so p's own row is not mistaken for what the two lines started
+# from and the merge applies nothing to either side.
+statement ok
 PRAGMA git4data_merge('t', 'p', 'c', 'fail')
-----
-<REGEX>:.*Ancestor "p" has been written to since it was given table "t_p".*
 
 query II
 SELECT (SELECT count(*) FROM t_p), (SELECT count(*) FROM t)
 ----
 1	0
 
-# A second insert changes nothing about that, and a merge is still refused.
+# the internal reference the merge needed is dropped again with it
+query IIII
+PRAGMA git4data_limits
+----
+-1	0	-1	2
+
+# a second insert changes nothing about that, and a second merge applies it the same way
 statement ok
 INSERT INTO t_p VALUES (2, 2)
 
-statement error
+statement ok
 PRAGMA git4data_merge('t', 'p', 'c', 'fail')
+
+query II
+SELECT (SELECT count(*) FROM t_p), (SELECT count(*) FROM t)
 ----
-<REGEX>:.*Ancestor "p" has been written to since it was given table "t_p".*
+2	0
+
+query IIII
+PRAGMA git4data_limits
+----
+-1	0	-1	2

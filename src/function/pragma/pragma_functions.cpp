@@ -526,13 +526,17 @@ static string PragmaGit4DataMerge(ClientContext &context, const FunctionParamete
 		                            right_name);
 	}
 
-	// The base a three-way merge needs is the state the two lines parted at. When the ancestor is a
-	// branch with a table of its own, that table can offer it only while it is still what it was given:
-	// materializing is a single INSERT .. SELECT, so every row of it carries one insert id and none is
-	// deleted, and a write to the ancestor after that is exactly what breaks the correspondence. A diff
-	// reads the ancestor as its head, so without this check the merge would apply the ancestor's own
-	// changes backwards - measured, silently.
+	// The base a three-way merge needs is the state the two lines parted at. An ancestor without a table
+	// of its own already reads as that state: its name resolves to its pinned image. An ancestor with one
+	// would read as the table instead, which is the pinned image plus everything it has done since, and a
+	// merge based on that applies the ancestor's own changes backwards - measured, silently. So a branch
+	// with storage is asked the questions below, which end in naming its pin directly rather than its
+	// name. Materializing is a single INSERT .. SELECT, which is what makes the first question answerable:
+	// every row of such a table carries one insert id and none of them is deleted.
 	Git4DataBranch ancestor_branch;
+	// A diff reads the base as the branch name; only the case below has to name a commit instead
+	string base_reference = ancestor;
+	bool drop_merge_base = false;
 	if (transaction_manager.branches.Get(ancestor, ancestor_branch)) {
 		for (auto &storage_entry : ancestor_branch.storage_tables) {
 			if (storage_entry.first != table_name) {
@@ -587,12 +591,20 @@ static string PragmaGit4DataMerge(ClientContext &context, const FunctionParamete
 				}
 			}
 			if (!unwritten) {
-				throw InvalidInputException(
-				    "Ancestor \"%s\" has been written to since it was given table \"%s\", so its state at the "
-				    "commit the two lines parted at can no longer be read from it and a merge would undo what it "
-				    "has done since. Merge from a branch whose ancestor has no storage of its own, or pick with an "
-				    "explicit base.",
-				    ancestor, storage_entry.second);
+				// Written to since. The state a three-way merge needs is the one the two lines parted
+				// at, and for a branch that has a table of its own that state is still namable: a
+				// branch with storage cannot be forked from at all, so both lines here must have been
+				// forked before this table was given - which makes the state they parted at exactly
+				// this branch's pinned image, a commit a reference can name. What the table holds now
+				// is that image plus this branch's own changes since, and reading it as the base is
+				// what would apply those changes backwards; naming the pin instead is the fix.
+				transaction_manager.snapshots.Drop("__merge_base__");
+				if (!transaction_manager.snapshots.Create("__merge_base__", ancestor_branch.pin,
+				                                          Timestamp::GetCurrentTimestamp())) {
+					throw InternalException("Could not create the internal merge base reference");
+				}
+				base_reference = "__merge_base__";
+				drop_merge_base = true;
 			}
 		}
 	}
@@ -626,10 +638,10 @@ static string PragmaGit4DataMerge(ClientContext &context, const FunctionParamete
 	}
 	auto quoted_table = KeywordHelper::WriteOptionallyQuoted(table_name);
 	auto quoted_into = KeywordHelper::WriteOptionallyQuoted(merge_into);
-	auto diff_left =
-	    StringUtil::Format("git4data_diff('%s', '%s', '%s')", escape(table_name), escape(ancestor), escape(left_name));
-	auto diff_right =
-	    StringUtil::Format("git4data_diff('%s', '%s', '%s')", escape(table_name), escape(ancestor), escape(right_name));
+	auto diff_left = StringUtil::Format("git4data_diff('%s', '%s', '%s')", escape(table_name), escape(base_reference),
+	                                    escape(left_name));
+	auto diff_right = StringUtil::Format("git4data_diff('%s', '%s', '%s')", escape(table_name), escape(base_reference),
+	                                     escape(right_name));
 	auto right_image =
 	    FormatGit4DataAtClause(table_name, right_name, ResolveGit4DataReference(transaction_manager, right_name));
 
@@ -661,6 +673,10 @@ static string PragmaGit4DataMerge(ClientContext &context, const FunctionParamete
 	    quoted_into, right_image, key_list, key_list, diff_right, "'added', 'changed'", conflict_filter, key_list,
 	    key_list, quoted_into);
 	result += "DROP TABLE g4d_merge_conflicts;";
+	if (drop_merge_base) {
+		// the reference was only there for the two diffs above, which have run by now
+		result += "\nPRAGMA git4data_drop_snapshot('__merge_base__');";
+	}
 	return result;
 }
 
