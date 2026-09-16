@@ -829,9 +829,7 @@ static void PragmaGit4DataCreateBranch(ClientContext &context, const FunctionPar
 				// delta is what makes the two differ, and a child has nowhere to carry it yet
 				throw InvalidInputException(
 				    "Branch \"%s\" differs from its base by a delta, and a branch forked from it would read that base "
-				    "rather than what the branch holds. Materialize the branch first, then capture its line and fork "
-				    "from "
-				    "that.",
+				    "rather than what the branch holds. Capture its line and fork from that.",
 				    parent);
 			}
 			pin = parent_branch.pin;
@@ -957,19 +955,8 @@ static void PragmaGit4DataCreateSnapshot(ClientContext &context, const FunctionP
 		if (!transaction_manager.branches.Get(line, branch)) {
 			throw InvalidInputException("Branch \"%s\" does not exist", line);
 		}
-		if (branch.storage_tables.empty()) {
-			if (!branch.deltas.empty()) {
-				// its line is a base plus a delta, and reading that as of an earlier commit means reading
-				// both tables at that commit: the base is fixed and the delta is not, so the capture needs
-				// a bound per part rather than the one a reference carries today
-				throw InvalidInputException(
-				    "Branch \"%s\" differs from its base by a delta, and capturing its line "
-				    "as of a commit is not built - what it holds is a base that does not move "
-				    "and a delta that does. Materialize it first, and its table is then a line a "
-				    "reference can capture.",
-				    line);
-			}
-			throw InvalidInputException("Branch \"%s\" has no table of its own, so it has no line to capture "
+		if (branch.storage_tables.empty() && branch.deltas.empty()) {
+			throw InvalidInputException("Branch \"%s\" has no line of its own, so there is nothing to capture "
 			                            "- it reads the table exactly as a snapshot does",
 			                            line);
 		}

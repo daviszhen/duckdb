@@ -75,7 +75,7 @@ PRAGMA git4data_create_snapshot('nosuch', 'missing')
 statement error
 PRAGMA git4data_create_snapshot('base_only', 'root')
 ----
-<REGEX>:.*has no table of its own, so it has no line to capture.*
+<REGEX>:.*has no line of its own, so there is nothing to capture.*
 
 # A fork from the captured line takes that state, which is what the reference is for: the child carries
 # the line and reads it as it stood at the pin

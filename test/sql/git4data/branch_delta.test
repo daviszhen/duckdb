@@ -116,35 +116,44 @@ PRAGMA git4data_bind_branch_delta('t', 'missing', 't_add', 't_del')
 ----
 <REGEX>:.*Branch "missing" does not exist.*
 
-# Neither a bare fork nor a capture of the line takes a delta with it, and both say so rather than
-# handing the child the base: a delta is a base that does not move plus a delta that does, so a
-# reference carrying one would need a bound per part.
+# A bare fork carries a commit, and what makes this branch differ from its own commit is a delta it
+# has nowhere to hand a child, so that fork is refused and says what to do instead.
 statement error
 PRAGMA git4data_create_branch('child', 'base')
 ----
-<REGEX>:.*differs from its base by a delta.*
+<REGEX>:.*differs from its base by a delta.*Capture its line and fork from that.*
 
-statement error
+# Capturing the line does work, and it reads the delta at the commit it captured rather than at now:
+# the base is fixed and the delta is not, which is why the two are read at different bounds.
+statement ok
 PRAGMA git4data_create_snapshot('cap', 'base')
+
+statement ok
+INSERT INTO t_del VALUES (9)
+
+statement ok
+INSERT INTO t_add VALUES (3000, 3000)
+
+query IIIII
+SELECT (SELECT count(*) FROM t AT (SNAPSHOT => 'cap')),
+       (SELECT v FROM t AT (SNAPSHOT => 'cap') WHERE k = 2000),
+       (SELECT count(*) FROM t AT (SNAPSHOT => 'cap') WHERE k = 9),
+       (SELECT count(*) FROM t AT (SNAPSHOT => 'cap') WHERE k = 3000),
+       (SELECT count(*) FROM t AT (BRANCH => 'base') WHERE k = 3000)
 ----
-<REGEX>:.*capturing its line as of a commit is not built.*
+100	2000	1	0	1
 
-# the way through is to materialize first, which turns the line into a table, and then capture that
-statement ok
-PRAGMA git4data_materialize('t', 'base', 't_base')
-
-statement ok
-PRAGMA git4data_create_snapshot('cap', 'base')
-
+# and a fork from that capture takes the state it names, not what the branch holds now
 statement ok
 PRAGMA git4data_create_branch('child', 'cap')
 
-query III
+query IIII
 SELECT (SELECT count(*) FROM t AT (BRANCH => 'child')),
-       (SELECT v FROM t AT (BRANCH => 'child') WHERE k = 2000),
-       (SELECT count(*) FROM t AT (BRANCH => 'child') WHERE k = 5)
+       (SELECT count(*) FROM t AT (BRANCH => 'child') WHERE k = 3000),
+       (SELECT count(*) FROM t AT (BRANCH => 'child') WHERE k = 9),
+       (SELECT v FROM t AT (BRANCH => 'child') WHERE k = 2000)
 ----
-100	2000	0
+100	0	1	2000
 
 # the delta is part of the branch, so it comes back with the file
 statement ok
@@ -159,8 +168,12 @@ SELECT (SELECT count(*) FROM t AT (BRANCH => 'base')),
 ----
 100	2000	0
 
-# the copy made above is the branch's line, not the base's
-query II
-SELECT (SELECT count(*) FROM t_base), (SELECT count(*) FROM t_base WHERE k = 5)
+# materializing turns the delta into a copy of the branch's line, and that line is not the base's
+statement ok
+PRAGMA git4data_materialize('t', 'base', 't_base')
+
+query III
+SELECT (SELECT count(*) FROM t_base), (SELECT count(*) FROM t_base WHERE k = 5),
+       (SELECT v FROM t_base WHERE k = 3000)
 ----
-100	0
+100	0	3000

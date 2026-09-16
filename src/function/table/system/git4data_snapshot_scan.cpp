@@ -25,6 +25,8 @@ struct Git4DataSnapshotScanBindData : public TableFunctionData {
 	//! its base instead of differing from it
 	string delta_added;
 	string delta_removed;
+	//! The commit this reference's delta is read at: its own pin, or the pin it captured a line at
+	VisibilityBound delta_bound;
 };
 
 static void Git4DataDiffPrimaryKey(TableCatalogEntry &table, vector<StorageIndex> &columns, vector<LogicalType> &types,
@@ -47,7 +49,7 @@ static string Git4DataKeyString(DataChunk &chunk, const vector<idx_t> &positions
 //! The keys a delta removed from its base, read once while a read is set up. A key is a tuple of
 //! arbitrary columns and this is the only place the tuple is compared, so it is held as one string.
 static void Git4DataCollectRemovedKeys(ClientContext &context, const string &removed_table,
-                                       const vector<LogicalType> &key_types, idx_t key_count,
+                                       const vector<LogicalType> &key_types, idx_t key_count, VisibilityBound bound,
                                        unordered_set<string> &result) {
 	if (removed_table.empty()) {
 		return;
@@ -67,7 +69,7 @@ static void Git4DataCollectRemovedKeys(ClientContext &context, const string &rem
 	scan.Initialize(removed_ids, nullptr);
 	QueryContext query_context;
 	groups.InitializeScan(query_context, scan.table_state, removed_ids, nullptr);
-	ScanOptions options(TransactionData(MAX_TRANSACTION_ID, VisibilityBound::AllCommitted()));
+	ScanOptions options(TransactionData(MAX_TRANSACTION_ID, bound));
 	while (true) {
 		chunk.Reset();
 		scan.table_state.Scan(options, chunk);
@@ -94,6 +96,7 @@ struct Git4DataSnapshotScanState : public GlobalTableFunctionState {
 	//! Where the key columns sit in the scanned columns, so a row's key can be built from a chunk
 	vector<idx_t> key_positions;
 	unordered_set<string> removed_keys;
+	VisibilityBound delta_bound;
 	VisibilityBound bound;
 	bool has_delta = false;
 	bool reading_added = false;
@@ -130,11 +133,91 @@ struct Git4DataReadPlan {
 	VisibilityBound bound;
 	string delta_added;
 	string delta_removed;
+	//! The commit the delta itself is read at: everything committed for a branch reading its own line,
+	//! and the commit a reference captured when what it names is that line as it stood then. A base does
+	//! not move and a delta does, which is why the two are read at different bounds.
+	VisibilityBound delta_bound;
 
 	bool HasDelta() const {
 		return !delta_added.empty() || !delta_removed.empty();
 	}
 };
+
+//! Where a branch's line lives at a commit, and what it differs by. A branch is a pin plus what it
+//! inherits, so its state at a commit is one table read at a bound - the base, which does not move -
+//! plus at most one delta read at that same commit. AllCommitted as the bound means the state now.
+struct Git4DataLineState {
+	string base_table;
+	VisibilityBound base_bound;
+	string delta_added;
+	string delta_removed;
+	VisibilityBound delta_bound;
+	bool has_delta = false;
+};
+
+static Git4DataLineState ResolveGit4DataLineState(ClientContext &context, DuckTransactionManager &transaction_manager,
+                                                  const string &table_name, const Git4DataBranch &branch,
+                                                  VisibilityBound at) {
+	Git4DataLineState state;
+	state.base_bound = at;
+	state.delta_bound = at;
+	auto storage = Git4DataBranchStorageTable(context, branch, table_name);
+	if (!storage.empty()) {
+		// the branch's own line is a table: read as it is now, or as it stood at the commit asked for
+		state.base_table = storage;
+	} else if (!branch.base_line.empty()) {
+		// it inherited a line, and that inheritance is fixed at this branch's pin - whatever commit is
+		// being asked about, the state it started from is the one the line had when it forked
+		Git4DataBranch line_branch;
+		if (transaction_manager.branches.Get(branch.base_line, line_branch)) {
+			auto inherited = ResolveGit4DataLineState(context, transaction_manager, table_name, line_branch,
+			                                          VisibilityBound::Through(branch.pin));
+			state.base_table = inherited.base_table;
+			state.base_bound = inherited.base_bound;
+			state.delta_added = inherited.delta_added;
+			state.delta_removed = inherited.delta_removed;
+			state.delta_bound = inherited.delta_bound;
+			state.has_delta = inherited.has_delta;
+		}
+	}
+	if (state.base_table.empty()) {
+		// no line of its own and nothing inherited: the base is the source table at this branch's pin
+		state.base_table = table_name;
+		state.base_bound = VisibilityBound::Through(branch.pin);
+	}
+	// the branch's own delta, read at the commit whose state was asked for
+	string added;
+	string removed;
+	for (auto &delta : branch.deltas) {
+		if (delta.source != table_name) {
+			continue;
+		}
+		// the delta's tables are the caller's, so one that has since been dropped falls back to the base
+		auto added_table = Catalog::GetEntry<TableCatalogEntry>(context, QualifiedName(Identifier(delta.added)),
+		                                                        OnEntryNotFound::RETURN_NULL);
+		auto removed_table = Catalog::GetEntry<TableCatalogEntry>(context, QualifiedName(Identifier(delta.removed)),
+		                                                          OnEntryNotFound::RETURN_NULL);
+		if (added_table && removed_table) {
+			added = delta.added;
+			removed = delta.removed;
+		}
+	}
+	if (!added.empty() || !removed.empty()) {
+		if (state.has_delta) {
+			// the inherited delta says what the line it took looks like, and the branch's own says what it
+			// has done since; a read would have to apply both, which is not built
+			throw InvalidInputException(
+			    "Branch \"%s\" inherits a line that differs by a delta and has a delta of its own, and a read of it "
+			    "would have to apply both. Materialize one of the two lines first.",
+			    branch.name);
+		}
+		state.delta_added = added;
+		state.delta_removed = removed;
+		state.delta_bound = at;
+		state.has_delta = true;
+	}
+	return state;
+}
 
 //! The plan for one reference. The scan and the diff both come here, so the two cannot disagree about
 //! which table a reference means - a disagreement that compares row ids of different tables and
@@ -149,16 +232,21 @@ static void ResolveGit4DataRead(ClientContext &context, DuckTransactionManager &
 		}
 		plan.table_name = table_name;
 		plan.bound = VisibilityBound::Through(snapshot.pin);
+		plan.delta_bound = VisibilityBound::Through(snapshot.pin);
 		if (!snapshot.line.empty()) {
-			// It captured a branch's own line, which lives in that branch's storage table once it has
-			// been written to. A line whose table is gone falls back to the pinned image, the same way a
-			// branch whose storage was dropped does.
+			// It captured a branch's own line, so what it names is that line as it stood at the pin -
+			// which is a base that does not move plus that branch's delta read at the pin. A line whose
+			// branch is gone falls back to the pinned image, the way a branch whose storage was dropped
+			// does.
 			Git4DataBranch line_branch;
 			if (transaction_manager.branches.Get(snapshot.line, line_branch)) {
-				auto storage = Git4DataBranchStorageTable(context, line_branch, table_name);
-				if (!storage.empty()) {
-					plan.table_name = storage;
-				}
+				auto state = ResolveGit4DataLineState(context, transaction_manager, table_name, line_branch,
+				                                      VisibilityBound::Through(snapshot.pin));
+				plan.table_name = state.base_table;
+				plan.bound = state.base_bound;
+				plan.delta_added = state.delta_added;
+				plan.delta_removed = state.delta_removed;
+				plan.delta_bound = state.delta_bound;
 			}
 		}
 		return;
@@ -167,44 +255,14 @@ static void ResolveGit4DataRead(ClientContext &context, DuckTransactionManager &
 	if (!transaction_manager.branches.Get(name, branch)) {
 		throw InvalidInputException("Branch \"%s\" does not exist", name);
 	}
-	auto storage = Git4DataBranchStorageTable(context, branch, table_name);
-	if (!storage.empty()) {
-		// the branch has a line of its own here, so read that rather than the pinned image - it can
-		// have been written to since the branch was taken
-		plan.table_name = storage;
-		plan.bound = VisibilityBound::AllCommitted();
-		return;
-	}
-	// no copy of its own: the base is whatever the branch started from, read at its pin
-	string base_table = table_name;
-	if (!branch.base_line.empty()) {
-		// forked from a reference that captured another branch's line: read that line as it stood at
-		// this pin, which is what makes a fork take a state rather than only a commit
-		Git4DataBranch line_branch;
-		if (transaction_manager.branches.Get(branch.base_line, line_branch)) {
-			auto line_storage = Git4DataBranchStorageTable(context, line_branch, table_name);
-			if (!line_storage.empty()) {
-				base_table = line_storage;
-			}
-		}
-	}
-	plan.table_name = base_table;
-	plan.bound = VisibilityBound::Through(branch.pin);
-	// a delta says how this branch differs from that base, and its tables are the caller's, so one that
-	// has since been dropped falls back to the base rather than failing
-	for (auto &delta : branch.deltas) {
-		if (delta.source != table_name) {
-			continue;
-		}
-		auto added = Catalog::GetEntry<TableCatalogEntry>(context, QualifiedName(Identifier(delta.added)),
-		                                                  OnEntryNotFound::RETURN_NULL);
-		auto removed = Catalog::GetEntry<TableCatalogEntry>(context, QualifiedName(Identifier(delta.removed)),
-		                                                    OnEntryNotFound::RETURN_NULL);
-		if (added && removed) {
-			plan.delta_added = delta.added;
-			plan.delta_removed = delta.removed;
-		}
-	}
+	// what the branch holds now: its base, and its own delta if it has one
+	auto state =
+	    ResolveGit4DataLineState(context, transaction_manager, table_name, branch, VisibilityBound::AllCommitted());
+	plan.table_name = state.base_table;
+	plan.bound = state.base_bound;
+	plan.delta_added = state.delta_added;
+	plan.delta_removed = state.delta_removed;
+	plan.delta_bound = state.delta_bound;
 }
 
 static Git4DataReadPlan ResolveGit4DataReferencePlan(ClientContext &context,
@@ -242,6 +300,7 @@ unique_ptr<FunctionData> Git4DataSnapshotScanFun::CreateBindData(ClientContext &
 	result->bound = plan.bound;
 	result->delta_added = plan.delta_added;
 	result->delta_removed = plan.delta_removed;
+	result->delta_bound = plan.delta_bound;
 	return std::move(result);
 }
 
@@ -264,6 +323,7 @@ static unique_ptr<GlobalTableFunctionState> Git4DataSnapshotScanInit(ClientConte
 	auto &bind_data = input.bind_data->Cast<Git4DataSnapshotScanBindData>();
 	auto result = make_uniq<Git4DataSnapshotScanState>();
 	result->bound = bind_data.bound;
+	result->delta_bound = bind_data.delta_bound;
 
 	auto &table = Catalog::GetEntry<TableCatalogEntry>(context, QualifiedName(Identifier(bind_data.table_name)));
 	auto &storage = table.GetStorage();
@@ -317,7 +377,7 @@ static unique_ptr<GlobalTableFunctionState> Git4DataSnapshotScanInit(ClientConte
 		                                                                 result->column_ids, nullptr);
 	}
 	Git4DataCollectRemovedKeys(context, bind_data.delta_removed, ordered_key_types, key_columns.size(),
-	                           result->removed_keys);
+	                           bind_data.delta_bound, result->removed_keys);
 	return std::move(result);
 }
 
@@ -373,7 +433,7 @@ static void Git4DataSnapshotScanFunction(ClientContext &context, TableFunctionIn
 	}
 	// then the rows the branch added, which are its own line and so read as of everything committed
 	state.added_chunk.Reset();
-	ScanOptions added_options(TransactionData(MAX_TRANSACTION_ID, VisibilityBound::AllCommitted()));
+	ScanOptions added_options(TransactionData(MAX_TRANSACTION_ID, state.delta_bound));
 	state.added_scan.table_state.Scan(added_options, state.added_chunk);
 	if (state.added_chunk.size() == 0) {
 		state.finished = true;
@@ -423,8 +483,10 @@ struct Git4DataDiffBindData : public TableFunctionData {
 	//! are part of that side, and the keys it removed are not
 	string left_delta_added;
 	string left_delta_removed;
+	VisibilityBound left_delta_bound;
 	string right_delta_added;
 	string right_delta_removed;
+	VisibilityBound right_delta_bound;
 };
 
 //! Marks a Change that stands alone rather than being paired with a counterpart
@@ -456,6 +518,10 @@ struct Git4DataDiffState : public GlobalTableFunctionState {
 	unordered_set<string> right_removed_keys;
 	string left_added_table;
 	string right_added_table;
+	VisibilityBound left_delta_bound;
+	VisibilityBound right_delta_bound;
+	//! The bound the added table currently open is read at
+	VisibilityBound added_bound;
 	string open_added_table;
 	TableScanState added_scan;
 	DataChunk added_chunk;
@@ -534,8 +600,10 @@ unique_ptr<FunctionData> Git4DataDiffFun::CreateBindData(ClientContext &context,
 	result->right_bound = right_plan.bound;
 	result->left_delta_added = left_plan.delta_added;
 	result->left_delta_removed = left_plan.delta_removed;
+	result->left_delta_bound = left_plan.delta_bound;
 	result->right_delta_added = right_plan.delta_added;
 	result->right_delta_removed = right_plan.delta_removed;
+	result->right_delta_bound = right_plan.delta_bound;
 
 	auto &table = Catalog::GetEntry<TableCatalogEntry>(context, QualifiedName(Identifier(table_name)));
 	Git4DataDiffPrimaryKey(table, result->key_columns, result->key_types, result->key_names);
@@ -650,11 +718,13 @@ static unique_ptr<GlobalTableFunctionState> Git4DataDiffInit(ClientContext &cont
 	result->scan_types = scan_types;
 	// what each side removed from its base, read once: a side that differs by a delta is not the table
 	Git4DataCollectRemovedKeys(context, bind_data.left_delta_removed, bind_data.key_types, bind_data.key_columns.size(),
-	                           result->left_removed_keys);
+	                           bind_data.left_delta_bound, result->left_removed_keys);
 	Git4DataCollectRemovedKeys(context, bind_data.right_delta_removed, bind_data.key_types,
-	                           bind_data.key_columns.size(), result->right_removed_keys);
+	                           bind_data.key_columns.size(), bind_data.right_delta_bound, result->right_removed_keys);
 	result->left_added_table = bind_data.left_delta_added;
 	result->right_added_table = bind_data.right_delta_added;
+	result->left_delta_bound = bind_data.left_delta_bound;
+	result->right_delta_bound = bind_data.right_delta_bound;
 
 	// each side is read from its own table, which is the same table unless a side is a branch with a
 	// line of its own
@@ -672,7 +742,7 @@ static unique_ptr<GlobalTableFunctionState> Git4DataDiffInit(ClientContext &cont
 
 //! Walk the whole table at one bound, handing every visible row and its row id to the callback.
 static void Git4DataDiffCollect(ClientContext &context, Git4DataDiffState &state, TableScanState &scan,
-                                VisibilityBound bound, const string &added_table,
+                                VisibilityBound bound, const string &added_table, VisibilityBound added_bound,
                                 const unordered_set<string> *removed_keys,
                                 const std::function<void(DataChunk &, row_t, idx_t)> &callback) {
 	// the key columns come first in the scan, so their positions are the first key_count columns
@@ -714,8 +784,9 @@ static void Git4DataDiffCollect(ClientContext &context, Git4DataDiffState &state
 		table.GetStorage().GetRowGroupCollection()->InitializeScan(query_context, state.added_scan.table_state,
 		                                                           state.column_ids, nullptr);
 		state.open_added_table = added_table;
+		state.added_bound = added_bound;
 	}
-	ScanOptions added_options(TransactionData(MAX_TRANSACTION_ID, VisibilityBound::AllCommitted()));
+	ScanOptions added_options(TransactionData(MAX_TRANSACTION_ID, state.added_bound));
 	while (true) {
 		state.added_chunk.Reset();
 		state.added_scan.table_state.Scan(added_options, state.added_chunk);
@@ -791,23 +862,23 @@ static void Git4DataDiffFunction(ClientContext &context, TableFunctionInput &dat
 		// tables append a different number of rows. The primary key is the identity that survives
 		// that, and the values are read so two rows sharing a key can be told apart from one row.
 		if (state.phase == Git4DataDiffState::Phase::LEFT) {
-			Git4DataDiffCollect(context, state, state.left_scan, state.left_bound, state.left_added_table,
-			                    &state.left_removed_keys, [&](DataChunk &chunk, row_t row_id, idx_t row) {
-				                    auto key = Git4DataDiffRowKey(chunk, state.key_count, row);
-				                    Git4DataDiffState::KeyedRow entry;
-				                    entry.key = key;
-				                    entry.values =
-				                        Git4DataDiffRowValues(chunk, state.key_count, state.value_count, row);
-				                    entry.row_id = row_id;
-				                    state.left_by_key[Git4DataDiffKeyHash(key)].push_back(std::move(entry));
-			                    });
+			Git4DataDiffCollect(
+			    context, state, state.left_scan, state.left_bound, state.left_added_table, state.left_delta_bound,
+			    &state.left_removed_keys, [&](DataChunk &chunk, row_t row_id, idx_t row) {
+				    auto key = Git4DataDiffRowKey(chunk, state.key_count, row);
+				    Git4DataDiffState::KeyedRow entry;
+				    entry.key = key;
+				    entry.values = Git4DataDiffRowValues(chunk, state.key_count, state.value_count, row);
+				    entry.row_id = row_id;
+				    state.left_by_key[Git4DataDiffKeyHash(key)].push_back(std::move(entry));
+			    });
 			state.phase = Git4DataDiffState::Phase::RIGHT;
 		}
 		if (state.phase == Git4DataDiffState::Phase::RIGHT) {
 			unordered_set<hash_t> matched;
 			Git4DataDiffCollect(
-			    context, state, state.right_scan, state.right_bound, state.right_added_table, &state.right_removed_keys,
-			    [&](DataChunk &chunk, row_t row_id, idx_t row) {
+			    context, state, state.right_scan, state.right_bound, state.right_added_table, state.right_delta_bound,
+			    &state.right_removed_keys, [&](DataChunk &chunk, row_t row_id, idx_t row) {
 				    auto key = Git4DataDiffRowKey(chunk, state.key_count, row);
 				    auto hash = Git4DataDiffKeyHash(key);
 				    auto entry = state.left_by_key.find(hash);
@@ -855,7 +926,8 @@ static void Git4DataDiffFunction(ClientContext &context, TableFunctionInput &dat
 	}
 	if (state.phase == Git4DataDiffState::Phase::LEFT) {
 		Git4DataDiffCollect(context, state, state.left_scan, state.left_bound, state.left_added_table,
-		                    &state.left_removed_keys, [&](DataChunk &chunk, row_t row_id, idx_t row) {
+		                    state.left_delta_bound, &state.left_removed_keys,
+		                    [&](DataChunk &chunk, row_t row_id, idx_t row) {
 			                    state.left_rows.insert(row_id);
 			                    if (state.key_count > 0) {
 				                    state.left_keys.emplace(row_id, Git4DataDiffRowKey(chunk, state.key_count, row));
@@ -866,7 +938,8 @@ static void Git4DataDiffFunction(ClientContext &context, TableFunctionInput &dat
 	if (state.phase == Git4DataDiffState::Phase::RIGHT) {
 		vector<pair<row_t, vector<Value>>> added_rows;
 		Git4DataDiffCollect(context, state, state.right_scan, state.right_bound, state.right_added_table,
-		                    &state.right_removed_keys, [&](DataChunk &chunk, row_t row_id, idx_t row) {
+		                    state.right_delta_bound, &state.right_removed_keys,
+		                    [&](DataChunk &chunk, row_t row_id, idx_t row) {
 			                    state.right_rows.insert(row_id);
 			                    if (state.left_rows.find(row_id) == state.left_rows.end()) {
 				                    added_rows.emplace_back(row_id, Git4DataDiffRowKey(chunk, state.key_count, row));
