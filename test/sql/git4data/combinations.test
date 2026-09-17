@@ -1,0 +1,139 @@
+# name: test/sql/git4data/combinations.test
+# description: The features in combination, where the individual tests leave the matrix to the reader
+# group: [git4data]
+
+load {TEST_DIR}/combinations.db
+
+# Every module here is covered on its own. What a reader cannot see from that is whether the *pairs* work,
+# and each of the three below was probed first: a window with a delta branch, a captured line with a delta
+# on the child, and a restore beside a branch that holds a line of its own. They are separate mechanisms -
+# a window is a reference the database manages, a captured line is one a child inherits, a restore writes
+# the live table - so each pair is a place where one could have been written without the other in mind.
+
+# 1. A point-in-time window and a delta branch, open and closed.
+statement ok
+CREATE TABLE t (k INTEGER PRIMARY KEY, v INTEGER)
+
+statement ok
+INSERT INTO t SELECT range, range FROM range(100)
+
+statement ok
+CHECKPOINT
+
+statement ok
+PRAGMA git4data_create_branch('d', '')
+
+statement ok
+CREATE TABLE d_add (k INTEGER PRIMARY KEY, v INTEGER)
+
+statement ok
+CREATE TABLE d_del (k INTEGER PRIMARY KEY)
+
+statement ok
+PRAGMA git4data_bind_branch_delta('t', 'd', 'd_add', 'd_del')
+
+statement ok
+PRAGMA git4data_apply('t', 'd', 'DELETE FROM t WHERE k < 50')
+
+# the window is a reference the database keeps; the branch is one the caller keeps, and both hold the
+# timeline down at once
+statement ok
+PRAGMA git4data_pitr(3600)
+
+query I
+SELECT count(*) FROM t AT (BRANCH => 'd')
+----
+50
+
+statement ok
+PRAGMA git4data_apply('t', 'd', 'INSERT INTO t VALUES (500, 500)')
+
+query II
+SELECT (SELECT count(*) FROM t AT (BRANCH => 'd')), (SELECT count(*) FROM t AT (BRANCH => 'd') WHERE k = 500)
+----
+51	1
+
+# and the live table never took any of it
+query I
+SELECT count(*) FROM t
+----
+100
+
+# closing the window takes the database's own reference away and leaves the branch reading what it holds
+statement ok
+PRAGMA git4data_pitr(0)
+
+query II
+SELECT (SELECT count(*) FROM t AT (BRANCH => 'd')), (SELECT count(*) FROM t AT (BRANCH => 'd') WHERE k = 500)
+----
+51	1
+
+# 2. A captured line with a delta on the child that inherited it.
+statement ok
+CREATE TABLE c (k INTEGER PRIMARY KEY, v INTEGER)
+
+statement ok
+INSERT INTO c SELECT range, range FROM range(10)
+
+statement ok
+CHECKPOINT
+
+statement ok
+PRAGMA git4data_create_branch('parent', '')
+
+statement ok
+PRAGMA git4data_materialize('c', 'parent', 'c_parent')
+
+statement ok
+UPDATE c_parent SET v = 111 WHERE k = 1
+
+# the child inherits the parent's line at the commit the capture names
+statement ok
+PRAGMA git4data_create_snapshot('cap', 'parent')
+
+statement ok
+PRAGMA git4data_create_branch('child', 'cap')
+
+query I
+SELECT v FROM c AT (BRANCH => 'child') WHERE k = 1
+----
+111
+
+# and its own delta sits on top of what it inherited
+statement ok
+CREATE TABLE child_add (k INTEGER PRIMARY KEY, v INTEGER)
+
+statement ok
+CREATE TABLE child_del (k INTEGER PRIMARY KEY)
+
+statement ok
+PRAGMA git4data_bind_branch_delta('c', 'child', 'child_add', 'child_del')
+
+statement ok
+PRAGMA git4data_apply('c', 'child', 'UPDATE c SET v = 222 WHERE k = 2')
+
+query III
+SELECT (SELECT v FROM c AT (BRANCH => 'child') WHERE k = 1),
+       (SELECT v FROM c AT (BRANCH => 'child') WHERE k = 2),
+       (SELECT count(*) FROM c AT (BRANCH => 'child'))
+----
+111	222	10
+
+# 3. A restore beside a branch that holds a line of its own: the restore writes the live table and the
+# branch's own table is not what it writes.
+statement ok
+PRAGMA git4data_apply('c', 'child', 'INSERT INTO c VALUES (900, 900)')
+
+statement ok
+PRAGMA git4data_restore('c', 'child')
+
+query III
+SELECT (SELECT count(*) FROM c), (SELECT v FROM c WHERE k = 2), (SELECT count(*) FROM c WHERE k = 900)
+----
+11	222	1
+
+# the branch's own table still holds its line, and the child still reads it
+query II
+SELECT (SELECT v FROM c AT (BRANCH => 'child') WHERE k = 2), (SELECT count(*) FROM c_parent)
+----
+222	10
