@@ -118,6 +118,21 @@ SELECT count(*) FROM t_mine
 ----
 1
 
+# dropping the branch takes the table it reads, and the copy the first materialize made was already
+# gone rather than outliving the branch it was made for - which is what the whole fix is for
+statement ok
+PRAGMA git4data_drop_branch('b')
+
+statement error
+SELECT count(*) FROM t_b4
+----
+<REGEX>:.*Table with name t_b4 does not exist.*
+
+query I
+SELECT count(*) FROM t_mine
+----
+1
+
 # a flag that is neither true nor false is refused rather than taken for one of them
 statement error
 PRAGMA git4data_bind_branch_table('t', 'b', 't_mine', 'maybe')
