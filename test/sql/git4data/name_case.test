@@ -1,0 +1,110 @@
+# name: test/sql/git4data/name_case.test
+# description: A table name is not case-sensitive, and neither is what a mapping is found by
+# group: [git4data]
+
+load {TEST_DIR}/name_case.db
+
+# A name in SQL is not case-sensitive: `Mixed` and `mixed` are the same table. Two places compared them as
+# strings, and both were measured before this:
+#
+#   PRAGMA git4data_apply('Mixed','b','UPDATE mixed SET v = 111 WHERE k = 1');
+#   Invalid Input Error: git4data_apply was given "Mixed", but the statement writes "mixed"
+#
+# and, worse because it says nothing, a mapping whose source was written as `Src` was not found by a read
+# that named it `src` - the read fell back to the pinned image, 1 where the branch held 111. Within a
+# session the source's oid covered that; after a reopen it does not, because oids are not persisted.
+statement ok
+CREATE TABLE "Mixed" (k INTEGER PRIMARY KEY, v INTEGER)
+
+statement ok
+INSERT INTO "Mixed" SELECT range, range FROM range(10)
+
+statement ok
+CHECKPOINT
+
+statement ok
+PRAGMA git4data_create_branch('b', '')
+
+statement ok
+CREATE TABLE m_add (k INTEGER PRIMARY KEY, v INTEGER)
+
+statement ok
+CREATE TABLE m_del (k INTEGER PRIMARY KEY)
+
+# a delta bound under one spelling of the source's name
+statement ok
+PRAGMA git4data_bind_branch_delta('Mixed', 'b', 'm_add', 'm_del')
+
+query I
+SELECT count(*) FROM mixed AT (BRANCH => 'b')
+----
+10
+
+# the statement may write the table under any spelling of its name
+statement ok
+PRAGMA git4data_apply('Mixed', 'b', 'UPDATE mixed SET v = 111 WHERE k = 1')
+
+query I
+SELECT v FROM MIXED AT (BRANCH => 'b') WHERE k = 1
+----
+111
+
+# and the other direction: named one way, applied the other
+statement ok
+PRAGMA git4data_apply('mixed', 'b', 'UPDATE "Mixed" SET v = 222 WHERE k = 2')
+
+query I
+SELECT v FROM "Mixed" AT (BRANCH => 'b') WHERE k = 2
+----
+222
+
+# A branch's own table is found the same way, which is the half that used to be silent: bound under one
+# spelling, the mapping has to answer a read under another, and it has to keep answering after a reopen.
+statement ok
+CREATE TABLE src_store (k INTEGER PRIMARY KEY, v INTEGER)
+
+statement ok
+INSERT INTO src_store SELECT range, range FROM range(10)
+
+statement ok
+CHECKPOINT
+
+statement ok
+PRAGMA git4data_create_branch('case_branch', '')
+
+statement ok
+CREATE TABLE case_line (k INTEGER PRIMARY KEY, v INTEGER)
+
+statement ok
+INSERT INTO case_line SELECT range, range FROM range(10)
+
+statement ok
+PRAGMA git4data_bind_branch_table('SRC_STORE', 'case_branch', 'case_line')
+
+statement ok
+UPDATE case_line SET v = 999 WHERE k = 3
+
+query I
+SELECT v FROM src_store AT (BRANCH => 'case_branch') WHERE k = 3
+----
+999
+
+statement ok
+CHECKPOINT
+
+restart
+
+# the oid that covered this within a session is gone; the name is what is left, and it is not exact
+query I
+SELECT v FROM src_store AT (BRANCH => 'case_branch') WHERE k = 3
+----
+999
+
+# unbinding names the source too, and is found under any spelling
+statement ok
+PRAGMA git4data_unbind('SRC_STORE', 'case_branch')
+
+query I
+SELECT v FROM src_store AT (BRANCH => 'case_branch') WHERE k = 3
+----
+3

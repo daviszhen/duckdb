@@ -107,7 +107,7 @@ void BranchRegistry::SetStorageTable(const string &branch, const string &source_
 		return;
 	}
 	for (auto &existing : entry->second.storage_tables) {
-		if (existing.source == source_table) {
+		if (StringUtil::CIEquals(existing.source, source_table)) {
 			existing.storage = storage_table;
 			existing.oid = storage_oid;
 			existing.source_oid = source_oid;
@@ -129,7 +129,7 @@ bool BranchRegistry::ClearStorageTable(const string &branch, const string &sourc
 	}
 	auto &storage_tables = entry->second.storage_tables;
 	for (idx_t i = 0; i < storage_tables.size(); i++) {
-		if (storage_tables[i].source != source_table) {
+		if (!StringUtil::CIEquals(storage_tables[i].source, source_table)) {
 			continue;
 		}
 		storage_tables.erase(storage_tables.begin() + NumericCast<int64_t>(i));
@@ -147,7 +147,7 @@ bool BranchRegistry::GetStorageTable(const string &branch, const string &source_
 		return false;
 	}
 	for (auto &existing : entry->second.storage_tables) {
-		if (existing.source == source_table) {
+		if (StringUtil::CIEquals(existing.source, source_table)) {
 			result = existing;
 			return true;
 		}
@@ -155,21 +155,22 @@ bool BranchRegistry::GetStorageTable(const string &branch, const string &source_
 	return false;
 }
 
-void BranchRegistry::ClearDeltaTable(const string &branch, const string &source_table) {
+bool BranchRegistry::ClearDeltaTable(const string &branch, const string &source_table) {
 	lock_guard<mutex> guard(lock);
 	auto entry = branches.find(branch);
 	if (entry == branches.end()) {
-		return;
+		return false;
 	}
 	auto &deltas = entry->second.deltas;
 	for (idx_t i = 0; i < deltas.size(); i++) {
-		if (deltas[i].source != source_table) {
+		if (!StringUtil::CIEquals(deltas[i].source, source_table)) {
 			continue;
 		}
 		deltas.erase(deltas.begin() + NumericCast<int64_t>(i));
 		dirty.store(true);
-		return;
+		return true;
 	}
+	return false;
 }
 
 bool BranchRegistry::GetDeltaTable(const string &branch, const string &source_table,
@@ -180,7 +181,7 @@ bool BranchRegistry::GetDeltaTable(const string &branch, const string &source_ta
 		return false;
 	}
 	for (auto &delta : entry->second.deltas) {
-		if (delta.source == source_table) {
+		if (StringUtil::CIEquals(delta.source, source_table)) {
 			result = delta;
 			return true;
 		}
@@ -196,7 +197,7 @@ void BranchRegistry::SetDeltaTable(const string &branch, const string &source_ta
 		return;
 	}
 	for (auto &delta : entry->second.deltas) {
-		if (delta.source == source_table) {
+		if (StringUtil::CIEquals(delta.source, source_table)) {
 			delta.added = added;
 			delta.removed = removed;
 			delta.added_oid = added_oid;
@@ -245,12 +246,12 @@ bool BranchRegistry::OtherBranchUsesTable(const string &name, const string &tabl
 			continue;
 		}
 		for (auto &storage : entry.second.storage_tables) {
-			if (storage.storage == table || (oid != 0 && storage.oid == oid)) {
+			if (StringUtil::CIEquals(storage.storage, table) || (oid != 0 && storage.oid == oid)) {
 				return true;
 			}
 		}
 		for (auto &delta : entry.second.deltas) {
-			if (delta.added == table || delta.removed == table) {
+			if (StringUtil::CIEquals(delta.added, table) || StringUtil::CIEquals(delta.removed, table)) {
 				return true;
 			}
 		}

@@ -583,7 +583,12 @@ static string PragmaGit4DataUnbind(ClientContext &context, const FunctionParamet
 	};
 	Git4DataStorageTable storage;
 	if (transaction_manager.branches.GetStorageTable(branch_name, table_name, storage)) {
-		transaction_manager.branches.ClearStorageTable(branch_name, table_name);
+		// the mapping is found and cleared by the same comparison, so a name that differs only in case
+		// cannot be reported as unbound while the mapping stays - measured, that is exactly what happened
+		// before the clearing comparison was made case-insensitive with the finding one
+		if (!transaction_manager.branches.ClearStorageTable(branch_name, table_name)) {
+			throw InternalException("Could not unbind branch \"%s\" from \"%s\"", branch_name, table_name);
+		}
 		// the table itself is the caller's: it was created for the branch by materialize, and a caller
 		// who gave one by hand would not expect this call to drop it either
 		return StringUtil::Format("SELECT '%s'::VARCHAR AS branch, '%s'::VARCHAR AS table_name, 'storage' AS "
@@ -592,7 +597,9 @@ static string PragmaGit4DataUnbind(ClientContext &context, const FunctionParamet
 	}
 	Git4DataBranchDelta delta;
 	if (transaction_manager.branches.GetDeltaTable(branch_name, table_name, delta)) {
-		transaction_manager.branches.ClearDeltaTable(branch_name, table_name);
+		if (!transaction_manager.branches.ClearDeltaTable(branch_name, table_name)) {
+			throw InternalException("Could not unbind branch \"%s\" from \"%s\"", branch_name, table_name);
+		}
 		return StringUtil::Format("SELECT '%s'::VARCHAR AS branch, '%s'::VARCHAR AS table_name, 'delta' AS "
 		                          "unbound, '%s'::VARCHAR AS was",
 		                          escape(branch_name), escape(table_name), escape(delta.added));
@@ -881,7 +888,9 @@ static void Git4DataCheckApplyTarget(TableRef &ref, const string &table_name) {
 	}
 	auto &base = ref.Cast<BaseTableRef>();
 	auto written = base.GetQualifiedName().Name().GetIdentifierName();
-	if (written != table_name) {
+	// a name in SQL is not case-sensitive, and neither is this: measured, "Mixed" and mixed are the same
+	// table, and comparing them as strings refused a statement that wrote the right one
+	if (!StringUtil::CIEquals(written, table_name)) {
 		throw InvalidInputException("git4data_apply was given \"%s\", but the statement writes \"%s\": the statement "
 		                            "has to write the table the branch's delta is for",
 		                            table_name, written);
@@ -1249,7 +1258,7 @@ static string PragmaGit4DataMerge(ClientContext &context, const FunctionParamete
 	bool drop_merge_base = false;
 	if (transaction_manager.branches.Get(ancestor, ancestor_branch)) {
 		for (auto &storage_entry : ancestor_branch.storage_tables) {
-			if (storage_entry.source != table_name) {
+			if (!StringUtil::CIEquals(storage_entry.source, table_name)) {
 				continue;
 			}
 			auto &storage_table =

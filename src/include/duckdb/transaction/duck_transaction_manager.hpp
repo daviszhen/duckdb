@@ -216,8 +216,9 @@ public:
 	void SetDeltaTable(const string &branch, const string &source_table, const string &added, const string &removed,
 	                   idx_t added_oid = 0, idx_t removed_oid = 0, idx_t source_oid = 0);
 	//! Forget a branch's delta for a source table, which is what giving it a table of its own does - the
-	//! copy is the line from then on, and a delta beside it would be read by nothing.
-	void ClearDeltaTable(const string &branch, const string &source_table);
+	//! copy is the line from then on, and a delta beside it would be read by nothing. Returns false when
+	//! it had no delta for that source, so a caller cannot report having cleared one it did not.
+	bool ClearDeltaTable(const string &branch, const string &source_table);
 	//! The delta a branch differs from its base by, if it has one. Returns false when it has none, which
 	//! is also what a branch with a table of its own has for that source.
 	bool GetDeltaTable(const string &branch, const string &source_table, Git4DataBranchDelta &result) const;

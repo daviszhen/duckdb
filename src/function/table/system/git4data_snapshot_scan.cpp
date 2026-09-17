@@ -244,7 +244,7 @@ static string Git4DataBranchStorageTable(ClientContext &context, const Git4DataB
 	auto requested = Catalog::GetEntry<TableCatalogEntry>(context, QualifiedName(Identifier(table_name)),
 	                                                      OnEntryNotFound::RETURN_NULL);
 	for (auto &entry : branch.storage_tables) {
-		if (entry.source != table_name) {
+		if (!StringUtil::CIEquals(entry.source, table_name)) {
 			if (!requested || entry.source_oid == 0 || entry.source_oid != requested->oid) {
 				continue;
 			}
@@ -405,7 +405,8 @@ static Git4DataLineState ResolveGit4DataLineState(ClientContext &context, DuckTr
 	for (auto &delta : branch.deltas) {
 		// the source's name can change under the mapping, and its oid is what survives that
 		auto &requested = Catalog::GetEntry<TableCatalogEntry>(context, QualifiedName(Identifier(table_name)));
-		if (delta.source != table_name && (delta.source_oid == 0 || delta.source_oid != requested.oid)) {
+		if (!StringUtil::CIEquals(delta.source, table_name) &&
+		    (delta.source_oid == 0 || delta.source_oid != requested.oid)) {
 			continue;
 		}
 		// the delta's tables are the caller's: one that has since been dropped falls back to the base, and
