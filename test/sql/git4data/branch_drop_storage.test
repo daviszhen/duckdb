@@ -107,3 +107,71 @@ query I
 SELECT count(*) FROM duckdb_tables() WHERE table_name = 't_keep'
 ----
 0
+
+# A table two branches were given is not one branch's alone to take. Dropping a branch takes the copies
+# it holds with it, and doing that to a table another branch reads leaves that branch on its pinned image
+# - measured before this: a branch bound to another branch's copy fell back from v = 111 to v = 1 when
+# the other branch was dropped, with nothing said. Only the tables no other branch names go with it.
+statement ok
+CREATE TABLE shared_src (k INTEGER PRIMARY KEY, v INTEGER)
+
+statement ok
+INSERT INTO shared_src SELECT range, range FROM range(10)
+
+statement ok
+CHECKPOINT
+
+statement ok
+PRAGMA git4data_create_branch('holder', '')
+
+statement ok
+PRAGMA git4data_create_branch('borrower', '')
+
+statement ok
+PRAGMA git4data_materialize('shared_src', 'holder', 'shared_table')
+
+statement ok
+PRAGMA git4data_bind_branch_table('shared_src', 'borrower', 'shared_table')
+
+statement ok
+UPDATE shared_table SET v = 111 WHERE k = 1
+
+query II
+SELECT (SELECT v FROM shared_src AT (BRANCH => 'holder') WHERE k = 1),
+       (SELECT v FROM shared_src AT (BRANCH => 'borrower') WHERE k = 1)
+----
+111	111
+
+statement ok
+PRAGMA git4data_drop_branch('holder')
+
+# the borrower keeps its line, and the table it reads is still there
+query II
+SELECT (SELECT v FROM shared_src AT (BRANCH => 'borrower') WHERE k = 1),
+       (SELECT count(*) FROM shared_table)
+----
+111	10
+
+# and a table nothing else names still goes with its branch, as before
+statement ok
+CREATE TABLE lone_src (k INTEGER PRIMARY KEY, v INTEGER)
+
+statement ok
+INSERT INTO lone_src SELECT range, range FROM range(5)
+
+statement ok
+CHECKPOINT
+
+statement ok
+PRAGMA git4data_create_branch('lone', '')
+
+statement ok
+PRAGMA git4data_materialize('lone_src', 'lone', 'lone_table')
+
+statement ok
+PRAGMA git4data_drop_branch('lone')
+
+statement error
+SELECT count(*) FROM lone_table
+----
+<REGEX>:.*Table with name lone_table does not exist.*

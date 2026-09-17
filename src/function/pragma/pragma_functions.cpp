@@ -1565,6 +1565,13 @@ static string PragmaGit4DataDropBranch(ClientContext &context, const FunctionPar
 		if (resolved.empty()) {
 			continue;
 		}
+		// A table two branches were given is not this one's alone to take: dropping it would leave the
+		// other reading its pinned image, silently - measured, a branch bound to another branch's copy
+		// fell back from v = 111 to the pinned v = 1 when that other branch was dropped. Only the tables
+		// no other branch names go with it.
+		if (transaction_manager.branches.OtherBranchUsesTable(name, resolved, entry.oid)) {
+			continue;
+		}
 		result += StringUtil::Format("DROP TABLE IF EXISTS %s;\n", KeywordHelper::WriteOptionallyQuoted(resolved));
 	}
 	transaction_manager.branches.Drop(name);

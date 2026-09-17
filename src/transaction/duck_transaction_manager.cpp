@@ -238,6 +238,26 @@ bool BranchRegistry::HasLineDependents(const string &name) const {
 	return false;
 }
 
+bool BranchRegistry::OtherBranchUsesTable(const string &name, const string &table, idx_t oid) const {
+	lock_guard<mutex> guard(lock);
+	for (auto &entry : branches) {
+		if (entry.first == name) {
+			continue;
+		}
+		for (auto &storage : entry.second.storage_tables) {
+			if (storage.storage == table || (oid != 0 && storage.oid == oid)) {
+				return true;
+			}
+		}
+		for (auto &delta : entry.second.deltas) {
+			if (delta.added == table || delta.removed == table) {
+				return true;
+			}
+		}
+	}
+	return false;
+}
+
 bool BranchRegistry::Drop(const string &name) {
 	lock_guard<mutex> guard(lock);
 	auto entry = branches.find(name);
