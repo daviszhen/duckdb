@@ -368,6 +368,69 @@ SELECT v FROM c AT (BRANCH => 'cb') WHERE k = 7
 ----
 7
 
+# The diff reads the same tables the branch does, so it sees the caller's own uncommitted writes to
+# them as well - and the pick and the merge are built on that diff. Measured before this: inside the
+# transaction that inserted a row, the branch read showed it and the diff reported nothing added. This
+# uses a table of its own so the changes it asserts are the only ones there are.
+statement ok
+CREATE TABLE tx (k INTEGER PRIMARY KEY, v INTEGER)
+
+statement ok
+INSERT INTO tx SELECT range, range FROM range(10)
+
+statement ok
+CHECKPOINT
+
+statement ok
+PRAGMA git4data_create_snapshot('tx_before')
+
+statement ok
+PRAGMA git4data_create_branch('txb', '')
+
+statement ok
+CREATE TABLE tx_add (k INTEGER PRIMARY KEY, v INTEGER)
+
+statement ok
+CREATE TABLE tx_del (k INTEGER PRIMARY KEY)
+
+statement ok
+PRAGMA git4data_bind_branch_delta('tx', 'txb', 'tx_add', 'tx_del')
+
+statement ok
+BEGIN
+
+statement ok
+PRAGMA git4data_apply('tx', 'txb', 'INSERT INTO tx VALUES (4000, 4000)')
+
+statement ok
+PRAGMA git4data_apply('tx', 'txb', 'DELETE FROM tx WHERE k = 4')
+
+query II
+SELECT g4d_change, k FROM git4data_diff('tx', 'tx_before', 'txb') ORDER BY g4d_change, k
+----
+added	4000
+removed	4
+
+# and a pick inside that transaction applies what the branch has written so far
+statement ok
+PRAGMA git4data_pick('tx', 'txb', 'tx_before', 'fail')
+
+query III
+SELECT (SELECT count(*) FROM tx WHERE k = 4000),
+       (SELECT count(*) FROM tx WHERE k = 4),
+       (SELECT v FROM tx WHERE k = 4000)
+----
+1	0	4000
+
+statement ok
+ROLLBACK
+
+# the transaction took its work with it: neither the live table nor the branch has it
+query II
+SELECT (SELECT count(*) FROM tx WHERE k = 4000), (SELECT count(*) FROM tx AT (BRANCH => 'txb') WHERE k = 4000)
+----
+0	0
+
 # a refusal leaves the branch alone: nothing was written before the statement was checked
 query I
 SELECT count(*) FROM t AT (BRANCH => 'b')

@@ -756,6 +756,10 @@ struct Git4DataDiffState : public GlobalTableFunctionState {
 	DataChunk key_hashes;
 	//! The database the delta's tables live in, so a scan of them can run under the caller's transaction
 	optional_ptr<AttachedDatabase> delta_database;
+	//! The added table currently open, for the scan of the caller's own uncommitted rows
+	optional_ptr<DataTable> added_storage;
+	//! Whether that added table has had its local-storage scan set up
+	bool added_local_open = false;
 	vector<StorageIndex> column_ids;
 	idx_t key_count = 0;
 	VisibilityBound left_bound;
@@ -1109,11 +1113,38 @@ static void Git4DataDiffCollect(ClientContext &context, Git4DataDiffState &state
 		                                                           state.column_ids, nullptr);
 		state.open_added_table = added_table;
 		state.added_bound = added_bound;
+		state.added_storage = table.GetStorage();
+		state.added_local_open = false;
 	}
 	ScanOptions added_options(Git4DataDeltaTransactionData(context, state.delta_database, state.added_bound));
 	while (true) {
 		state.added_chunk.Reset();
 		state.added_scan.table_state.Scan(added_options, state.added_chunk);
+		auto count = state.added_chunk.size();
+		if (count == 0) {
+			break;
+		}
+		auto row_ids = state.added_chunk.data[state.key_count + state.value_count].Values<row_t>();
+		for (idx_t i = 0; i < count; i++) {
+			callback(state.added_chunk, row_ids[i].GetValue(), i);
+		}
+	}
+	// The rows the caller has added to this table and not committed are in its local storage rather than
+	// in the row groups above, and a diff that cannot see them disagrees with the branch it is diffing:
+	// measured, inside the transaction that inserted a row the branch read showed it and the diff
+	// reported nothing added. The pick and the merge are built on this diff, so they had it too.
+	if (!state.added_storage || !state.delta_database) {
+		return;
+	}
+	auto &transaction = DuckTransaction::Get(context, *state.delta_database);
+	auto &local_storage = LocalStorage::Get(transaction);
+	if (!state.added_local_open) {
+		local_storage.InitializeScan(*state.added_storage, state.added_scan.local_state, nullptr);
+		state.added_local_open = true;
+	}
+	while (true) {
+		state.added_chunk.Reset();
+		local_storage.Scan(state.added_scan.local_state, state.column_ids, state.added_chunk);
 		auto count = state.added_chunk.size();
 		if (count == 0) {
 			break;
