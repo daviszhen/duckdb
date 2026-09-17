@@ -290,6 +290,10 @@ public:
 	//! window, so the last `window` of history stays reachable without anyone remembering to take a
 	//! reference. A window of zero moves it at every checkpoint, which keeps nothing.
 	static constexpr const char *PITR_REFERENCE = "__pitr__";
+	//! The reference a merge names the ancestor's pin with, so both diffs read the state two lines parted
+	//! at. It exists for the length of one merge; a merge that fails leaves it, which is why it is not
+	//! counted against the quota and not listed - it is not a reference the user asked for.
+	static constexpr const char *MERGE_BASE_REFERENCE = "__merge_base__";
 	void SetPitr(timestamp_t window, timestamp_t now);
 	//! Put a window read from disk back in place without touching the reference it moves
 	void RestorePitr(timestamp_t window) {

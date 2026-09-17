@@ -115,8 +115,7 @@ void BranchRegistry::SetStorageTable(const string &branch, const string &source_
 			return;
 		}
 	}
-	entry->second.storage_tables.push_back(
-	    Git4DataStorageTable {source_table, storage_table, storage_oid, source_oid});
+	entry->second.storage_tables.push_back(Git4DataStorageTable {source_table, storage_table, storage_oid, source_oid});
 	dirty.store(true);
 }
 
@@ -502,6 +501,11 @@ idx_t DuckTransactionManager::UserSnapshotCount() const {
 	auto count = snapshots.Count();
 	if (pitr_enabled && count > 0) {
 		// the recovery window holds one reference of its own, which the user did not ask for
+		count--;
+	}
+	Git4DataSnapshot merge_base;
+	if (count > 0 && snapshots.Get(MERGE_BASE_REFERENCE, merge_base)) {
+		// nor is the base a merge reads against, and a merge that failed leaves it behind
 		count--;
 	}
 	return count;

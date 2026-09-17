@@ -543,10 +543,11 @@ static void PragmaGit4DataBindBranchDelta(ClientContext &context, const Function
 				if (line_delta.source != source_table) {
 					continue;
 				}
-				throw InvalidInputException("Branch \"%s\" inherits a line that differs by a delta, so a delta of its own "
-				                            "would be a second one over the same source and a read would have to apply both. "
-				                            "Materialize one of the two lines first.",
-				                            branch_name);
+				throw InvalidInputException(
+				    "Branch \"%s\" inherits a line that differs by a delta, so a delta of its own "
+				    "would be a second one over the same source and a read would have to apply both. "
+				    "Materialize one of the two lines first.",
+				    branch_name);
 			}
 		}
 	}
@@ -758,12 +759,12 @@ static string PragmaGit4DataMerge(ClientContext &context, const FunctionParamete
 				// this branch's pinned image, a commit a reference can name. What the table holds now
 				// is that image plus this branch's own changes since, and reading it as the base is
 				// what would apply those changes backwards; naming the pin instead is the fix.
-				transaction_manager.snapshots.Drop("__merge_base__");
-				if (!transaction_manager.snapshots.Create("__merge_base__", ancestor_branch.pin,
-				                                          Timestamp::GetCurrentTimestamp())) {
+				transaction_manager.snapshots.Drop(DuckTransactionManager::MERGE_BASE_REFERENCE);
+				if (!transaction_manager.snapshots.Create(DuckTransactionManager::MERGE_BASE_REFERENCE,
+				                                          ancestor_branch.pin, Timestamp::GetCurrentTimestamp())) {
 					throw InternalException("Could not create the internal merge base reference");
 				}
-				base_reference = "__merge_base__";
+				base_reference = DuckTransactionManager::MERGE_BASE_REFERENCE;
 				drop_merge_base = true;
 			}
 		}
@@ -805,13 +806,13 @@ static string PragmaGit4DataMerge(ClientContext &context, const FunctionParamete
 	auto right_image =
 	    FormatGit4DataAtClause(table_name, right_name, ResolveGit4DataReference(transaction_manager, right_name));
 
-	string result =
-	    StringUtil::Format("CREATE OR REPLACE TEMP TABLE g4d_merge_conflicts AS WITH g4d_l AS (SELECT %s FROM %s), "
-	                       "g4d_r AS (SELECT %s FROM %s), g4d_both AS (SELECT %s FROM g4d_l INTERSECT SELECT %s FROM "
-	                       "g4d_r) SELECT %s FROM g4d_both g4d_b WHERE NOT EXISTS (SELECT 1 FROM (SELECT * FROM %s) "
-	                       "g4d_x JOIN (SELECT * FROM %s) g4d_y ON (%s) WHERE %s AND (%s));\n",
-	                       key_list, diff_left, key_list, diff_right, key_list, key_list, key_list_both, quoted_into,
-	                       right_image, key_match_xy, key_match_by, BuildGit4DataRowComparison(table, "g4d_x", "g4d_y"));
+	string result = StringUtil::Format(
+	    "CREATE OR REPLACE TEMP TABLE g4d_merge_conflicts AS WITH g4d_l AS (SELECT %s FROM %s), "
+	    "g4d_r AS (SELECT %s FROM %s), g4d_both AS (SELECT %s FROM g4d_l INTERSECT SELECT %s FROM "
+	    "g4d_r) SELECT %s FROM g4d_both g4d_b WHERE NOT EXISTS (SELECT 1 FROM (SELECT * FROM %s) "
+	    "g4d_x JOIN (SELECT * FROM %s) g4d_y ON (%s) WHERE %s AND (%s));\n",
+	    key_list, diff_left, key_list, diff_right, key_list, key_list, key_list_both, quoted_into, right_image,
+	    key_match_xy, key_match_by, BuildGit4DataRowComparison(table, "g4d_x", "g4d_y"));
 	if (policy == "fail") {
 		result += "SELECT CASE WHEN EXISTS (SELECT 1 FROM g4d_merge_conflicts) THEN error('merge conflict: use "
 		          "policy skip or accept, or resolve it first') ELSE 0 END;\n";
@@ -824,9 +825,10 @@ static string PragmaGit4DataMerge(ClientContext &context, const FunctionParamete
 	// Accepting means the right side's row replaces whatever the left has for that key, including when
 	// the right side added it and the left also has one - so every key the right touched is cleared
 	// first, not only the ones it removed or changed.
-	result += StringUtil::Format(
-	    "DELETE FROM %s WHERE (%s) IN (SELECT %s FROM %s WHERE g4d_change IN (%s)%s);\n", quoted_into, key_list, key_list,
-	    diff_right, policy == "accept" ? "'added', 'removed', 'changed'" : "'removed', 'changed'", conflict_filter);
+	result += StringUtil::Format("DELETE FROM %s WHERE (%s) IN (SELECT %s FROM %s WHERE g4d_change IN (%s)%s);\n",
+	                             quoted_into, key_list, key_list, diff_right,
+	                             policy == "accept" ? "'added', 'removed', 'changed'" : "'removed', 'changed'",
+	                             conflict_filter);
 	result += StringUtil::Format(
 	    "INSERT INTO %s SELECT * FROM %s WHERE (%s) IN (SELECT %s FROM %s WHERE g4d_change IN (%s)%s) AND (%s) NOT IN "
 	    "(SELECT %s FROM %s);\n",
@@ -835,7 +837,8 @@ static string PragmaGit4DataMerge(ClientContext &context, const FunctionParamete
 	result += "DROP TABLE g4d_merge_conflicts;";
 	if (drop_merge_base) {
 		// the reference was only there for the two diffs above, which have run by now
-		result += "\nPRAGMA git4data_drop_snapshot('__merge_base__');";
+		result +=
+		    StringUtil::Format("\nPRAGMA git4data_drop_snapshot('%s');", DuckTransactionManager::MERGE_BASE_REFERENCE);
 	}
 	return result;
 }
@@ -1107,20 +1110,29 @@ static string PragmaGit4DataSnapshots(ClientContext &context, const FunctionPara
 		return "SELECT NULL::VARCHAR AS snapshot_name, NULL::UBIGINT AS pinned_commit_id, "
 		       "NULL::TIMESTAMP AS created, NULL::VARCHAR AS line WHERE false";
 	}
+	vector<Git4DataSnapshot> visible;
+	for (auto &entry : entries) {
+		if (entry.name == DuckTransactionManager::MERGE_BASE_REFERENCE) {
+			// an internal reference, alive only for the length of a merge - and left behind by one that
+			// failed, which is why it is neither counted nor shown
+			continue;
+		}
+		visible.push_back(entry);
+	}
 	string query = "SELECT * FROM (VALUES ";
-	for (idx_t i = 0; i < entries.size(); i++) {
+	for (idx_t i = 0; i < visible.size(); i++) {
 		if (i > 0) {
 			query += ", ";
 		}
 		// Snapshot names are user input, escape them before splicing into SQL
-		auto name = StringUtil::Replace(entries[i].name, "'", "''");
+		auto name = StringUtil::Replace(visible[i].name, "'", "''");
 		// NULL rather than an empty string for the main line, so a listing says which references
 		// capture a branch's own state and which are the table at a commit
-		auto line = entries[i].line.empty()
+		auto line = visible[i].line.empty()
 		                ? string("NULL::VARCHAR")
-		                : StringUtil::Format("'%s'::VARCHAR", StringUtil::Replace(entries[i].line, "'", "''"));
-		query += StringUtil::Format("('%s'::VARCHAR, %llu::UBIGINT, '%s'::TIMESTAMP, %s)", name, entries[i].pin,
-		                            Timestamp::ToString(entries[i].created), line);
+		                : StringUtil::Format("'%s'::VARCHAR", StringUtil::Replace(visible[i].line, "'", "''"));
+		query += StringUtil::Format("('%s'::VARCHAR, %llu::UBIGINT, '%s'::TIMESTAMP, %s)", name, visible[i].pin,
+		                            Timestamp::ToString(visible[i].created), line);
 	}
 	query += ") t(snapshot_name, pinned_commit_id, created, line) ORDER BY pinned_commit_id";
 	return query;

@@ -178,3 +178,72 @@ query IIII
 PRAGMA git4data_limits
 ----
 4	4	2	2
+
+# A merge that fails must not cost the user a snapshot. The merge names the ancestor's pin with an internal
+# reference and drops it again, but a conflict aborts its statement group and the drop never runs - so the
+# entry stayed, counted against the quota. Measured with a limit of one: the user's next snapshot was
+# refused with "At most 1 snapshots are allowed for this database, and 1 already exist". The internal
+# reference is now neither counted nor listed.
+# the sections above set a branch limit of two, which this one needs lifted
+statement ok
+PRAGMA git4data_limit('branch', -1)
+
+statement ok
+CREATE TABLE mt (k INTEGER PRIMARY KEY, v INTEGER)
+
+statement ok
+INSERT INTO mt SELECT range, range FROM range(10)
+
+statement ok
+PRAGMA git4data_create_branch('mroot', '')
+
+statement ok
+PRAGMA git4data_create_branch('mp', 'mroot')
+
+statement ok
+PRAGMA git4data_materialize('mt', 'mp', 'mt_p')
+
+statement ok
+UPDATE mt_p SET v = 50 WHERE k = 5
+
+statement ok
+PRAGMA git4data_create_branch('ma', 'mp')
+
+statement ok
+PRAGMA git4data_create_branch('mb', 'mp')
+
+statement ok
+PRAGMA git4data_materialize('mt', 'ma', 'mt_a')
+
+statement ok
+PRAGMA git4data_materialize('mt', 'mb', 'mt_b')
+
+statement ok
+UPDATE mt_a SET v = 100 WHERE k = 1
+
+statement ok
+UPDATE mt_b SET v = 200 WHERE k = 1
+
+# Four snapshots are already held by the sections above, so the limit is set to five: the user's next
+# snapshot fits, and the one a failed merge would have leaked does not.
+statement ok
+PRAGMA git4data_limit('snapshot', 5)
+
+statement error
+PRAGMA git4data_merge('mt', 'ma', 'mb', 'fail')
+----
+<REGEX>:.*merge conflict.*
+
+# the merge failed, and it cost nothing: four snapshots are still four
+query IIII
+PRAGMA git4data_limits
+----
+5	4	-1	6
+
+statement ok
+PRAGMA git4data_create_snapshot('mine_after_failure')
+
+query IIII
+PRAGMA git4data_limits
+----
+5	5	-1	6
