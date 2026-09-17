@@ -9,6 +9,8 @@
 #include "duckdb/storage/table/scan_state.hpp"
 #include "duckdb/transaction/duck_transaction_manager.hpp"
 #include "duckdb/common/unordered_set.hpp"
+#include "duckdb/common/types/hash.hpp"
+#include "duckdb/common/vector_operations/vector_operations.hpp"
 #include "duckdb/parser/constraints/unique_constraint.hpp"
 
 namespace duckdb {
@@ -25,6 +27,10 @@ struct Git4DataSnapshotScanBindData : public TableFunctionData {
 	//! its base instead of differing from it
 	string delta_added;
 	string delta_removed;
+	//! The keys that delta removed, as strings and as hashes: the string decides, and the hash only
+	//! spares the base's rows the comparison they cannot win
+	unordered_set<string> removed_keys;
+	unordered_set<hash_t> removed_key_hashes;
 	//! The commit this reference's delta is read at: its own pin, or the pin it captured a line at
 	VisibilityBound delta_bound;
 };
@@ -46,11 +52,31 @@ static string Git4DataKeyString(DataChunk &chunk, const vector<idx_t> &positions
 	return key;
 }
 
+//! The hash of a row's key tuple, computed from the chunk's vectors rather than from the key string.
+//! It is never the answer - the string above is - but building a string for every row of a table to
+//! find the few a delta removed is what made a delta read cost about 1.4 us a row (measured, 0.554 s
+//! for 400,000 rows against 0.001 s for the same rows as a pin with no delta). A row whose hash is not
+//! in the removed set cannot be in that set either, so the string is built only for the rows that could
+//! be, and the exact comparison still decides.
+static void Git4DataHashKeyColumns(DataChunk &chunk, const vector<idx_t> &positions, DataChunk &hashes) {
+	for (idx_t i = 0; i < positions.size(); i++) {
+		VectorOperations::Hash(chunk.data[positions[i]], hashes.data[i], chunk.size());
+	}
+}
+
+static hash_t Git4DataRowKeyHash(DataChunk &hashes, idx_t row) {
+	auto hash = hashes.data[0].GetValue(row).GetValue<hash_t>();
+	for (idx_t i = 1; i < hashes.ColumnCount(); i++) {
+		hash = CombineHash(hash, hashes.data[i].GetValue(row).GetValue<hash_t>());
+	}
+	return hash;
+}
+
 //! The keys a delta removed from its base, read once while a read is set up. A key is a tuple of
 //! arbitrary columns and this is the only place the tuple is compared, so it is held as one string.
 static void Git4DataCollectRemovedKeys(ClientContext &context, const string &removed_table,
                                        const vector<LogicalType> &key_types, idx_t key_count, VisibilityBound bound,
-                                       unordered_set<string> &result) {
+                                       unordered_set<string> &result, unordered_set<hash_t> &hashes_result) {
 	if (removed_table.empty()) {
 		return;
 	}
@@ -66,6 +92,12 @@ static void Git4DataCollectRemovedKeys(ClientContext &context, const string &rem
 	TableScanState scan;
 	DataChunk chunk;
 	chunk.Initialize(Allocator::Get(context), key_types);
+	vector<LogicalType> hash_types;
+	for (idx_t i = 0; i < key_count; i++) {
+		hash_types.push_back(LogicalType::HASH);
+	}
+	DataChunk hashes;
+	hashes.Initialize(Allocator::Get(context), hash_types);
 	scan.Initialize(removed_ids, nullptr);
 	QueryContext query_context;
 	groups.InitializeScan(query_context, scan.table_state, removed_ids, nullptr);
@@ -76,7 +108,9 @@ static void Git4DataCollectRemovedKeys(ClientContext &context, const string &rem
 		if (chunk.size() == 0) {
 			break;
 		}
+		Git4DataHashKeyColumns(chunk, positions, hashes);
 		for (idx_t row = 0; row < chunk.size(); row++) {
+			hashes_result.insert(Git4DataRowKeyHash(hashes, row));
 			result.insert(Git4DataKeyString(chunk, positions, row));
 		}
 	}
@@ -96,6 +130,9 @@ struct Git4DataSnapshotScanState : public GlobalTableFunctionState {
 	//! Where the key columns sit in the scanned columns, so a row's key can be built from a chunk
 	vector<idx_t> key_positions;
 	unordered_set<string> removed_keys;
+	//! The hashes of those keys, so a row that cannot be one of them is not turned into a string
+	unordered_set<hash_t> removed_key_hashes;
+	DataChunk key_hashes;
 	VisibilityBound delta_bound;
 	VisibilityBound bound;
 	bool has_delta = false;
@@ -500,7 +537,13 @@ static unique_ptr<GlobalTableFunctionState> Git4DataSnapshotScanInit(ClientConte
 		                                                                 result->column_ids, nullptr);
 	}
 	Git4DataCollectRemovedKeys(context, bind_data.delta_removed, ordered_key_types, key_columns.size(),
-	                           bind_data.delta_bound, result->removed_keys);
+	                           bind_data.delta_bound, result->removed_keys, result->removed_key_hashes);
+	// one hash column per key column, filled per chunk so the filter below needs no allocation per row
+	vector<LogicalType> hash_types;
+	for (idx_t i = 0; i < result->key_positions.size(); i++) {
+		hash_types.push_back(LogicalType::HASH);
+	}
+	result->key_hashes.Initialize(Allocator::Get(context), hash_types);
 	return std::move(result);
 }
 
@@ -534,7 +577,15 @@ static void Git4DataSnapshotScanFunction(ClientContext &context, TableFunctionIn
 		}
 		SelectionVector kept(count);
 		idx_t kept_count = 0;
+		Git4DataHashKeyColumns(state.scan_chunk, state.key_positions, state.key_hashes);
 		for (idx_t row = 0; row < count; row++) {
+			// the hash decides nothing on its own: a row it does not match cannot be a removed row, and
+			// one it does gets the exact comparison, so the answer is the string's, as it always was
+			if (state.removed_key_hashes.find(Git4DataRowKeyHash(state.key_hashes, row)) ==
+			    state.removed_key_hashes.end()) {
+				kept.set_index(kept_count++, row);
+				continue;
+			}
 			if (state.removed_keys.find(Git4DataKeyString(state.scan_chunk, state.key_positions, row)) ==
 			    state.removed_keys.end()) {
 				kept.set_index(kept_count++, row);
@@ -623,6 +674,8 @@ struct Git4DataDiffState : public GlobalTableFunctionState {
 	TableScanState left_scan;
 	TableScanState right_scan;
 	DataChunk scan_chunk;
+	//! One hash column per key column, filled per chunk while a side is walked
+	DataChunk key_hashes;
 	vector<StorageIndex> column_ids;
 	idx_t key_count = 0;
 	VisibilityBound left_bound;
@@ -639,6 +692,8 @@ struct Git4DataDiffState : public GlobalTableFunctionState {
 	//! after the other, so one added scan serves both sides and is re-initialized when the side changes.
 	unordered_set<string> left_removed_keys;
 	unordered_set<string> right_removed_keys;
+	unordered_set<hash_t> left_removed_key_hashes;
+	unordered_set<hash_t> right_removed_key_hashes;
 	string left_added_table;
 	string right_added_table;
 	VisibilityBound left_delta_bound;
@@ -871,11 +926,17 @@ static unique_ptr<GlobalTableFunctionState> Git4DataDiffInit(ClientContext &cont
 	scan_types.push_back(LogicalType::ROW_TYPE);
 	result->scan_chunk.Initialize(Allocator::Get(context), scan_types);
 	result->scan_types = scan_types;
+	vector<LogicalType> hash_types;
+	for (idx_t i = 0; i < bind_data.key_columns.size(); i++) {
+		hash_types.push_back(LogicalType::HASH);
+	}
+	result->key_hashes.Initialize(Allocator::Get(context), hash_types);
 	// what each side removed from its base, read once: a side that differs by a delta is not the table
 	Git4DataCollectRemovedKeys(context, bind_data.left_delta_removed, bind_data.key_types, bind_data.key_columns.size(),
-	                           bind_data.left_delta_bound, result->left_removed_keys);
+	                           bind_data.left_delta_bound, result->left_removed_keys, result->left_removed_key_hashes);
 	Git4DataCollectRemovedKeys(context, bind_data.right_delta_removed, bind_data.key_types,
-	                           bind_data.key_columns.size(), bind_data.right_delta_bound, result->right_removed_keys);
+	                           bind_data.key_columns.size(), bind_data.right_delta_bound, result->right_removed_keys,
+	                           result->right_removed_key_hashes);
 	result->left_added_table = bind_data.left_delta_added;
 	result->right_added_table = bind_data.right_delta_added;
 	result->left_delta_bound = bind_data.left_delta_bound;
@@ -895,10 +956,26 @@ static unique_ptr<GlobalTableFunctionState> Git4DataDiffInit(ClientContext &cont
 	return std::move(result);
 }
 
+//! Whether the side whose keys are in this set removed the row at `row`: the hash, computed once per
+//! chunk, spares the string for the rows that cannot be in the set, and the string still decides for
+//! the ones that can.
+static bool Git4DataDiffRowRemoved(Git4DataDiffState &state, const vector<idx_t> &key_positions,
+                                   const unordered_set<string> *removed_keys,
+                                   const unordered_set<hash_t> *removed_key_hashes, idx_t row) {
+	// a table with no primary key has no key columns to hash, and then there is nothing to skip: the
+	// comparison below is the same empty key it was before this fast path existed
+	if (removed_key_hashes && state.key_hashes.ColumnCount() > 0 &&
+	    removed_key_hashes->find(Git4DataRowKeyHash(state.key_hashes, row)) == removed_key_hashes->end()) {
+		return false;
+	}
+	return removed_keys->find(Git4DataKeyString(state.scan_chunk, key_positions, row)) != removed_keys->end();
+}
+
 //! Walk the whole table at one bound, handing every visible row and its row id to the callback.
 static void Git4DataDiffCollect(ClientContext &context, Git4DataDiffState &state, TableScanState &scan,
                                 VisibilityBound bound, const string &added_table, VisibilityBound added_bound,
                                 const unordered_set<string> *removed_keys,
+                                const unordered_set<hash_t> *removed_key_hashes,
                                 const std::function<void(DataChunk &, row_t, idx_t)> &callback) {
 	// the key columns come first in the scan, so their positions are the first key_count columns
 	vector<idx_t> key_positions;
@@ -913,12 +990,14 @@ static void Git4DataDiffCollect(ClientContext &context, Git4DataDiffState &state
 		if (count == 0) {
 			break;
 		}
+		if (removed_key_hashes && state.key_hashes.ColumnCount() > 0) {
+			Git4DataHashKeyColumns(state.scan_chunk, key_positions, state.key_hashes);
+		}
 		// the row id column is not necessarily flat - a scan may hand back a dictionary
 		// the row id sits after the keys, and after the values when those are carried too
 		auto row_ids = state.scan_chunk.data[state.key_count + state.value_count].Values<row_t>();
 		for (idx_t i = 0; i < count; i++) {
-			if (removed_keys &&
-			    removed_keys->find(Git4DataKeyString(state.scan_chunk, key_positions, i)) != removed_keys->end()) {
+			if (removed_keys && Git4DataDiffRowRemoved(state, key_positions, removed_keys, removed_key_hashes, i)) {
 				// this side removed the row from its base, so it is not part of what the side holds
 				continue;
 			}
@@ -1017,16 +1096,17 @@ static void Git4DataDiffFunction(ClientContext &context, TableFunctionInput &dat
 		// tables append a different number of rows. The primary key is the identity that survives
 		// that, and the values are read so two rows sharing a key can be told apart from one row.
 		if (state.phase == Git4DataDiffState::Phase::LEFT) {
-			Git4DataDiffCollect(
-			    context, state, state.left_scan, state.left_bound, state.left_added_table, state.left_delta_bound,
-			    &state.left_removed_keys, [&](DataChunk &chunk, row_t row_id, idx_t row) {
-				    auto key = Git4DataDiffRowKey(chunk, state.key_count, row);
-				    Git4DataDiffState::KeyedRow entry;
-				    entry.key = key;
-				    entry.values = Git4DataDiffRowValues(chunk, state.key_count, state.value_count, row);
-				    entry.row_id = row_id;
-				    state.left_by_key[Git4DataDiffKeyHash(key)].push_back(std::move(entry));
-			    });
+			Git4DataDiffCollect(context, state, state.left_scan, state.left_bound, state.left_added_table,
+			                    state.left_delta_bound, &state.left_removed_keys, &state.left_removed_key_hashes,
+			                    [&](DataChunk &chunk, row_t row_id, idx_t row) {
+				                    auto key = Git4DataDiffRowKey(chunk, state.key_count, row);
+				                    Git4DataDiffState::KeyedRow entry;
+				                    entry.key = key;
+				                    entry.values =
+				                        Git4DataDiffRowValues(chunk, state.key_count, state.value_count, row);
+				                    entry.row_id = row_id;
+				                    state.left_by_key[Git4DataDiffKeyHash(key)].push_back(std::move(entry));
+			                    });
 			state.phase = Git4DataDiffState::Phase::RIGHT;
 		}
 		if (state.phase == Git4DataDiffState::Phase::RIGHT) {
@@ -1034,7 +1114,8 @@ static void Git4DataDiffFunction(ClientContext &context, TableFunctionInput &dat
 			unordered_set<string> matched;
 			Git4DataDiffCollect(
 			    context, state, state.right_scan, state.right_bound, state.right_added_table, state.right_delta_bound,
-			    &state.right_removed_keys, [&](DataChunk &chunk, row_t row_id, idx_t row) {
+			    &state.right_removed_keys, &state.right_removed_key_hashes,
+			    [&](DataChunk &chunk, row_t row_id, idx_t row) {
 				    auto key = Git4DataDiffRowKey(chunk, state.key_count, row);
 				    auto hash = Git4DataDiffKeyHash(key);
 				    auto entry = state.left_by_key.find(hash);
@@ -1082,7 +1163,7 @@ static void Git4DataDiffFunction(ClientContext &context, TableFunctionInput &dat
 	}
 	if (state.phase == Git4DataDiffState::Phase::LEFT) {
 		Git4DataDiffCollect(context, state, state.left_scan, state.left_bound, state.left_added_table,
-		                    state.left_delta_bound, &state.left_removed_keys,
+		                    state.left_delta_bound, &state.left_removed_keys, &state.left_removed_key_hashes,
 		                    [&](DataChunk &chunk, row_t row_id, idx_t row) {
 			                    state.left_rows.insert(row_id);
 			                    if (state.key_count > 0) {
@@ -1094,7 +1175,7 @@ static void Git4DataDiffFunction(ClientContext &context, TableFunctionInput &dat
 	if (state.phase == Git4DataDiffState::Phase::RIGHT) {
 		vector<pair<row_t, vector<Value>>> added_rows;
 		Git4DataDiffCollect(context, state, state.right_scan, state.right_bound, state.right_added_table,
-		                    state.right_delta_bound, &state.right_removed_keys,
+		                    state.right_delta_bound, &state.right_removed_keys, &state.right_removed_key_hashes,
 		                    [&](DataChunk &chunk, row_t row_id, idx_t row) {
 			                    state.right_rows.insert(row_id);
 			                    if (state.left_rows.find(row_id) == state.left_rows.end()) {

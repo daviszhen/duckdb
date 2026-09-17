@@ -1,0 +1,165 @@
+# name: test/sql/git4data/delta_keys.test
+# description: A delta whose keys are strings, and a composite key, with removals and additions
+# group: [git4data]
+
+load {TEST_DIR}/delta_keys.db
+
+# The read path decides whether a base row is one the delta removed by comparing the row's key, and it
+# compares the exact key - a hash of the key is only used to skip the comparison for rows that cannot
+# be in the removed set. String keys and composite keys are what make that distinction matter, so they
+# are covered here rather than only with integer keys.
+statement ok
+CREATE TABLE s (k VARCHAR PRIMARY KEY, v INTEGER)
+
+statement ok
+INSERT INTO s SELECT 'key_' || lpad(range::VARCHAR, 6, '0'), range FROM range(2000)
+
+statement ok
+CHECKPOINT
+
+statement ok
+PRAGMA git4data_create_snapshot('base')
+
+statement ok
+PRAGMA git4data_create_branch('b', '')
+
+statement ok
+CREATE TABLE s_add (k VARCHAR PRIMARY KEY, v INTEGER)
+
+statement ok
+CREATE TABLE s_del (k VARCHAR PRIMARY KEY)
+
+statement ok
+PRAGMA git4data_bind_branch_delta('s', 'b', 's_add', 's_del')
+
+query I
+SELECT count(*) FROM s AT (BRANCH => 'b')
+----
+2000
+
+statement ok
+PRAGMA git4data_apply('s', 'b', 'DELETE FROM s WHERE k IN (''key_000005'', ''key_000007'')')
+
+query I
+SELECT count(*) FROM s AT (BRANCH => 'b')
+----
+1998
+
+# the removed keys are the ones named, not the ones beside them
+query I
+SELECT count(*) FROM s AT (BRANCH => 'b') WHERE k IN ('key_000004', 'key_000005', 'key_000006', 'key_000007')
+----
+2
+
+# a removal the base knows nothing about is harmless: it hides nothing and errors nowhere
+statement ok
+INSERT INTO s_del VALUES ('not_in_base')
+
+query I
+SELECT count(*) FROM s AT (BRANCH => 'b')
+----
+1998
+
+# an added row, and then a row whose key the branch hides: one row for that key, and the base row of
+# that key stays hidden
+statement ok
+PRAGMA git4data_apply('s', 'b', 'INSERT INTO s VALUES (''key_999999'', 900)')
+
+statement ok
+PRAGMA git4data_apply('s', 'b', 'INSERT INTO s VALUES (''key_000005'', 555)')
+
+query III
+SELECT count(*), max(v), min(v) FROM s AT (BRANCH => 'b') WHERE k = 'key_000005'
+----
+1	555	555
+
+query I
+SELECT count(*) FROM s AT (BRANCH => 'b')
+----
+2000
+
+# an update that rewrites the key of a string-keyed row
+statement ok
+PRAGMA git4data_apply('s', 'b', 'UPDATE s SET k = ''renamed'' WHERE k = ''key_000010''')
+
+query II
+SELECT (SELECT count(*) FROM s AT (BRANCH => 'b') WHERE k = 'key_000010'),
+       (SELECT v FROM s AT (BRANCH => 'b') WHERE k = 'renamed')
+----
+0	10
+
+query I
+SELECT count(*) FROM s AT (BRANCH => 'b')
+----
+2000
+
+# the diff between the snapshot and the branch agrees with what the branch shows: two keys added, two
+# gone, one changed - and it is the key comparison, not the row ids, because a delta side is not the
+# table it differs from
+query II
+SELECT g4d_change, count(*) FROM git4data_diff('s', 'base', 'b') GROUP BY g4d_change ORDER BY g4d_change
+----
+added	2
+changed	1
+removed	2
+
+# a composite key of a string and an integer, so the key a read builds is a tuple of two columns
+statement ok
+CREATE TABLE c (a VARCHAR, b INTEGER, v INTEGER, PRIMARY KEY (a, b))
+
+statement ok
+INSERT INTO c SELECT 'p' || (range % 7)::VARCHAR, range, range FROM range(1000)
+
+statement ok
+CHECKPOINT
+
+statement ok
+PRAGMA git4data_create_branch('cb', '')
+
+statement ok
+CREATE TABLE c_add (a VARCHAR, b INTEGER, v INTEGER, PRIMARY KEY (a, b))
+
+statement ok
+CREATE TABLE c_del (a VARCHAR, b INTEGER, PRIMARY KEY (a, b))
+
+statement ok
+PRAGMA git4data_bind_branch_delta('c', 'cb', 'c_add', 'c_del')
+
+# remove every key whose second column is a multiple of a hundred, and add two rows
+statement ok
+PRAGMA git4data_apply('c', 'cb', 'DELETE FROM c WHERE b % 100 = 0')
+
+statement ok
+PRAGMA git4data_apply('c', 'cb', 'INSERT INTO c VALUES (''p1'', 5000, 5000)')
+
+statement ok
+PRAGMA git4data_apply('c', 'cb', 'INSERT INTO c VALUES (''p2'', 6000, 6000)')
+
+query I
+SELECT count(*) FROM c AT (BRANCH => 'cb')
+----
+992
+
+# the base rows whose key is a multiple of a hundred are gone and their neighbours are not. The two
+# rows that were added also carry such a key, which is why the count is taken over the base's range.
+query II
+SELECT count(*) FILTER (WHERE b % 100 = 0 AND b < 1000), count(*) FROM c AT (BRANCH => 'cb')
+----
+0	992
+
+query III
+SELECT (SELECT v FROM c AT (BRANCH => 'cb') WHERE a = 'p1' AND b = 5000),
+       (SELECT v FROM c AT (BRANCH => 'cb') WHERE a = 'p2' AND b = 6000),
+       (SELECT count(*) FROM c)
+----
+5000	6000	1000
+
+# an update that rewrites one half of a composite key: the old key is gone, the new one is there
+statement ok
+PRAGMA git4data_apply('c', 'cb', 'UPDATE c SET b = 99999 WHERE a = ''p3'' AND b = 3')
+
+query II
+SELECT (SELECT count(*) FROM c AT (BRANCH => 'cb') WHERE a = 'p3' AND b = 3),
+       (SELECT v FROM c AT (BRANCH => 'cb') WHERE a = 'p3' AND b = 99999)
+----
+0	3
