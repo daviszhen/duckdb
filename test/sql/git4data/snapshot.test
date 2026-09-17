@@ -96,3 +96,24 @@ PRAGMA git4data_snapshots
 
 statement ok
 PRAGMA git4data_drop_snapshot('in_tx')
+
+# A snapshot and a branch cannot share a name. Wherever a reference is named without saying which kind it
+# is - a diff, a pick, a restore, and a merge's own image clauses - a bare name is looked up in the
+# snapshot registry first, so the two would be indistinguishable. Measured before this: with a branch and
+# a snapshot both called x, a merge of x with x compared the branch against the snapshot and reported a
+# conflict that did not exist.
+statement ok
+PRAGMA git4data_create_branch('shared_name', '')
+
+statement error
+PRAGMA git4data_create_snapshot('shared_name')
+----
+<REGEX>:.*A branch named "shared_name" exists.*
+
+statement ok
+PRAGMA git4data_create_snapshot('only_snapshot')
+
+statement error
+PRAGMA git4data_create_branch('only_snapshot', '')
+----
+<REGEX>:.*A snapshot named "only_snapshot" exists.*

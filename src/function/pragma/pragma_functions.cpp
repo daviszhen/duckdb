@@ -896,6 +896,14 @@ static void PragmaGit4DataCreateBranch(ClientContext &context, const FunctionPar
 	auto parent = parameters.values[1].ToString();
 	CheckGit4DataReferenceName(name);
 	auto &transaction_manager = GetGit4DataTransactionManager(context);
+	// the other half of the rule the snapshot side states: the two kinds of reference share a name
+	// namespace wherever one is named without its kind, so they cannot share a name
+	Git4DataSnapshot same_named_snapshot;
+	if (transaction_manager.snapshots.Get(name, same_named_snapshot)) {
+		throw InvalidInputException("A snapshot named \"%s\" exists, and a branch of that name would be "
+		                            "indistinguishable from it wherever a reference is named without its kind",
+		                            name);
+	}
 	// A branch descends from another branch when one is named; otherwise it starts at the newest
 	// commit. Either way the branch holds its base down exactly as a pin does.
 	//
@@ -1039,6 +1047,17 @@ static void PragmaGit4DataCreateSnapshot(ClientContext &context, const FunctionP
 	auto name = parameters.values[0].ToString();
 	CheckGit4DataReferenceName(name);
 	auto &transaction_manager = GetGit4DataTransactionManager(context);
+	// A snapshot and a branch with one name would be indistinguishable wherever a reference is named
+	// without saying which kind it is - a diff, a pick, a restore, and a merge's own image clauses all
+	// resolve a bare name, and they look in the snapshot registry first. Measured: with a branch and a
+	// snapshot both called x, a merge of x with x compared the branch against the snapshot and reported
+	// a conflict that did not exist. The two names cannot collide.
+	Git4DataBranch same_named_branch;
+	if (transaction_manager.branches.Get(name, same_named_branch)) {
+		throw InvalidInputException("A branch named \"%s\" exists, and a snapshot of that name would be "
+		                            "indistinguishable from it wherever a reference is named without its kind",
+		                            name);
+	}
 	CheckGit4DataReferenceLimit("snapshots", transaction_manager.UserSnapshotCount(),
 	                            transaction_manager.snapshot_limit);
 	// A second argument names a branch, and the reference then captures that branch's own line rather
