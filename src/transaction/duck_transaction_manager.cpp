@@ -121,6 +121,24 @@ void BranchRegistry::SetStorageTable(const string &branch, const string &source_
 	dirty.store(true);
 }
 
+bool BranchRegistry::ClearStorageTable(const string &branch, const string &source_table) {
+	lock_guard<mutex> guard(lock);
+	auto entry = branches.find(branch);
+	if (entry == branches.end()) {
+		return false;
+	}
+	auto &storage_tables = entry->second.storage_tables;
+	for (idx_t i = 0; i < storage_tables.size(); i++) {
+		if (storage_tables[i].source != source_table) {
+			continue;
+		}
+		storage_tables.erase(storage_tables.begin() + NumericCast<int64_t>(i));
+		dirty.store(true);
+		return true;
+	}
+	return false;
+}
+
 bool BranchRegistry::GetStorageTable(const string &branch, const string &source_table,
                                      Git4DataStorageTable &result) const {
 	lock_guard<mutex> guard(lock);

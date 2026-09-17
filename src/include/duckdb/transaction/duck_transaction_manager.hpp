@@ -204,6 +204,9 @@ public:
 	//! created it. Returns false when the branch has none, which is also what a branch reading its base
 	//! through a delta has.
 	bool GetStorageTable(const string &branch, const string &source_table, Git4DataStorageTable &result) const;
+	//! Forget a branch's table of its own for a source table, which is what leaves the branch reading its
+	//! pinned image again. Returns false when it had no mapping for that source.
+	bool ClearStorageTable(const string &branch, const string &source_table);
 	//! Record that a branch differs from its base by a delta rather than by a copy of it. A branch with a
 	//! table of its own for this source keeps that instead: one line, one source of truth.
 	void SetDeltaTable(const string &branch, const string &source_table, const string &added, const string &removed,

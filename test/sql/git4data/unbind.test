@@ -1,0 +1,185 @@
+# name: test/sql/git4data/unbind.test
+# description: Taking back a branch's table of its own, and seeing a mapping whose table is gone
+# group: [git4data]
+
+load {TEST_DIR}/unbind.db
+
+statement ok
+CREATE TABLE t (k INTEGER PRIMARY KEY, v INTEGER)
+
+statement ok
+INSERT INTO t SELECT range, range FROM range(10)
+
+statement ok
+CHECKPOINT
+
+statement ok
+PRAGMA git4data_create_branch('b', '')
+
+statement ok
+PRAGMA git4data_materialize('t', 'b', 't_b')
+
+# the listing says the branch has a table of its own, and that the table is there
+statement ok
+PRAGMA git4data_branches
+
+statement ok
+UPDATE t_b SET v = 111 WHERE k = 1
+
+query I
+SELECT v FROM t AT (BRANCH => 'b') WHERE k = 1
+----
+111
+
+# A mapping whose table is dropped falls back to the pinned image rather than failing - that rule is
+# deliberate, because the branch is still a valid reference - but it was silent, and the listing still
+# claimed the branch had storage it could not read. Measured: after this drop the branch read its pin
+# while `has_storage` said true. `storage_missing` is what says so now, and it is the only signal a
+# caller gets, because the fallback itself is by design.
+statement ok
+DROP TABLE t_b
+
+query I
+SELECT v FROM t AT (BRANCH => 'b') WHERE k = 1
+----
+1
+
+# the state the branch is in is now visible rather than something to be inferred
+statement ok
+PRAGMA git4data_branches
+
+# and it can be cleared: unbind takes the mapping back, after which the branch reads its pin because
+# that is what it has, not because a table it was promised is missing
+statement ok
+PRAGMA git4data_unbind('t', 'b')
+
+query I
+SELECT v FROM t AT (BRANCH => 'b') WHERE k = 1
+----
+1
+
+query I
+SELECT count(*) FROM t AT (BRANCH => 'b')
+----
+10
+
+# a table bound by hand is not dropped by an unbind: the mapping goes, the caller's table stays
+statement ok
+CREATE TABLE t_manual (k INTEGER PRIMARY KEY, v INTEGER)
+
+statement ok
+INSERT INTO t_manual VALUES (1, 999)
+
+statement ok
+PRAGMA git4data_bind_branch_table('t', 'b', 't_manual')
+
+query I
+SELECT v FROM t AT (BRANCH => 'b') WHERE k = 1
+----
+999
+
+statement ok
+PRAGMA git4data_unbind('t', 'b')
+
+query II
+SELECT (SELECT v FROM t AT (BRANCH => 'b') WHERE k = 1), (SELECT v FROM t_manual WHERE k = 1)
+----
+1	999
+
+# materializing again works after the unbind, and the branch follows the new table
+statement ok
+PRAGMA git4data_materialize('t', 'b', 't_b2')
+
+statement ok
+UPDATE t_b2 SET v = 222 WHERE k = 2
+
+query I
+SELECT v FROM t AT (BRANCH => 'b') WHERE k = 2
+----
+222
+
+# the same for a delta: unbinding it leaves the branch reading its base rather than the delta's edits
+statement ok
+PRAGMA git4data_create_branch('d', '')
+
+statement ok
+CREATE TABLE d_add (k INTEGER PRIMARY KEY, v INTEGER)
+
+statement ok
+CREATE TABLE d_del (k INTEGER PRIMARY KEY)
+
+statement ok
+PRAGMA git4data_bind_branch_delta('t', 'd', 'd_add', 'd_del')
+
+statement ok
+PRAGMA git4data_apply('t', 'd', 'UPDATE t SET v = 333 WHERE k = 3')
+
+query I
+SELECT v FROM t AT (BRANCH => 'd') WHERE k = 3
+----
+333
+
+statement ok
+PRAGMA git4data_unbind('t', 'd')
+
+query I
+SELECT v FROM t AT (BRANCH => 'd') WHERE k = 3
+----
+3
+
+# the delta's tables above are still there, counted from the branch that no longer reads them
+query I
+SELECT count(*) FROM d_add
+----
+1
+
+# a missing delta table is reported the same way, and a delta can be unbound the same way
+statement ok
+DROP TABLE d_del
+
+statement ok
+PRAGMA git4data_branches
+
+statement ok
+CREATE TABLE d_del (k INTEGER PRIMARY KEY)
+
+statement ok
+PRAGMA git4data_bind_branch_delta('t', 'd', 'd_add', 'd_del')
+
+statement ok
+DROP TABLE d_add
+
+statement ok
+PRAGMA git4data_unbind('t', 'd')
+
+query I
+SELECT count(*) FROM t AT (BRANCH => 'd')
+----
+10
+
+# nothing to unbind is refused rather than reported as done
+statement error
+PRAGMA git4data_unbind('t', 'd')
+----
+<REGEX>:.*neither a table of its own nor a delta.*
+
+statement error
+PRAGMA git4data_unbind('t', 'nowhere')
+----
+<REGEX>:.*Branch "nowhere" does not exist.*
+
+# the mapping is part of the branch, so a state that was cleared stays cleared
+statement ok
+CHECKPOINT
+
+restart
+
+query I
+SELECT v FROM t AT (BRANCH => 'b') WHERE k = 2
+----
+222
+
+statement error
+PRAGMA git4data_unbind('t', 'd')
+----
+<REGEX>:.*neither a table of its own nor a delta.*

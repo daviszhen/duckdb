@@ -558,6 +558,43 @@ static string PragmaGit4DataMaterialize(ClientContext &context, const FunctionPa
 	                          escaped_branch, escaped_storage, replaced);
 }
 
+//! Take back what a branch was given for a source table: its table of its own, or the delta it differs
+//! by. A mapping whose table is dropped falls back to the pinned image rather than failing - that rule is
+//! deliberate, because the branch is still a valid reference - but it is silent, and until now there was
+//! no way to say "stop reading that table, the branch reads its pin now". This is that way, and it is
+//! also what turns the fallback from a state nobody can see into one a caller can see and clear.
+static string PragmaGit4DataUnbind(ClientContext &context, const FunctionParameters &parameters) {
+	auto table_name = parameters.values[0].ToString();
+	auto branch_name = parameters.values[1].ToString();
+	auto &transaction_manager = GetGit4DataTransactionManager(context);
+	Git4DataBranch branch;
+	if (!transaction_manager.branches.Get(branch_name, branch)) {
+		throw InvalidInputException("Branch \"%s\" does not exist", branch_name);
+	}
+	auto escape = [](const string &value) {
+		return StringUtil::Replace(value, "'", "''");
+	};
+	Git4DataStorageTable storage;
+	if (transaction_manager.branches.GetStorageTable(branch_name, table_name, storage)) {
+		transaction_manager.branches.ClearStorageTable(branch_name, table_name);
+		// the table itself is the caller's: it was created for the branch by materialize, and a caller
+		// who gave one by hand would not expect this call to drop it either
+		return StringUtil::Format("SELECT '%s'::VARCHAR AS branch, '%s'::VARCHAR AS table_name, 'storage' AS "
+		                          "unbound, '%s'::VARCHAR AS was",
+		                          escape(branch_name), escape(table_name), escape(storage.storage));
+	}
+	Git4DataBranchDelta delta;
+	if (transaction_manager.branches.GetDeltaTable(branch_name, table_name, delta)) {
+		transaction_manager.branches.ClearDeltaTable(branch_name, table_name);
+		return StringUtil::Format("SELECT '%s'::VARCHAR AS branch, '%s'::VARCHAR AS table_name, 'delta' AS "
+		                          "unbound, '%s'::VARCHAR AS was",
+		                          escape(branch_name), escape(table_name), escape(delta.added));
+	}
+	throw InvalidInputException("Branch \"%s\" has neither a table of its own nor a delta for \"%s\", so "
+	                            "there is nothing to unbind",
+	                            branch_name, table_name);
+}
+
 //! Record that a branch reads a table of its own. Only meaningful as the last statement of a
 //! materialize, once the copy has been made. The optional fourth argument says the feature created the
 //! table rather than the caller handing one over, which decides whether a later materialize may drop it.
@@ -1409,7 +1446,8 @@ static string PragmaGit4DataBranches(ClientContext &context, const FunctionParam
 	if (entries.empty()) {
 		return "SELECT NULL::VARCHAR AS branch_name, NULL::UBIGINT AS pinned_commit_id, "
 		       "NULL::VARCHAR AS parent, NULL::TIMESTAMP AS created, NULL::BOOLEAN AS has_storage, "
-		       "NULL::BOOLEAN AS has_delta WHERE false";
+		       "NULL::BOOLEAN AS has_delta, NULL::BOOLEAN AS storage_missing, NULL::BOOLEAN AS delta_missing "
+		       "WHERE false";
 	}
 	string query = "SELECT * FROM (VALUES ";
 	for (idx_t i = 0; i < entries.size(); i++) {
@@ -1425,13 +1463,35 @@ static string PragmaGit4DataBranches(ClientContext &context, const FunctionParam
 		// visible rather than something a caller has to infer from a conflict.
 		// has_delta says the branch differs from its base through tables of its own rather than through a
 		// copy of it, which is the cheaper shape to write to and not one the listing should hide
+		//
+		// storage_missing and delta_missing are the other half of that: a mapping whose table has been
+		// dropped falls back to the pinned image rather than failing, so a listing that only says a branch
+		// *has* storage would report a table it cannot read. Measured: after dropping a materialized
+		// branch's storage table, the branch read its pin while has_storage still said true.
+		auto storage_missing = false;
+		for (auto &storage_entry : entries[i].storage_tables) {
+			if (Git4DataResolveTableName(context, storage_entry.storage, storage_entry.oid).empty()) {
+				storage_missing = true;
+				break;
+			}
+		}
+		auto delta_missing = false;
+		for (auto &delta_entry : entries[i].deltas) {
+			if (Git4DataResolveTableName(context, delta_entry.added, delta_entry.added_oid).empty() ||
+			    Git4DataResolveTableName(context, delta_entry.removed, delta_entry.removed_oid).empty()) {
+				delta_missing = true;
+				break;
+			}
+		}
 		query += StringUtil::Format(
-		    "('%s'::VARCHAR, %llu::UBIGINT, '%s'::VARCHAR, '%s'::TIMESTAMP, %s::BOOLEAN, %s::BOOLEAN)", name,
-		    entries[i].pin, parent, Timestamp::ToString(entries[i].created),
-		    entries[i].storage_tables.empty() ? "false" : "true", entries[i].deltas.empty() ? "false" : "true");
+		    "('%s'::VARCHAR, %llu::UBIGINT, '%s'::VARCHAR, '%s'::TIMESTAMP, %s::BOOLEAN, %s::BOOLEAN, %s::BOOLEAN, "
+		    "%s::BOOLEAN)",
+		    name, entries[i].pin, parent, Timestamp::ToString(entries[i].created),
+		    entries[i].storage_tables.empty() ? "false" : "true", entries[i].deltas.empty() ? "false" : "true",
+		    storage_missing ? "true" : "false", delta_missing ? "true" : "false");
 	}
-	query += ") t(branch_name, pinned_commit_id, parent, created, has_storage, has_delta) ORDER BY pinned_commit_id, "
-	         "branch_name";
+	query += ") t(branch_name, pinned_commit_id, parent, created, has_storage, has_delta, storage_missing, "
+	         "delta_missing) ORDER BY pinned_commit_id, branch_name";
 	return query;
 }
 
@@ -1727,6 +1787,8 @@ void PragmaFunctions::RegisterFunction(BuiltinFunctions &set) {
 	set.AddFunction(PragmaFunction::PragmaCall(
 	    "git4data_bind_branch_delta", PragmaGit4DataBindBranchDelta,
 	    {LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR}));
+	set.AddFunction(PragmaFunction::PragmaCall("git4data_unbind", PragmaGit4DataUnbind,
+	                                           {LogicalType::VARCHAR, LogicalType::VARCHAR}));
 	// a delta branch written through the SQL a caller would have written anyway
 	set.AddFunction(PragmaFunction::PragmaCall("git4data_apply", PragmaGit4DataApply,
 	                                           {LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR}));
