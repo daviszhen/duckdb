@@ -581,12 +581,18 @@ static string PragmaGit4DataUnbind(ClientContext &context, const FunctionParamet
 	auto escape = [](const string &value) {
 		return StringUtil::Replace(value, "'", "''");
 	};
+	// a source table can be renamed under the mapping, and a read follows it by oid; the mapping is taken
+	// back the same way, so the table's new name reaches what its old one recorded
+	auto named = Catalog::GetEntry<TableCatalogEntry>(context, QualifiedName(Identifier(table_name)),
+	                                                  OnEntryNotFound::RETURN_NULL);
+	auto source_oid = named ? named->oid : 0;
 	Git4DataStorageTable storage;
-	if (transaction_manager.branches.GetStorageTable(branch_name, table_name, storage)) {
+	if (transaction_manager.branches.GetStorageTable(branch_name, table_name, storage, source_oid)) {
 		// the mapping is found and cleared by the same comparison, so a name that differs only in case
 		// cannot be reported as unbound while the mapping stays - measured, that is exactly what happened
-		// before the clearing comparison was made case-insensitive with the finding one
-		if (!transaction_manager.branches.ClearStorageTable(branch_name, table_name)) {
+		// before the clearing comparison was made case-insensitive with the finding one. The name cleared
+		// by is the one the mapping was written with, which is also the one an oid match found.
+		if (!transaction_manager.branches.ClearStorageTable(branch_name, storage.source)) {
 			throw InternalException("Could not unbind branch \"%s\" from \"%s\"", branch_name, table_name);
 		}
 		// the table itself is the caller's: it was created for the branch by materialize, and a caller
@@ -596,8 +602,8 @@ static string PragmaGit4DataUnbind(ClientContext &context, const FunctionParamet
 		                          escape(branch_name), escape(table_name), escape(storage.storage));
 	}
 	Git4DataBranchDelta delta;
-	if (transaction_manager.branches.GetDeltaTable(branch_name, table_name, delta)) {
-		if (!transaction_manager.branches.ClearDeltaTable(branch_name, table_name)) {
+	if (transaction_manager.branches.GetDeltaTable(branch_name, table_name, delta, source_oid)) {
+		if (!transaction_manager.branches.ClearDeltaTable(branch_name, delta.source)) {
 			throw InternalException("Could not unbind branch \"%s\" from \"%s\"", branch_name, table_name);
 		}
 		return StringUtil::Format("SELECT '%s'::VARCHAR AS branch, '%s'::VARCHAR AS table_name, 'delta' AS "

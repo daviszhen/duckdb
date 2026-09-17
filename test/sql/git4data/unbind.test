@@ -183,3 +183,63 @@ statement error
 PRAGMA git4data_unbind('t', 'd')
 ----
 <REGEX>:.*neither a table of its own nor a delta.*
+
+# A mapping follows its table across a rename: a read does, a write through a delta does, and taking the
+# mapping back does. The lookup was by the name the mapping was written with, so after a rename the new
+# name found nothing and unbind refused with "neither a table of its own nor a delta" while the mapping was
+# still there. The oid is what finds it, as it does on a read.
+statement ok
+CREATE TABLE r (k INTEGER PRIMARY KEY, v INTEGER)
+
+statement ok
+INSERT INTO r SELECT range, range FROM range(5)
+
+statement ok
+PRAGMA git4data_create_branch('rb', '')
+
+statement ok
+PRAGMA git4data_materialize('r', 'rb', 'r_b')
+
+statement ok
+UPDATE r_b SET v = 555 WHERE k = 1
+
+statement ok
+ALTER TABLE r RENAME TO r2
+
+statement ok
+PRAGMA git4data_unbind('r2', 'rb')
+
+# the copy is no longer read, and it is still there: the mapping went, the table did not
+query II
+SELECT (SELECT v FROM r2 AT (BRANCH => 'rb') WHERE k = 1), (SELECT v FROM r_b WHERE k = 1)
+----
+1	555
+
+# the same for a delta bound under one name and unbound under the table's new one
+statement ok
+CREATE TABLE r2_add (k INTEGER PRIMARY KEY, v INTEGER)
+
+statement ok
+CREATE TABLE r2_del (k INTEGER PRIMARY KEY)
+
+statement ok
+PRAGMA git4data_bind_branch_delta('r2', 'rb', 'r2_add', 'r2_del')
+
+statement ok
+INSERT INTO r2_add VALUES (100, 100)
+
+query I
+SELECT count(*) FROM r2 AT (BRANCH => 'rb')
+----
+6
+
+statement ok
+ALTER TABLE r2 RENAME TO r3
+
+statement ok
+PRAGMA git4data_unbind('r3', 'rb')
+
+query I
+SELECT count(*) FROM r3 AT (BRANCH => 'rb')
+----
+5

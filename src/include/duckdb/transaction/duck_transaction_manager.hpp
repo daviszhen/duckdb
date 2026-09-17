@@ -206,8 +206,10 @@ public:
 	                     idx_t storage_oid = 0, idx_t source_oid = 0, bool owned = false);
 	//! The table a branch reads for a source table instead of its pinned image, and whether the feature
 	//! created it. Returns false when the branch has none, which is also what a branch reading its base
-	//! through a delta has.
-	bool GetStorageTable(const string &branch, const string &source_table, Git4DataStorageTable &result) const;
+	//! through a delta has. A source table can be renamed under the mapping, so an oid that matches is a
+	//! mapping for that table as well as a name that does.
+	bool GetStorageTable(const string &branch, const string &source_table, Git4DataStorageTable &result,
+	                     idx_t source_oid = 0) const;
 	//! Forget a branch's table of its own for a source table, which is what leaves the branch reading its
 	//! pinned image again. Returns false when it had no mapping for that source.
 	bool ClearStorageTable(const string &branch, const string &source_table);

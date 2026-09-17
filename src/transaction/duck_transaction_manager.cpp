@@ -139,15 +139,16 @@ bool BranchRegistry::ClearStorageTable(const string &branch, const string &sourc
 	return false;
 }
 
-bool BranchRegistry::GetStorageTable(const string &branch, const string &source_table,
-                                     Git4DataStorageTable &result) const {
+bool BranchRegistry::GetStorageTable(const string &branch, const string &source_table, Git4DataStorageTable &result,
+                                     idx_t source_oid) const {
 	lock_guard<mutex> guard(lock);
 	auto entry = branches.find(branch);
 	if (entry == branches.end()) {
 		return false;
 	}
 	for (auto &existing : entry->second.storage_tables) {
-		if (StringUtil::CIEquals(existing.source, source_table)) {
+		if (StringUtil::CIEquals(existing.source, source_table) ||
+		    (source_oid != 0 && existing.source_oid == source_oid)) {
 			result = existing;
 			return true;
 		}
