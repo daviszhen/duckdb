@@ -163,3 +163,147 @@ SELECT (SELECT count(*) FROM c AT (BRANCH => 'cb') WHERE a = 'p3' AND b = 3),
        (SELECT v FROM c AT (BRANCH => 'cb') WHERE a = 'p3' AND b = 99999)
 ----
 0	3
+
+# Keys of other types, and names that need quoting. The tests above all use plain lowercase names and
+# integer or varchar keys, which is how two families of edges stayed invisible until they were probed:
+# a key is compared as a string built from its values, so every type has to survive that, and every name
+# the feature writes into SQL is quoted or escaped. All of the below was measured before it was asserted.
+statement ok
+CREATE TABLE big (k HUGEINT PRIMARY KEY, v INTEGER)
+
+statement ok
+INSERT INTO big VALUES (170141183460469231731687303715884105727, 1), (-170141183460469231731687303715884105728, 2)
+
+statement ok
+CHECKPOINT
+
+statement ok
+PRAGMA git4data_create_branch('big_branch', '')
+
+statement ok
+CREATE TABLE big_add (k HUGEINT PRIMARY KEY, v INTEGER)
+
+statement ok
+CREATE TABLE big_del (k HUGEINT PRIMARY KEY)
+
+statement ok
+PRAGMA git4data_bind_branch_delta('big', 'big_branch', 'big_add', 'big_del')
+
+statement ok
+PRAGMA git4data_apply('big', 'big_branch', 'UPDATE big SET v = 99 WHERE k = 170141183460469231731687303715884105727')
+
+# both extremes of the type, one of them updated through the delta
+query I
+SELECT string_agg(v::VARCHAR, ',' ORDER BY k) FROM big AT (BRANCH => 'big_branch')
+----
+2,99
+
+statement ok
+CREATE TABLE uid (k UUID PRIMARY KEY, v INTEGER)
+
+statement ok
+INSERT INTO uid VALUES ('00000000-0000-0000-0000-000000000001', 1), ('00000000-0000-0000-0000-000000000002', 2)
+
+statement ok
+CHECKPOINT
+
+statement ok
+PRAGMA git4data_create_branch('uid_branch', '')
+
+statement ok
+CREATE TABLE uid_add (k UUID PRIMARY KEY, v INTEGER)
+
+statement ok
+CREATE TABLE uid_del (k UUID PRIMARY KEY)
+
+statement ok
+PRAGMA git4data_bind_branch_delta('uid', 'uid_branch', 'uid_add', 'uid_del')
+
+statement ok
+PRAGMA git4data_apply('uid', 'uid_branch', 'DELETE FROM uid WHERE k = ''00000000-0000-0000-0000-000000000002''')
+
+query I
+SELECT count(*) FROM uid AT (BRANCH => 'uid_branch')
+----
+1
+
+statement ok
+CREATE TABLE dec (k DECIMAL(18,4) PRIMARY KEY, v INTEGER)
+
+statement ok
+INSERT INTO dec VALUES (1.5000, 1), (2.2500, 2)
+
+statement ok
+CHECKPOINT
+
+statement ok
+PRAGMA git4data_create_branch('dec_branch', '')
+
+statement ok
+CREATE TABLE dec_add (k DECIMAL(18,4) PRIMARY KEY, v INTEGER)
+
+statement ok
+CREATE TABLE dec_del (k DECIMAL(18,4) PRIMARY KEY)
+
+statement ok
+PRAGMA git4data_bind_branch_delta('dec', 'dec_branch', 'dec_add', 'dec_del')
+
+statement ok
+PRAGMA git4data_apply('dec', 'dec_branch', 'UPDATE dec SET v = 7 WHERE k = 2.2500')
+
+query I
+SELECT string_agg(v::VARCHAR, ',' ORDER BY k) FROM dec AT (BRANCH => 'dec_branch')
+----
+1,7
+
+# A name that carries a quote goes through every statement the feature writes: the table and the branch
+# below hold one each, and the delta's two tables one apiece.
+statement ok
+CREATE TABLE "q'uote" (k INTEGER PRIMARY KEY, v INTEGER)
+
+statement ok
+INSERT INTO "q'uote" SELECT range, range FROM range(10)
+
+statement ok
+CHECKPOINT
+
+statement ok
+PRAGMA git4data_create_branch('b''ranch', '')
+
+statement ok
+CREATE TABLE "add'x" (k INTEGER PRIMARY KEY, v INTEGER)
+
+statement ok
+CREATE TABLE "del'x" (k INTEGER PRIMARY KEY)
+
+statement ok
+PRAGMA git4data_bind_branch_delta('q''uote', 'b''ranch', 'add''x', 'del''x')
+
+statement ok
+PRAGMA git4data_apply('q''uote', 'b''ranch', 'UPDATE "q''uote" SET v = 111 WHERE k = 1')
+
+query I
+SELECT v FROM "q'uote" AT (BRANCH => 'b''ranch') WHERE k = 1
+----
+111
+
+query I
+SELECT count(*) FROM git4data_diff('q''uote', 'b''ranch', 'b''ranch')
+----
+0
+
+statement ok
+PRAGMA git4data_materialize('q''uote', 'b''ranch', 'copy''x')
+
+query I
+SELECT count(*) FROM "q'uote" AT (BRANCH => 'b''ranch')
+----
+10
+
+statement ok
+PRAGMA git4data_unbind('q''uote', 'b''ranch')
+
+query I
+SELECT v FROM "q'uote" AT (BRANCH => 'b''ranch') WHERE k = 1
+----
+1
