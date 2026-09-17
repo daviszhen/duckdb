@@ -325,6 +325,49 @@ SELECT (SELECT v FROM c AT (BRANCH => 'cb') WHERE k = 400),
 ----
 9	99	10
 
+# A group reads its own writes: the delta's two tables are the caller's own, so a statement in a group
+# sees what the statements before it in that group wrote - to the tables and to the branch. Measured
+# before this: the scans of those tables read committed row groups only, so uncommitted rows were
+# invisible - `INSERT INTO t VALUES (50, 50); UPDATE t SET v = 51 WHERE k = 50` left 50, and a group
+# that deleted a key and re-inserted it was refused as a collision.
+statement ok
+PRAGMA git4data_apply('c', 'cb', 'INSERT INTO c VALUES (50, 50); UPDATE c SET v = 51 WHERE k = 50')
+
+query I
+SELECT v FROM c AT (BRANCH => 'cb') WHERE k = 50
+----
+51
+
+statement ok
+PRAGMA git4data_apply('c', 'cb', 'DELETE FROM c WHERE k = 6; INSERT INTO c VALUES (6, 66)')
+
+query II
+SELECT (SELECT v FROM c AT (BRANCH => 'cb') WHERE k = 6),
+       (SELECT count(*) FROM c AT (BRANCH => 'cb') WHERE k = 6)
+----
+66	1
+
+# and the same holds inside a transaction the caller opened: the branch reads what that transaction has
+# written, and the write rolls back with it
+statement ok
+BEGIN
+
+statement ok
+PRAGMA git4data_apply('c', 'cb', 'UPDATE c SET v = 777 WHERE k = 7')
+
+query I
+SELECT v FROM c AT (BRANCH => 'cb') WHERE k = 7
+----
+777
+
+statement ok
+ROLLBACK
+
+query I
+SELECT v FROM c AT (BRANCH => 'cb') WHERE k = 7
+----
+7
+
 # a refusal leaves the branch alone: nothing was written before the statement was checked
 query I
 SELECT count(*) FROM t AT (BRANCH => 'b')

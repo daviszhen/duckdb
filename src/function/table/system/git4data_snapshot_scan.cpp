@@ -8,6 +8,9 @@
 #include "duckdb/storage/table/row_group_collection.hpp"
 #include "duckdb/storage/table/scan_state.hpp"
 #include "duckdb/transaction/duck_transaction_manager.hpp"
+#include "duckdb/transaction/duck_transaction.hpp"
+#include "duckdb/transaction/local_storage.hpp"
+#include "duckdb/storage/data_table.hpp"
 #include "duckdb/common/unordered_set.hpp"
 #include "duckdb/common/types/hash.hpp"
 #include "duckdb/common/vector_operations/vector_operations.hpp"
@@ -72,6 +75,23 @@ static hash_t Git4DataRowKeyHash(DataChunk &hashes, idx_t row) {
 	return hash;
 }
 
+//! The transaction the scans of a delta's *own* tables run under: the caller's, because those two tables
+//! are the branch's storage and what the caller has written to them - committed or not - is the state it
+//! is asking about. The base table beside them is a different matter and keeps the synthetic bound-only
+//! transaction below, since a reference read must not see the caller's uncommitted writes to the live
+//! table. Measured before this: with the synthetic context on the delta tables too, a statement group
+//! could not read its own writes - `INSERT INTO t VALUES (50,50); UPDATE t SET v = 51 WHERE k = 50` left
+//! 50 - and a group that deleted a key and re-inserted it was refused as a collision.
+static TransactionData Git4DataDeltaTransactionData(ClientContext &context, optional_ptr<AttachedDatabase> db,
+                                                    VisibilityBound bound) {
+	if (!db) {
+		// no delta table was resolved, so there is nothing the caller could have written to
+		return TransactionData(MAX_TRANSACTION_ID, bound);
+	}
+	auto transaction = TransactionData(DuckTransaction::Get(context, *db));
+	return TransactionData(transaction.GetTransactionId(), bound);
+}
+
 //! The keys a delta removed from its base, read once while a read is set up. A key is a tuple of
 //! arbitrary columns and this is the only place the tuple is compared, so it is held as one string.
 static void Git4DataCollectRemovedKeys(ClientContext &context, const string &removed_table,
@@ -101,18 +121,36 @@ static void Git4DataCollectRemovedKeys(ClientContext &context, const string &rem
 	scan.Initialize(removed_ids, nullptr);
 	QueryContext query_context;
 	groups.InitializeScan(query_context, scan.table_state, removed_ids, nullptr);
-	ScanOptions options(TransactionData(MAX_TRANSACTION_ID, bound));
+	ScanOptions options(Git4DataDeltaTransactionData(context, table.GetStorage().GetAttached(), bound));
+	auto collect = [&]() {
+		Git4DataHashKeyColumns(chunk, positions, hashes);
+		for (idx_t row = 0; row < chunk.size(); row++) {
+			hashes_result.insert(Git4DataRowKeyHash(hashes, row));
+			result.insert(Git4DataKeyString(chunk, positions, row));
+		}
+	};
 	while (true) {
 		chunk.Reset();
 		scan.table_state.Scan(options, chunk);
 		if (chunk.size() == 0) {
 			break;
 		}
-		Git4DataHashKeyColumns(chunk, positions, hashes);
-		for (idx_t row = 0; row < chunk.size(); row++) {
-			hashes_result.insert(Git4DataRowKeyHash(hashes, row));
-			result.insert(Git4DataKeyString(chunk, positions, row));
+		collect();
+	}
+	// The rows the caller has written to this table but not committed are in its local storage rather
+	// than in the row groups above, and they are part of the state being read: measured, a statement
+	// group could not read its own writes - `INSERT INTO t VALUES (50,50); UPDATE t SET v = 51 WHERE
+	// k = 50` left 50 - and a group that deleted a key and re-inserted it was refused as a collision.
+	auto &delta_transaction = DuckTransaction::Get(context, table.GetStorage().GetAttached());
+	auto &local_storage = LocalStorage::Get(delta_transaction);
+	local_storage.InitializeScan(table.GetStorage(), scan.local_state, nullptr);
+	while (true) {
+		chunk.Reset();
+		local_storage.Scan(scan.local_state, removed_ids, chunk);
+		if (chunk.size() == 0) {
+			break;
 		}
+		collect();
 	}
 }
 
@@ -133,6 +171,12 @@ struct Git4DataSnapshotScanState : public GlobalTableFunctionState {
 	//! The hashes of those keys, so a row that cannot be one of them is not turned into a string
 	unordered_set<hash_t> removed_key_hashes;
 	DataChunk key_hashes;
+	//! The database the delta's tables live in, so a scan of them can run under the caller's transaction
+	optional_ptr<AttachedDatabase> delta_database;
+	//! The added table itself, for the scan of the caller's own uncommitted rows
+	optional_ptr<DataTable> added_storage;
+	//! Whether the added rows are being read from the caller's local storage rather than the row groups
+	bool reading_local_added = false;
 	VisibilityBound delta_bound;
 	VisibilityBound bound;
 	bool has_delta = false;
@@ -535,9 +579,20 @@ static unique_ptr<GlobalTableFunctionState> Git4DataSnapshotScanInit(ClientConte
 		result->added_scan.Initialize(result->column_ids, nullptr);
 		added_table.GetStorage().GetRowGroupCollection()->InitializeScan(query_context, result->added_scan.table_state,
 		                                                                 result->column_ids, nullptr);
+		result->added_storage = added_table.GetStorage();
 	}
 	Git4DataCollectRemovedKeys(context, bind_data.delta_removed, ordered_key_types, key_columns.size(),
 	                           bind_data.delta_bound, result->removed_keys, result->removed_key_hashes);
+	// the delta's own tables are read as the caller has them, so their database is remembered here
+	if (!bind_data.delta_removed.empty()) {
+		auto &removed_entry =
+		    Catalog::GetEntry<TableCatalogEntry>(context, QualifiedName(Identifier(bind_data.delta_removed)));
+		result->delta_database = removed_entry.GetStorage().GetAttached();
+	} else if (!bind_data.delta_added.empty()) {
+		auto &added_entry =
+		    Catalog::GetEntry<TableCatalogEntry>(context, QualifiedName(Identifier(bind_data.delta_added)));
+		result->delta_database = added_entry.GetStorage().GetAttached();
+	}
 	// one hash column per key column, filled per chunk so the filter below needs no allocation per row
 	vector<LogicalType> hash_types;
 	for (idx_t i = 0; i < result->key_positions.size(); i++) {
@@ -605,10 +660,33 @@ static void Git4DataSnapshotScanFunction(ClientContext &context, TableFunctionIn
 		state.finished = true;
 		return;
 	}
-	// then the rows the branch added, which are its own line and so read as of everything committed
+	// then the rows the branch added, which are the caller's own table and so are read as the caller
+	// has them, at the bound this reference's delta is read at. The committed rows come from the row
+	// groups and the caller's own uncommitted ones from its local storage, in that order: measured,
+	// reading only the row groups left a statement group unable to see what its own earlier statements
+	// had added - `INSERT INTO t VALUES (50,50); UPDATE t SET v = 51 WHERE k = 50` left 50.
+	if (!state.reading_local_added) {
+		state.added_chunk.Reset();
+		ScanOptions added_options(Git4DataDeltaTransactionData(context, state.delta_database, state.delta_bound));
+		state.added_scan.table_state.Scan(added_options, state.added_chunk);
+		if (state.added_chunk.size() != 0) {
+			for (idx_t i = 0; i < output.ColumnCount(); i++) {
+				output.data[i].Reference(state.added_chunk.data[i]);
+			}
+			output.SetCardinality(state.added_chunk.size());
+			return;
+		}
+		if (!state.added_storage || !state.delta_database) {
+			state.finished = true;
+			return;
+		}
+		auto &open_transaction = DuckTransaction::Get(context, *state.delta_database);
+		LocalStorage::Get(open_transaction).InitializeScan(*state.added_storage, state.added_scan.local_state, nullptr);
+		state.reading_local_added = true;
+	}
+	auto &transaction = DuckTransaction::Get(context, *state.delta_database);
 	state.added_chunk.Reset();
-	ScanOptions added_options(TransactionData(MAX_TRANSACTION_ID, state.delta_bound));
-	state.added_scan.table_state.Scan(added_options, state.added_chunk);
+	LocalStorage::Get(transaction).Scan(state.added_scan.local_state, state.column_ids, state.added_chunk);
 	if (state.added_chunk.size() == 0) {
 		state.finished = true;
 		return;
@@ -676,6 +754,8 @@ struct Git4DataDiffState : public GlobalTableFunctionState {
 	DataChunk scan_chunk;
 	//! One hash column per key column, filled per chunk while a side is walked
 	DataChunk key_hashes;
+	//! The database the delta's tables live in, so a scan of them can run under the caller's transaction
+	optional_ptr<AttachedDatabase> delta_database;
 	vector<StorageIndex> column_ids;
 	idx_t key_count = 0;
 	VisibilityBound left_bound;
@@ -937,6 +1017,16 @@ static unique_ptr<GlobalTableFunctionState> Git4DataDiffInit(ClientContext &cont
 	Git4DataCollectRemovedKeys(context, bind_data.right_delta_removed, bind_data.key_types,
 	                           bind_data.key_columns.size(), bind_data.right_delta_bound, result->right_removed_keys,
 	                           result->right_removed_key_hashes);
+	{
+		auto delta_table = !bind_data.left_delta_removed.empty()    ? bind_data.left_delta_removed
+		                   : !bind_data.left_delta_added.empty()    ? bind_data.left_delta_added
+		                   : !bind_data.right_delta_removed.empty() ? bind_data.right_delta_removed
+		                                                            : bind_data.right_delta_added;
+		if (!delta_table.empty()) {
+			auto &delta_entry = Catalog::GetEntry<TableCatalogEntry>(context, QualifiedName(Identifier(delta_table)));
+			result->delta_database = delta_entry.GetStorage().GetAttached();
+		}
+	}
 	result->left_added_table = bind_data.left_delta_added;
 	result->right_added_table = bind_data.right_delta_added;
 	result->left_delta_bound = bind_data.left_delta_bound;
@@ -1020,7 +1110,7 @@ static void Git4DataDiffCollect(ClientContext &context, Git4DataDiffState &state
 		state.open_added_table = added_table;
 		state.added_bound = added_bound;
 	}
-	ScanOptions added_options(TransactionData(MAX_TRANSACTION_ID, state.added_bound));
+	ScanOptions added_options(Git4DataDeltaTransactionData(context, state.delta_database, state.added_bound));
 	while (true) {
 		state.added_chunk.Reset();
 		state.added_scan.table_state.Scan(added_options, state.added_chunk);
