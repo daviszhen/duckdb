@@ -190,12 +190,12 @@ PRAGMA git4data_apply('t', 'nowhere', 'UPDATE t SET v = 1')
 statement error
 PRAGMA git4data_apply('t', 'b', 'CREATE TABLE x (a INTEGER)')
 ----
-<REGEX>:.*takes one INSERT, UPDATE or DELETE statement.*
+<REGEX>:.*takes INSERT, UPDATE and DELETE statements.*
 
 statement error
-PRAGMA git4data_apply('t', 'b', 'UPDATE t SET v = 1; DELETE FROM t WHERE k = 1')
+PRAGMA git4data_apply('t', 'b', '')
 ----
-<REGEX>:.*takes one statement.*
+<REGEX>:.*needs at least one statement.*
 
 statement error
 PRAGMA git4data_apply('t', 'b', 'INSERT INTO t VALUES (1, 1) ON CONFLICT DO NOTHING')
@@ -260,3 +260,52 @@ query III
 SELECT (SELECT count(*) FROM t), (SELECT v FROM t WHERE k = 3), (SELECT v FROM t WHERE k = 500)
 ----
 10	103	4
+
+# A group of statements is one unit of work: they are translated against the same delta and handed back
+# together, so the caller's statements land in one transaction. Measured on a fresh table:
+statement ok
+CREATE TABLE g (k INTEGER PRIMARY KEY, v INTEGER)
+
+statement ok
+INSERT INTO g SELECT range, range FROM range(10)
+
+statement ok
+CHECKPOINT
+
+statement ok
+PRAGMA git4data_create_branch('gb', '')
+
+statement ok
+CREATE TABLE g_add (k INTEGER PRIMARY KEY, v INTEGER)
+
+statement ok
+CREATE TABLE g_del (k INTEGER PRIMARY KEY)
+
+statement ok
+PRAGMA git4data_bind_branch_delta('g', 'gb', 'g_add', 'g_del')
+
+statement ok
+PRAGMA git4data_apply('g', 'gb', 'UPDATE g SET v = 111 WHERE k = 1; DELETE FROM g WHERE k = 2; INSERT INTO g VALUES (100, 100)')
+
+query IIII
+SELECT (SELECT v FROM g AT (BRANCH => 'gb') WHERE k = 1),
+       (SELECT count(*) FROM g AT (BRANCH => 'gb') WHERE k = 2),
+       (SELECT v FROM g AT (BRANCH => 'gb') WHERE k = 100),
+       (SELECT count(*) FROM g AT (BRANCH => 'gb'))
+----
+111	0	100	10
+
+# and one failing statement takes the whole group with it: the update of k = 3 is not there afterwards,
+# and the delta tables are empty - which is what makes a group a unit of work rather than a sequence of
+# writes that a caller has to undo by hand
+statement error
+PRAGMA git4data_apply('g', 'gb', 'UPDATE g SET v = 222 WHERE k = 3; INSERT INTO g VALUES (5, 5)')
+----
+<REGEX>:.*insert collides with a row the branch already shows.*
+
+query III
+SELECT (SELECT v FROM g AT (BRANCH => 'gb') WHERE k = 3),
+       (SELECT count(*) FROM g_add WHERE k = 3),
+       (SELECT count(*) FROM g_del WHERE k = 3)
+----
+3	0	0

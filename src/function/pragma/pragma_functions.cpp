@@ -809,9 +809,8 @@ static string PragmaGit4DataApply(ClientContext &context, const FunctionParamete
 
 	Parser parser(context.GetParserOptions());
 	parser.ParseQuery(dml);
-	if (parser.statements.size() != 1) {
-		throw InvalidInputException("git4data_apply takes one statement, and %llu were given",
-		                            parser.statements.size());
+	if (parser.statements.empty()) {
+		throw InvalidInputException("git4data_apply needs at least one statement to apply");
 	}
 
 	auto escape = [](const string &value) {
@@ -869,137 +868,152 @@ static string PragmaGit4DataApply(ClientContext &context, const FunctionParamete
 		                          alias_removed, match(alias_removed, from_alias));
 	};
 
-	auto &statement = *parser.statements[0];
-	switch (statement.type) {
-	case StatementType::DELETE_STATEMENT: {
-		auto &node = statement.Cast<DeleteStatement>().node;
-		if (!node->using_clauses.empty()) {
-			throw InvalidInputException("git4data_apply does not take DELETE ... USING: the rows to remove have to "
-			                            "be the branch's own, which a second table is not");
-		}
-		if (!node->returning_list.empty()) {
-			throw InvalidInputException("git4data_apply does not take RETURNING: nothing is written where the rows "
-			                            "would come from");
-		}
-		Git4DataCheckApplyTarget(*node->table, table_name);
-		auto condition = node->condition ? node->condition->ToString() : string();
-		string result = StringUtil::Format("CREATE OR REPLACE TEMP TABLE %s AS SELECT %s FROM %s%s;\n", rows_name,
-		                                   key_list, at_clause, condition.empty() ? string() : " WHERE " + condition);
-		result += StringUtil::Format("DELETE FROM %s %s WHERE EXISTS (SELECT 1 FROM %s %s WHERE %s);\n", quoted_added,
-		                             alias_added, rows_name, alias_rows, match(alias_added, alias_rows));
-		result += add_removals(rows_name, alias_rows);
-		result += StringUtil::Format("DROP TABLE %s;", rows_name);
-		return result;
-	}
-	case StatementType::UPDATE_STATEMENT: {
-		auto &node = statement.Cast<UpdateStatement>().node;
-		if (node->from_table) {
-			throw InvalidInputException("git4data_apply does not take UPDATE ... FROM: the rows to change have to "
-			                            "be the branch's own, which a joined table is not");
-		}
-		if (!node->returning_list.empty()) {
-			throw InvalidInputException("git4data_apply does not take RETURNING: nothing is written where the rows "
-			                            "would come from");
-		}
-		Git4DataCheckApplyTarget(*node->table, table_name);
-		auto &set_info = *node->set_info;
-		auto condition = set_info.condition ? set_info.condition->ToString() : string();
-		// the new rows: the branch's own columns, with the assigned ones replaced by what they are
-		// assigned. A row's other columns are the row's own, which is what a SET list means.
-		vector<pair<string, string>> assignments;
-		for (idx_t i = 0; i < set_info.columns.size(); i++) {
-			assignments.emplace_back(set_info.columns[i].GetIdentifierName(), set_info.expressions[i]->ToString());
-		}
-		string new_columns;
-		for (auto &column : table.GetColumns().Logical()) {
-			auto name = column.Name().GetIdentifierName();
-			if (!new_columns.empty()) {
-				new_columns += ", ";
+	// Every statement is translated against the same delta, and the whole group is handed back as one
+	// string so the caller's statements land in one transaction: either all of them are recorded or
+	// none is, which is what makes a group a unit of work rather than a sequence of writes.
+	auto translate = [&](SQLStatement &statement) {
+		switch (statement.type) {
+		case StatementType::DELETE_STATEMENT: {
+			auto &node = statement.Cast<DeleteStatement>().node;
+			if (!node->using_clauses.empty()) {
+				throw InvalidInputException("git4data_apply does not take DELETE ... USING: the rows to remove have to "
+				                            "be the branch's own, which a second table is not");
 			}
-			string value;
-			for (auto &assignment : assignments) {
-				if (assignment.first == name) {
-					value = assignment.second;
-					break;
+			if (!node->returning_list.empty()) {
+				throw InvalidInputException("git4data_apply does not take RETURNING: nothing is written where the rows "
+				                            "would come from");
+			}
+			Git4DataCheckApplyTarget(*node->table, table_name);
+			auto condition = node->condition ? node->condition->ToString() : string();
+			string result =
+			    StringUtil::Format("CREATE OR REPLACE TEMP TABLE %s AS SELECT %s FROM %s%s;\n", rows_name, key_list,
+			                       at_clause, condition.empty() ? string() : " WHERE " + condition);
+			result +=
+			    StringUtil::Format("DELETE FROM %s %s WHERE EXISTS (SELECT 1 FROM %s %s WHERE %s);\n", quoted_added,
+			                       alias_added, rows_name, alias_rows, match(alias_added, alias_rows));
+			result += add_removals(rows_name, alias_rows);
+			result += StringUtil::Format("DROP TABLE %s;", rows_name);
+			return result;
+		}
+		case StatementType::UPDATE_STATEMENT: {
+			auto &node = statement.Cast<UpdateStatement>().node;
+			if (node->from_table) {
+				throw InvalidInputException("git4data_apply does not take UPDATE ... FROM: the rows to change have to "
+				                            "be the branch's own, which a joined table is not");
+			}
+			if (!node->returning_list.empty()) {
+				throw InvalidInputException("git4data_apply does not take RETURNING: nothing is written where the rows "
+				                            "would come from");
+			}
+			Git4DataCheckApplyTarget(*node->table, table_name);
+			auto &set_info = *node->set_info;
+			auto condition = set_info.condition ? set_info.condition->ToString() : string();
+			// the new rows: the branch's own columns, with the assigned ones replaced by what they are
+			// assigned. A row's other columns are the row's own, which is what a SET list means.
+			vector<pair<string, string>> assignments;
+			for (idx_t i = 0; i < set_info.columns.size(); i++) {
+				assignments.emplace_back(set_info.columns[i].GetIdentifierName(), set_info.expressions[i]->ToString());
+			}
+			string new_columns;
+			for (auto &column : table.GetColumns().Logical()) {
+				auto name = column.Name().GetIdentifierName();
+				if (!new_columns.empty()) {
+					new_columns += ", ";
+				}
+				string value;
+				for (auto &assignment : assignments) {
+					if (assignment.first == name) {
+						value = assignment.second;
+						break;
+					}
+				}
+				new_columns += value.empty() ? KeywordHelper::WriteOptionallyQuoted(name) : value;
+			}
+			string result =
+			    StringUtil::Format("CREATE OR REPLACE TEMP TABLE %s AS SELECT %s FROM %s%s;\n", keys_name, key_list,
+			                       at_clause, condition.empty() ? string() : " WHERE " + condition);
+			result += StringUtil::Format("CREATE OR REPLACE TEMP TABLE %s AS SELECT %s FROM %s%s;\n", rows_name,
+			                             new_columns, at_clause, condition.empty() ? string() : " WHERE " + condition);
+			result +=
+			    StringUtil::Format("DELETE FROM %s %s WHERE EXISTS (SELECT 1 FROM %s %s WHERE %s);\n", quoted_added,
+			                       alias_added, keys_name, alias_keys, match(alias_added, alias_keys));
+			result += add_removals(keys_name, alias_keys);
+			result += StringUtil::Format("INSERT INTO %s SELECT * FROM %s;\n", quoted_added, rows_name);
+			result += StringUtil::Format("DROP TABLE %s;\nDROP TABLE %s;", keys_name, rows_name);
+			return result;
+		}
+		case StatementType::INSERT_STATEMENT: {
+			auto &node = statement.Cast<InsertStatement>().node;
+			if (node->on_conflict_info) {
+				throw InvalidInputException("git4data_apply does not take ON CONFLICT: a branch that keeps its own "
+				                            "changes has no conflict for the base to resolve");
+			}
+			if (!node->returning_list.empty()) {
+				throw InvalidInputException("git4data_apply does not take RETURNING: nothing is written where the rows "
+				                            "would come from");
+			}
+			if (node->default_values) {
+				throw InvalidInputException("git4data_apply does not take DEFAULT VALUES: the defaults are the source "
+				                            "table's, and the table this branch adds rows to is not it");
+			}
+			if (node->column_order != InsertColumnOrder::INSERT_BY_POSITION) {
+				throw InvalidInputException("git4data_apply does not take INSERT ... BY NAME");
+			}
+			if (!node->select_statement) {
+				throw InvalidInputException("git4data_apply needs rows to insert");
+			}
+			// the column list the insert names, or the table's own columns in order when it names none
+			vector<string> insert_columns;
+			for (auto &column : node->columns) {
+				insert_columns.push_back(column.GetIdentifierName());
+			}
+			if (insert_columns.empty()) {
+				for (auto &column : table.GetColumns().Logical()) {
+					insert_columns.push_back(column.Name().GetIdentifierName());
 				}
 			}
-			new_columns += value.empty() ? KeywordHelper::WriteOptionallyQuoted(name) : value;
-		}
-		string result = StringUtil::Format("CREATE OR REPLACE TEMP TABLE %s AS SELECT %s FROM %s%s;\n", keys_name,
-		                                   key_list, at_clause, condition.empty() ? string() : " WHERE " + condition);
-		result += StringUtil::Format("CREATE OR REPLACE TEMP TABLE %s AS SELECT %s FROM %s%s;\n", rows_name,
-		                             new_columns, at_clause, condition.empty() ? string() : " WHERE " + condition);
-		result += StringUtil::Format("DELETE FROM %s %s WHERE EXISTS (SELECT 1 FROM %s %s WHERE %s);\n", quoted_added,
-		                             alias_added, keys_name, alias_keys, match(alias_added, alias_keys));
-		result += add_removals(keys_name, alias_keys);
-		result += StringUtil::Format("INSERT INTO %s SELECT * FROM %s;\n", quoted_added, rows_name);
-		result += StringUtil::Format("DROP TABLE %s;\nDROP TABLE %s;", keys_name, rows_name);
-		return result;
-	}
-	case StatementType::INSERT_STATEMENT: {
-		auto &node = statement.Cast<InsertStatement>().node;
-		if (node->on_conflict_info) {
-			throw InvalidInputException("git4data_apply does not take ON CONFLICT: a branch that keeps its own "
-			                            "changes has no conflict for the base to resolve");
-		}
-		if (!node->returning_list.empty()) {
-			throw InvalidInputException("git4data_apply does not take RETURNING: nothing is written where the rows "
-			                            "would come from");
-		}
-		if (node->default_values) {
-			throw InvalidInputException("git4data_apply does not take DEFAULT VALUES: the defaults are the source "
-			                            "table's, and the table this branch adds rows to is not it");
-		}
-		if (node->column_order != InsertColumnOrder::INSERT_BY_POSITION) {
-			throw InvalidInputException("git4data_apply does not take INSERT ... BY NAME");
-		}
-		if (!node->select_statement) {
-			throw InvalidInputException("git4data_apply needs rows to insert");
-		}
-		// the column list the insert names, or the table's own columns in order when it names none
-		vector<string> insert_columns;
-		for (auto &column : node->columns) {
-			insert_columns.push_back(column.GetIdentifierName());
-		}
-		if (insert_columns.empty()) {
-			for (auto &column : table.GetColumns().Logical()) {
-				insert_columns.push_back(column.Name().GetIdentifierName());
+			string insert_list;
+			for (idx_t i = 0; i < insert_columns.size(); i++) {
+				if (i > 0) {
+					insert_list += ", ";
+				}
+				insert_list += KeywordHelper::WriteOptionallyQuoted(insert_columns[i]);
 			}
-		}
-		string insert_list;
-		for (idx_t i = 0; i < insert_columns.size(); i++) {
-			if (i > 0) {
-				insert_list += ", ";
+			// The rows are landed in a table whose columns are the ones the insert names, in that order, so
+			// the rows can be checked and then added by position. Naming them here rather than aliasing the
+			// select avoids depending on what the parser calls the columns of a VALUES list - it calls them
+			// `valueslist`, measured.
+			string declared;
+			for (auto &name : insert_columns) {
+				auto &column = table.GetColumns().GetColumn(Identifier(name));
+				if (!declared.empty()) {
+					declared += ", ";
+				}
+				declared += KeywordHelper::WriteOptionallyQuoted(name) + " " + column.Type().ToString();
 			}
-			insert_list += KeywordHelper::WriteOptionallyQuoted(insert_columns[i]);
+			string result = StringUtil::Format("CREATE OR REPLACE TEMP TABLE %s (%s);\n", rows_name, declared);
+			result += StringUtil::Format("INSERT INTO %s (%s) %s;\n", rows_name, insert_list,
+			                             node->select_statement->ToString());
+			result += StringUtil::Format(
+			    "INSERT INTO %s (%s) SELECT * FROM %s WHERE (SELECT CASE WHEN EXISTS (SELECT 1 FROM %s JOIN %s %s ON "
+			    "(%s)) THEN error('insert collides with a row the branch already shows: use an update, which a delta "
+			    "can record, or delete the row first') ELSE 1 END) = 1;\n",
+			    quoted_added, insert_list, rows_name, branch_image, rows_name, alias_rows,
+			    match(alias_branch, alias_rows));
+			result += StringUtil::Format("DROP TABLE %s;", rows_name);
+			return result;
 		}
-		// The rows are landed in a table whose columns are the ones the insert names, in that order, so
-		// the rows can be checked and then added by position. Naming them here rather than aliasing the
-		// select avoids depending on what the parser calls the columns of a VALUES list - it calls them
-		// `valueslist`, measured.
-		string declared;
-		for (auto &name : insert_columns) {
-			auto &column = table.GetColumns().GetColumn(Identifier(name));
-			if (!declared.empty()) {
-				declared += ", ";
-			}
-			declared += KeywordHelper::WriteOptionallyQuoted(name) + " " + column.Type().ToString();
+		default:
+			throw InvalidInputException("git4data_apply takes INSERT, UPDATE and DELETE statements, and this one is "
+			                            "not one of them");
 		}
-		string result = StringUtil::Format("CREATE OR REPLACE TEMP TABLE %s (%s);\n", rows_name, declared);
-		result +=
-		    StringUtil::Format("INSERT INTO %s (%s) %s;\n", rows_name, insert_list, node->select_statement->ToString());
-		result += StringUtil::Format(
-		    "INSERT INTO %s (%s) SELECT * FROM %s WHERE (SELECT CASE WHEN EXISTS (SELECT 1 FROM %s JOIN %s %s ON "
-		    "(%s)) THEN error('insert collides with a row the branch already shows: use an update, which a delta "
-		    "can record, or delete the row first') ELSE 1 END) = 1;\n",
-		    quoted_added, insert_list, rows_name, branch_image, rows_name, alias_rows, match(alias_branch, alias_rows));
-		result += StringUtil::Format("DROP TABLE %s;", rows_name);
-		return result;
+	};
+	string result;
+	for (auto &statement : parser.statements) {
+		result += translate(*statement);
+		result += "\n";
 	}
-	default:
-		throw InvalidInputException("git4data_apply takes one INSERT, UPDATE or DELETE statement, and this one is "
-		                            "not one of them");
-	}
+	return result;
 }
 
 //! The columns of one image compared against the other's, for telling a real merge conflict from two
