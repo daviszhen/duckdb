@@ -400,3 +400,58 @@ query I
 SELECT count(*) FROM comp AT (BRANCH => 'cd')
 ----
 25
+
+# A branch that inherited a line which differs by a delta cannot have a delta of its own: a read would
+# have to apply both, so the bind refuses rather than promising it. The parent's line is held down by the
+# child at the same time, which is what the drop says.
+statement ok
+CREATE TABLE t_f (k INTEGER PRIMARY KEY, v INTEGER)
+
+statement ok
+INSERT INTO t_f SELECT range, range FROM range(10)
+
+statement ok
+PRAGMA git4data_create_branch('fr', '')
+
+statement ok
+PRAGMA git4data_create_branch('fp', 'fr')
+
+statement ok
+CREATE TABLE fp_add (k INTEGER PRIMARY KEY, v INTEGER)
+
+statement ok
+CREATE TABLE fp_del (k INTEGER PRIMARY KEY)
+
+statement ok
+PRAGMA git4data_bind_branch_delta('t_f', 'fp', 'fp_add', 'fp_del')
+
+statement ok
+INSERT INTO fp_add VALUES (100, 100)
+
+statement ok
+PRAGMA git4data_create_snapshot('fcap', 'fp')
+
+statement ok
+PRAGMA git4data_create_branch('fc', 'fcap')
+
+# the child reads the line it inherited, delta and all
+query II
+SELECT (SELECT count(*) FROM t_f AT (BRANCH => 'fc')), (SELECT count(*) FROM t_f AT (BRANCH => 'fc') WHERE k = 100)
+----
+11	1
+
+statement error
+PRAGMA git4data_drop_branch('fp')
+----
+<REGEX>:.*captured its line.*
+
+statement ok
+CREATE TABLE fc_add (k INTEGER PRIMARY KEY, v INTEGER)
+
+statement ok
+CREATE TABLE fc_del (k INTEGER PRIMARY KEY)
+
+statement error
+PRAGMA git4data_bind_branch_delta('t_f', 'fc', 'fc_add', 'fc_del')
+----
+<REGEX>:.*inherits a line that differs by a delta.*
