@@ -134,3 +134,61 @@ PRAGMA git4data_drop_branch('b')
 
 statement ok
 PRAGMA git4data_snapshots;
+
+# A reference that captured a branch's line is held to that line, so the branch cannot be dropped out from
+# under it either: the reference would go on existing under the same name, reading the pinned image of the
+# table instead. Measured, a captured v = 111 read as v = 1 after the branch was dropped, which is a name
+# answering with a state it never captured.
+statement ok
+CREATE TABLE c (k INTEGER PRIMARY KEY, v INTEGER)
+
+statement ok
+INSERT INTO c SELECT range, range FROM range(4)
+
+statement ok
+CHECKPOINT
+
+statement ok
+PRAGMA git4data_create_branch('cb', '')
+
+statement ok
+PRAGMA git4data_materialize('c', 'cb', 'c_b')
+
+statement ok
+UPDATE c_b SET v = 111 WHERE k = 1
+
+statement ok
+PRAGMA git4data_create_snapshot('cs', 'cb')
+
+query I
+SELECT v FROM c AT (SNAPSHOT => 'cs') WHERE k = 1
+----
+111
+
+statement error
+PRAGMA git4data_drop_branch('cb')
+----
+<REGEX>:.*Snapshot "cs" captured a line of branch "cb".*
+
+# and the line it captured is still that line
+query I
+SELECT v FROM c AT (SNAPSHOT => 'cs') WHERE k = 1
+----
+111
+
+# with the snapshot gone the branch goes, and takes the table it was given
+statement ok
+PRAGMA git4data_drop_snapshot('cs')
+
+statement ok
+PRAGMA git4data_drop_branch('cb')
+
+statement error
+SELECT count(*) FROM c_b
+----
+<REGEX>:.*Table with name c_b does not exist.*
+
+query I
+SELECT count(*) FROM c
+----
+4

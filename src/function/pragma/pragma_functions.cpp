@@ -1604,6 +1604,18 @@ static string PragmaGit4DataDropBranch(ClientContext &context, const FunctionPar
 		                            "line. Drop those branches first.",
 		                            name);
 	}
+	for (auto &snapshot : transaction_manager.snapshots.List()) {
+		// the reference reads this branch's line, and dropping the branch would leave it reading the pinned
+		// image of the table instead - the same name answering with a state it never captured. Measured, a
+		// captured v = 111 read as v = 1 after the branch was dropped. Reference names are exact, so this
+		// compares them exactly: a branch "b" and a branch "B" are two lines.
+		if (snapshot.line != name) {
+			continue;
+		}
+		throw InvalidInputException("Snapshot \"%s\" captured a line of branch \"%s\", and dropping the branch "
+		                            "would leave it reading the table instead. Drop that snapshot first.",
+		                            snapshot.name, name);
+	}
 	string result;
 	for (auto &entry : existing.storage_tables) {
 		// dropping the branch takes the tables it was given with it, and one of them may have been renamed
