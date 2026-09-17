@@ -157,3 +157,50 @@ query II
 SELECT (SELECT count(*) FROM t AT (BRANCH => 'b')), (SELECT v FROM t AT (BRANCH => 'b') WHERE k = 5000)
 ----
 1	5000
+
+# The merge writes into the table a branch was given and the drop takes it with the branch, and both used
+# the name the mapping was written with. Measured before this: a renamed table made the merge fail to bind
+# ("Table with name t_m does not exist") and, worse, the drop left the renamed table behind, still holding
+# the branch's line with nothing pointing at it.
+statement ok
+CREATE TABLE r1 (k INTEGER PRIMARY KEY, v INTEGER)
+
+statement ok
+INSERT INTO r1 SELECT range, range FROM range(10)
+
+statement ok
+PRAGMA git4data_create_branch('rr', '')
+
+statement ok
+PRAGMA git4data_create_branch('rm', 'rr')
+
+statement ok
+PRAGMA git4data_create_branch('ro', 'rr')
+
+statement ok
+PRAGMA git4data_materialize('r1', 'rm', 'r1_m')
+
+statement ok
+PRAGMA git4data_materialize('r1', 'ro', 'r1_o')
+
+statement ok
+ALTER TABLE r1_m RENAME TO r1_m2
+
+statement ok
+UPDATE r1_o SET v = -5 WHERE k = 1
+
+statement ok
+PRAGMA git4data_merge('r1', 'rm', 'ro', 'fail')
+
+query II
+SELECT (SELECT count(*) FROM r1 AT (BRANCH => 'rm')), (SELECT v FROM r1 AT (BRANCH => 'rm') WHERE k = 1)
+----
+10	-5
+
+statement ok
+PRAGMA git4data_drop_branch('rm')
+
+statement error
+SELECT count(*) FROM r1_m2
+----
+<REGEX>:.*Table with name r1_m2 does not exist.*

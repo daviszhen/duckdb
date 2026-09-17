@@ -22,6 +22,7 @@
 #include "duckdb/main/database.hpp"
 #include "duckdb/main/database_manager.hpp"
 #include "duckdb/main/attached_database.hpp"
+#include "duckdb/function/table/system_functions.hpp"
 #include "duckdb/main/query_profiler.hpp"
 #include "duckdb/main/secret/secret_manager.hpp"
 #include "duckdb/parallel/task_scheduler.hpp"
@@ -670,7 +671,8 @@ static string PragmaGit4DataMerge(ClientContext &context, const FunctionParamete
 	string merge_into;
 	for (auto &entry : left.storage_tables) {
 		if (entry.source == table_name) {
-			merge_into = entry.storage;
+			// the table the branch was given can have been renamed, and the merge writes into it
+			merge_into = Git4DataResolveTableName(context, entry.storage, entry.oid);
 		}
 	}
 	if (merge_into.empty()) {
@@ -984,7 +986,13 @@ static string PragmaGit4DataDropBranch(ClientContext &context, const FunctionPar
 	}
 	string result;
 	for (auto &entry : existing.storage_tables) {
-		result += StringUtil::Format("DROP TABLE IF EXISTS %s;\n", KeywordHelper::WriteOptionallyQuoted(entry.storage));
+		// dropping the branch takes the tables it was given with it, and one of them may have been renamed
+		// since - dropping the name it was given instead would leave the table behind, silently
+		auto resolved = Git4DataResolveTableName(context, entry.storage, entry.oid);
+		if (resolved.empty()) {
+			continue;
+		}
+		result += StringUtil::Format("DROP TABLE IF EXISTS %s;\n", KeywordHelper::WriteOptionallyQuoted(resolved));
 	}
 	transaction_manager.branches.Drop(name);
 	if (result.empty()) {

@@ -57,6 +57,11 @@ struct DuckDBConnectionCountFun {
 //! scan is identical for both and only the lookup and the error message differ.
 enum class Git4DataRefKind : uint8_t { SNAPSHOT, BRANCH };
 
+//! The name a table has *now*, given the name a mapping was written with and the oid it recorded. A
+//! table can be renamed under a mapping, and the oid is what survives that; empty when neither the name
+//! nor the oid resolves to a table.
+DUCKDB_API string Git4DataResolveTableName(ClientContext &context, const string &name, idx_t oid);
+
 struct Git4DataSnapshotScanFun {
 	static void RegisterFunction(BuiltinFunctions &set);
 	//! The table function itself, so a binder can put it on a LogicalGet directly

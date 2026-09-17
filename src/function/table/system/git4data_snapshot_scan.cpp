@@ -110,6 +110,7 @@ struct Git4DataSnapshotScanState : public GlobalTableFunctionState {
 //! The table carrying this oid in the default schema, or nothing. A mapping is written in *names*, and a
 //! name can be dropped, recreated or renamed under it; the oid is what survives a rename, so it is what
 //! lets a read find the table a mapping was made against when its name no longer resolves.
+
 static optional_ptr<TableCatalogEntry> Git4DataTableByOid(ClientContext &context, idx_t oid) {
 	if (oid == 0) {
 		return nullptr;
@@ -123,6 +124,19 @@ static optional_ptr<TableCatalogEntry> Git4DataTableByOid(ClientContext &context
 		result = &entry.Cast<TableCatalogEntry>();
 	});
 	return result;
+}
+
+string Git4DataResolveTableName(ClientContext &context, const string &name, idx_t oid) {
+	auto named = Catalog::GetEntry<TableCatalogEntry>(context, QualifiedName(Identifier(name)),
+	                                                  OnEntryNotFound::RETURN_NULL);
+	if (named) {
+		return name;
+	}
+	auto by_oid = Git4DataTableByOid(context, oid);
+	if (!by_oid) {
+		return string();
+	}
+	return by_oid->name.GetIdentifierName();
 }
 
 //! The table backing a branch for a source table, or empty when the branch has no line of its own
