@@ -30,6 +30,8 @@ struct Git4DataSnapshotScanBindData : public TableFunctionData {
 	//! its base instead of differing from it
 	string delta_added;
 	string delta_removed;
+	//! Whether the table this read scans is a branch's own copy rather than the source table
+	bool own_storage = false;
 	//! The keys that delta removed, as strings and as hashes: the string decides, and the hash only
 	//! spares the base's rows the comparison they cannot win
 	unordered_set<string> removed_keys;
@@ -173,6 +175,11 @@ struct Git4DataSnapshotScanState : public GlobalTableFunctionState {
 	DataChunk key_hashes;
 	//! The database the delta's tables live in, so a scan of them can run under the caller's transaction
 	optional_ptr<AttachedDatabase> delta_database;
+	//! The table this read scans, when it is a branch's own copy, and whether its local rows have been
+	//! read yet: a copy is the caller's table, so its uncommitted rows are part of what it holds
+	optional_ptr<DataTable> base_storage;
+	bool own_storage = false;
+	bool reading_local_base = false;
 	//! The added table itself, for the scan of the caller's own uncommitted rows
 	optional_ptr<DataTable> added_storage;
 	//! Whether the added rows are being read from the caller's local storage rather than the row groups
@@ -278,6 +285,10 @@ struct Git4DataReadPlan {
 	//! and the commit a reference captured when what it names is that line as it stood then. A base does
 	//! not move and a delta does, which is why the two are read at different bounds.
 	VisibilityBound delta_bound;
+	//! Whether the table being read is a branch's *own* copy rather than the source. A copy is the
+	//! caller's table like any other, so a read of it sees what that transaction has written to it -
+	//! including rows it has not committed, which live in its local storage rather than in row groups.
+	bool own_storage = false;
 
 	bool HasDelta() const {
 		return !delta_added.empty() || !delta_removed.empty();
@@ -289,6 +300,8 @@ struct Git4DataReadPlan {
 //! plus at most one delta read at that same commit. AllCommitted as the bound means the state now.
 struct Git4DataLineState {
 	string base_table;
+	//! Whether `base_table` is a branch's own copy rather than the source table
+	bool own_storage = false;
 	VisibilityBound base_bound;
 	string delta_added;
 	string delta_removed;
@@ -348,6 +361,7 @@ static Git4DataLineState ResolveGit4DataLineState(ClientContext &context, DuckTr
 	if (!storage.empty()) {
 		// the branch's own line is a table: read as it is now, or as it stood at the commit asked for
 		state.base_table = storage;
+		state.own_storage = true;
 	} else if (!branch.base_line.empty()) {
 		// it inherited a line, and that inheritance is fixed at this branch's pin - whatever commit is
 		// being asked about, the state it started from is the one the line had when it forked
@@ -356,6 +370,7 @@ static Git4DataLineState ResolveGit4DataLineState(ClientContext &context, DuckTr
 			auto inherited = ResolveGit4DataLineState(context, transaction_manager, table_name, line_branch,
 			                                          VisibilityBound::Through(branch.pin));
 			state.base_table = inherited.base_table;
+			state.own_storage = inherited.own_storage;
 			state.base_bound = inherited.base_bound;
 			state.delta_added = inherited.delta_added;
 			state.delta_removed = inherited.delta_removed;
@@ -447,6 +462,7 @@ static void ResolveGit4DataRead(ClientContext &context, DuckTransactionManager &
 				auto state = ResolveGit4DataLineState(context, transaction_manager, table_name, line_branch,
 				                                      VisibilityBound::Through(snapshot.pin));
 				plan.table_name = state.base_table;
+				plan.own_storage = state.own_storage;
 				plan.bound = state.base_bound;
 				plan.delta_added = state.delta_added;
 				plan.delta_removed = state.delta_removed;
@@ -463,6 +479,7 @@ static void ResolveGit4DataRead(ClientContext &context, DuckTransactionManager &
 	auto state =
 	    ResolveGit4DataLineState(context, transaction_manager, table_name, branch, VisibilityBound::AllCommitted());
 	plan.table_name = state.base_table;
+	plan.own_storage = state.own_storage;
 	plan.bound = state.base_bound;
 	plan.delta_added = state.delta_added;
 	plan.delta_removed = state.delta_removed;
@@ -501,6 +518,7 @@ unique_ptr<FunctionData> Git4DataSnapshotScanFun::CreateBindData(ClientContext &
 	Git4DataReadPlan plan;
 	ResolveGit4DataRead(context, transaction_manager, table_name, reference_name, kind, plan);
 	result->table_name = plan.table_name;
+	result->own_storage = plan.own_storage;
 	result->bound = plan.bound;
 	result->delta_added = plan.delta_added;
 	result->delta_removed = plan.delta_removed;
@@ -532,6 +550,9 @@ static unique_ptr<GlobalTableFunctionState> Git4DataSnapshotScanInit(ClientConte
 	auto &table = Catalog::GetEntry<TableCatalogEntry>(context, QualifiedName(Identifier(bind_data.table_name)));
 	auto &storage = table.GetStorage();
 	auto &row_groups = *storage.GetRowGroupCollection();
+	result->own_storage = bind_data.own_storage;
+	result->base_storage = storage;
+	result->delta_database = storage.GetAttached();
 
 	vector<LogicalType> scan_types;
 	for (auto &column : table.GetColumns().Logical()) {
@@ -610,9 +631,30 @@ static void Git4DataSnapshotScanFunction(ClientContext &context, TableFunctionIn
 	// the base first, with the keys the delta removed left out
 	while (!state.reading_added) {
 		state.scan_chunk.Reset();
-		// no transaction of our own writes to see, and the pinned bound in place of "now"
-		ScanOptions options(TransactionData(MAX_TRANSACTION_ID, state.bound));
-		state.scan_state.table_state.Scan(options, state.scan_chunk);
+		if (state.reading_local_base) {
+			// the rows the caller has written to the copy it holds but not committed, which are in its
+			// local storage rather than in the row groups above
+			auto &local_transaction = DuckTransaction::Get(context, *state.delta_database);
+			LocalStorage::Get(local_transaction).Scan(state.scan_state.local_state, state.column_ids, state.scan_chunk);
+		} else {
+			// A copy is the caller's own table, so the caller's transaction reads it and sees its own
+			// writes; the source table at a pin is not, and keeps the synthetic bound-only transaction
+			// below - a reference read must not see uncommitted writes to the *live* table. Measured
+			// before this: an update to a copy inside a transaction was invisible to a read of the
+			// branch that holds it (1 where 999 had been written), and a copy created inside one read
+			// as no rows at all.
+			ScanOptions options(state.own_storage && state.delta_database
+			                        ? Git4DataDeltaTransactionData(context, state.delta_database, state.bound)
+			                        : TransactionData(MAX_TRANSACTION_ID, state.bound));
+			state.scan_state.table_state.Scan(options, state.scan_chunk);
+			if (state.scan_chunk.size() == 0 && state.own_storage && state.base_storage && state.delta_database) {
+				auto &local_transaction = DuckTransaction::Get(context, *state.delta_database);
+				LocalStorage::Get(local_transaction)
+				    .InitializeScan(*state.base_storage, state.scan_state.local_state, nullptr);
+				state.reading_local_base = true;
+				continue;
+			}
+		}
 		auto count = state.scan_chunk.size();
 		if (count == 0) {
 			if (!state.has_delta) {
@@ -721,6 +763,10 @@ struct Git4DataDiffBindData : public TableFunctionData {
 	//! follow that would compare the pinned image while a pick read the branch's table.
 	string left_table;
 	string right_table;
+	//! Whether each side is read from a branch's *own* copy rather than the source table. A copy is the
+	//! caller's table, so a diff of it has to see what that transaction has written to it.
+	bool left_own_storage = false;
+	bool right_own_storage = false;
 	//! The primary key's physical column indexes, empty when the table has no primary key
 	vector<StorageIndex> key_columns;
 	//! The types of those columns, in the same order
@@ -756,6 +802,14 @@ struct Git4DataDiffState : public GlobalTableFunctionState {
 	DataChunk key_hashes;
 	//! The database the delta's tables live in, so a scan of them can run under the caller's transaction
 	optional_ptr<AttachedDatabase> delta_database;
+	//! The table each side is read from, for the scan of the caller's own uncommitted rows, and whether
+	//! that scan has been set up for the side
+	optional_ptr<DataTable> left_storage;
+	optional_ptr<DataTable> right_storage;
+	bool left_local_open = false;
+	bool right_local_open = false;
+	bool left_own_storage = false;
+	bool right_own_storage = false;
 	//! The added table currently open, for the scan of the caller's own uncommitted rows
 	optional_ptr<DataTable> added_storage;
 	//! Whether that added table has had its local-storage scan set up
@@ -858,6 +912,8 @@ unique_ptr<FunctionData> Git4DataDiffFun::CreateBindData(ClientContext &context,
 	auto right_plan = ResolveGit4DataReferencePlan(context, transaction_manager, table_name, right_name);
 	result->left_table = left_plan.table_name;
 	result->right_table = right_plan.table_name;
+	result->left_own_storage = left_plan.own_storage;
+	result->right_own_storage = right_plan.own_storage;
 	result->left_bound = left_plan.bound;
 	result->right_bound = right_plan.bound;
 	result->left_delta_added = left_plan.delta_added;
@@ -1031,6 +1087,12 @@ static unique_ptr<GlobalTableFunctionState> Git4DataDiffInit(ClientContext &cont
 			result->delta_database = delta_entry.GetStorage().GetAttached();
 		}
 	}
+	result->left_own_storage = bind_data.left_own_storage;
+	result->right_own_storage = bind_data.right_own_storage;
+	result->left_storage =
+	    &Catalog::GetEntry<TableCatalogEntry>(context, QualifiedName(Identifier(bind_data.left_table))).GetStorage();
+	result->right_storage =
+	    &Catalog::GetEntry<TableCatalogEntry>(context, QualifiedName(Identifier(bind_data.right_table))).GetStorage();
 	result->left_added_table = bind_data.left_delta_added;
 	result->right_added_table = bind_data.right_delta_added;
 	result->left_delta_bound = bind_data.left_delta_bound;
@@ -1069,17 +1131,36 @@ static bool Git4DataDiffRowRemoved(Git4DataDiffState &state, const vector<idx_t>
 static void Git4DataDiffCollect(ClientContext &context, Git4DataDiffState &state, TableScanState &scan,
                                 VisibilityBound bound, const string &added_table, VisibilityBound added_bound,
                                 const unordered_set<string> *removed_keys,
-                                const unordered_set<hash_t> *removed_key_hashes,
+                                const unordered_set<hash_t> *removed_key_hashes, optional_ptr<DataTable> side_storage,
+                                bool side_own_storage, bool &side_local_open,
                                 const std::function<void(DataChunk &, row_t, idx_t)> &callback) {
 	// the key columns come first in the scan, so their positions are the first key_count columns
 	vector<idx_t> key_positions;
 	for (idx_t i = 0; i < state.key_count; i++) {
 		key_positions.push_back(i);
 	}
-	ScanOptions options(TransactionData(MAX_TRANSACTION_ID, bound));
+	// A side read from a branch's own copy is the caller's table, so it is read as the caller has it -
+	// uncommitted rows included, which live in local storage rather than in the row groups. The source
+	// table at a pin keeps the synthetic bound-only transaction. Measured before this: inside the
+	// transaction that had built a branch's copy, a diff of that branch reported every base row as
+	// removed, and the merge built on it deleted those rows from the other side.
+	auto &side_database = side_storage ? side_storage->GetAttached() : *state.delta_database;
+	auto &side_transaction = DuckTransaction::Get(context, side_database);
+	auto side_view = TransactionData(side_transaction);
+	ScanOptions options(side_own_storage ? TransactionData(side_view.GetTransactionId(), bound)
+	                                     : TransactionData(MAX_TRANSACTION_ID, bound));
 	while (true) {
 		state.scan_chunk.Reset();
-		scan.table_state.Scan(options, state.scan_chunk);
+		if (side_local_open) {
+			LocalStorage::Get(side_transaction).Scan(scan.local_state, state.column_ids, state.scan_chunk);
+		} else {
+			scan.table_state.Scan(options, state.scan_chunk);
+			if (state.scan_chunk.size() == 0 && side_own_storage && side_storage) {
+				LocalStorage::Get(side_transaction).InitializeScan(*side_storage, scan.local_state, nullptr);
+				side_local_open = true;
+				continue;
+			}
+		}
 		auto count = state.scan_chunk.size();
 		if (count == 0) {
 			break;
@@ -1217,17 +1298,17 @@ static void Git4DataDiffFunction(ClientContext &context, TableFunctionInput &dat
 		// tables append a different number of rows. The primary key is the identity that survives
 		// that, and the values are read so two rows sharing a key can be told apart from one row.
 		if (state.phase == Git4DataDiffState::Phase::LEFT) {
-			Git4DataDiffCollect(context, state, state.left_scan, state.left_bound, state.left_added_table,
-			                    state.left_delta_bound, &state.left_removed_keys, &state.left_removed_key_hashes,
-			                    [&](DataChunk &chunk, row_t row_id, idx_t row) {
-				                    auto key = Git4DataDiffRowKey(chunk, state.key_count, row);
-				                    Git4DataDiffState::KeyedRow entry;
-				                    entry.key = key;
-				                    entry.values =
-				                        Git4DataDiffRowValues(chunk, state.key_count, state.value_count, row);
-				                    entry.row_id = row_id;
-				                    state.left_by_key[Git4DataDiffKeyHash(key)].push_back(std::move(entry));
-			                    });
+			Git4DataDiffCollect(
+			    context, state, state.left_scan, state.left_bound, state.left_added_table, state.left_delta_bound,
+			    &state.left_removed_keys, &state.left_removed_key_hashes, state.left_storage, state.left_own_storage,
+			    state.left_local_open, [&](DataChunk &chunk, row_t row_id, idx_t row) {
+				    auto key = Git4DataDiffRowKey(chunk, state.key_count, row);
+				    Git4DataDiffState::KeyedRow entry;
+				    entry.key = key;
+				    entry.values = Git4DataDiffRowValues(chunk, state.key_count, state.value_count, row);
+				    entry.row_id = row_id;
+				    state.left_by_key[Git4DataDiffKeyHash(key)].push_back(std::move(entry));
+			    });
 			state.phase = Git4DataDiffState::Phase::RIGHT;
 		}
 		if (state.phase == Git4DataDiffState::Phase::RIGHT) {
@@ -1235,8 +1316,8 @@ static void Git4DataDiffFunction(ClientContext &context, TableFunctionInput &dat
 			unordered_set<string> matched;
 			Git4DataDiffCollect(
 			    context, state, state.right_scan, state.right_bound, state.right_added_table, state.right_delta_bound,
-			    &state.right_removed_keys, &state.right_removed_key_hashes,
-			    [&](DataChunk &chunk, row_t row_id, idx_t row) {
+			    &state.right_removed_keys, &state.right_removed_key_hashes, state.right_storage,
+			    state.right_own_storage, state.right_local_open, [&](DataChunk &chunk, row_t row_id, idx_t row) {
 				    auto key = Git4DataDiffRowKey(chunk, state.key_count, row);
 				    auto hash = Git4DataDiffKeyHash(key);
 				    auto entry = state.left_by_key.find(hash);
@@ -1285,6 +1366,7 @@ static void Git4DataDiffFunction(ClientContext &context, TableFunctionInput &dat
 	if (state.phase == Git4DataDiffState::Phase::LEFT) {
 		Git4DataDiffCollect(context, state, state.left_scan, state.left_bound, state.left_added_table,
 		                    state.left_delta_bound, &state.left_removed_keys, &state.left_removed_key_hashes,
+		                    state.left_storage, state.left_own_storage, state.left_local_open,
 		                    [&](DataChunk &chunk, row_t row_id, idx_t row) {
 			                    state.left_rows.insert(row_id);
 			                    if (state.key_count > 0) {
@@ -1297,6 +1379,7 @@ static void Git4DataDiffFunction(ClientContext &context, TableFunctionInput &dat
 		vector<pair<row_t, vector<Value>>> added_rows;
 		Git4DataDiffCollect(context, state, state.right_scan, state.right_bound, state.right_added_table,
 		                    state.right_delta_bound, &state.right_removed_keys, &state.right_removed_key_hashes,
+		                    state.right_storage, state.right_own_storage, state.right_local_open,
 		                    [&](DataChunk &chunk, row_t row_id, idx_t row) {
 			                    state.right_rows.insert(row_id);
 			                    if (state.left_rows.find(row_id) == state.left_rows.end()) {

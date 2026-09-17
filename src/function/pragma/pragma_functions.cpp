@@ -33,6 +33,8 @@
 #include "duckdb/common/encryption_functions.hpp"
 #include "duckdb/logging/log_manager.hpp"
 #include "duckdb/transaction/duck_transaction_manager.hpp"
+#include "duckdb/transaction/duck_transaction.hpp"
+#include "duckdb/transaction/local_storage.hpp"
 #include "duckdb/parser/parser.hpp"
 #include "duckdb/parser/parsed_expression_iterator.hpp"
 #include "duckdb/parser/tableref/at_clause.hpp"
@@ -1210,6 +1212,14 @@ static string PragmaGit4DataMerge(ClientContext &context, const FunctionParamete
 			auto &storage_groups = *storage_table.GetStorage().GetRowGroupCollection();
 			transaction_t copy_commit = 0;
 			bool unwritten = true;
+			// The rows the caller has appended to this copy and not committed are in its local storage,
+			// and a copy with any of them has been written to. Measured: an uncommitted insert into an
+			// ancestor's copy left the walk below saying it was still the copy it was given, so the merge
+			// took the ancestor's current line as its base and both sides looked changed.
+			auto &ancestor_transaction = DuckTransaction::Get(context, storage_table.GetStorage().GetAttached());
+			if (LocalStorage::Get(ancestor_transaction).Find(storage_table.GetStorage())) {
+				unwritten = false;
+			}
 			for (idx_t i = 0; i < storage_groups.GetRowGroupCount(); i++) {
 				auto row_group = storage_groups.GetRowGroup(NumericCast<int64_t>(i));
 				if (!row_group) {

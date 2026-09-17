@@ -1,0 +1,166 @@
+# name: test/sql/git4data/storage_writes.test
+# description: A branch's own copy is read as the caller has it, uncommitted writes included
+# group: [git4data]
+
+load {TEST_DIR}/storage_writes.db
+
+# A copy a branch was given is the caller's own table, so a read of that branch sees what the caller's
+# transaction has written to it. Measured before this: an update to a copy inside a transaction was
+# invisible to a read of the branch that holds it (1 where 999 had been written), a copy created inside
+# a transaction read as no rows at all, and - worst of the three - a diff of such a branch reported
+# every base row as removed, which made a merge built on it delete those rows from the other side.
+statement ok
+CREATE TABLE t (k INTEGER PRIMARY KEY, v INTEGER)
+
+statement ok
+INSERT INTO t SELECT range, range FROM range(10)
+
+statement ok
+CHECKPOINT
+
+statement ok
+PRAGMA git4data_create_branch('b', '')
+
+statement ok
+PRAGMA git4data_materialize('t', 'b', 't_b')
+
+query I
+SELECT count(*) FROM t AT (BRANCH => 'b')
+----
+10
+
+statement ok
+BEGIN
+
+# an uncommitted update of the copy, and an uncommitted row appended to it
+statement ok
+UPDATE t_b SET v = 999 WHERE k = 1
+
+statement ok
+INSERT INTO t_b VALUES (500, 500)
+
+query II
+SELECT (SELECT v FROM t AT (BRANCH => 'b') WHERE k = 1), (SELECT v FROM t AT (BRANCH => 'b') WHERE k = 500)
+----
+999	500
+
+query I
+SELECT count(*) FROM t AT (BRANCH => 'b')
+----
+11
+
+# the live table is a different table and does not have any of it
+query II
+SELECT (SELECT v FROM t WHERE k = 1), (SELECT count(*) FROM t WHERE k = 500)
+----
+1	0
+
+statement ok
+ROLLBACK
+
+# the transaction took its writes to the copy with it
+query II
+SELECT (SELECT v FROM t AT (BRANCH => 'b') WHERE k = 1), (SELECT count(*) FROM t AT (BRANCH => 'b'))
+----
+1	10
+
+# a copy made *inside* a transaction is uncommitted too, and reads through the branch all the same
+statement ok
+PRAGMA git4data_create_branch('c', '')
+
+statement ok
+BEGIN
+
+statement ok
+PRAGMA git4data_materialize('t', 'c', 't_c')
+
+query I
+SELECT count(*) FROM t AT (BRANCH => 'c')
+----
+10
+
+statement ok
+INSERT INTO t_c VALUES (700, 700)
+
+query I
+SELECT count(*) FROM t AT (BRANCH => 'c')
+----
+11
+
+statement ok
+ROLLBACK
+
+# The same holds for the diff, which reads the two sides itself: a diff that read such a copy as empty
+# reported every base row as removed. And a merge built on that diff applied those removals to the other
+# side - measured, a branch with eleven rows was left with one. These two are separate branches with
+# copies of their own, so what the merge does can be counted.
+statement ok
+CREATE TABLE m (k INTEGER PRIMARY KEY, v INTEGER)
+
+statement ok
+INSERT INTO m SELECT range, range FROM range(10)
+
+statement ok
+CHECKPOINT
+
+statement ok
+PRAGMA git4data_create_branch('mroot', '')
+
+statement ok
+PRAGMA git4data_create_branch('mleft', 'mroot')
+
+statement ok
+PRAGMA git4data_create_branch('mright', 'mroot')
+
+statement ok
+CHECKPOINT
+
+statement ok
+PRAGMA git4data_materialize('m', 'mroot', 'm_root')
+
+statement ok
+BEGIN
+
+statement ok
+INSERT INTO m_root VALUES (7777, 7777)
+
+statement ok
+PRAGMA git4data_materialize('m', 'mleft', 'm_left')
+
+statement ok
+INSERT INTO m_left VALUES (7777, 555)
+
+statement ok
+PRAGMA git4data_materialize('m', 'mright', 'm_right')
+
+statement ok
+INSERT INTO m_right VALUES (2000, 2)
+
+query II
+SELECT (SELECT count(*) FROM m AT (BRANCH => 'mleft')),
+       (SELECT count(*) FROM m AT (BRANCH => 'mright'))
+----
+11	11
+
+# the diff of the left side against its ancestor names nothing as removed: the ancestor's own uncommitted
+# row is the ancestor's business, not a row the left side deleted
+query I
+SELECT count(*) FROM git4data_diff('m', 'mroot', 'mleft') WHERE g4d_change = 'removed'
+----
+0
+
+# the ancestor's copy is written, so the merge computes its base from the ancestor's pin - where both
+# sides really did start - and applies the right side's own change to the left side without taking the
+# left side's row of that key with it
+statement ok
+PRAGMA git4data_merge('m', 'mleft', 'mright', 'fail')
+
+query III
+SELECT (SELECT v FROM m AT (BRANCH => 'mleft') WHERE k = 7777),
+       (SELECT v FROM m AT (BRANCH => 'mleft') WHERE k = 2000),
+       (SELECT count(*) FROM m AT (BRANCH => 'mleft'))
+----
+555	2	12
+
+statement ok
+ROLLBACK
