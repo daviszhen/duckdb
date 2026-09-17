@@ -175,3 +175,184 @@ statement error
 SELECT count(*) FROM lone_table
 ----
 <REGEX>:.*Table with name lone_table does not exist.*
+
+# A table another branch is *about* is not this branch's to take either. The copy a branch is given can be
+# the source table another branch was materialized from, and dropping the first took the second's subject
+# with it: measured, after dropping "outer" the table "inner_src" was gone and the branch "inner" could not
+# be read at all, while the listing still called it healthy.
+statement ok
+CREATE TABLE outer_src (k INTEGER PRIMARY KEY, v INTEGER)
+
+statement ok
+INSERT INTO outer_src SELECT range, range FROM range(4)
+
+statement ok
+CHECKPOINT
+
+statement ok
+PRAGMA git4data_create_branch('outer', '')
+
+statement ok
+PRAGMA git4data_materialize('outer_src', 'outer', 'inner_src')
+
+statement ok
+UPDATE inner_src SET v = 111 WHERE k = 1
+
+statement ok
+PRAGMA git4data_create_branch('inner', '')
+
+statement ok
+PRAGMA git4data_materialize('inner_src', 'inner', 'inner_copy')
+
+statement ok
+PRAGMA git4data_drop_branch('outer')
+
+query II
+SELECT (SELECT v FROM inner_src AT (BRANCH => 'inner') WHERE k = 1), (SELECT count(*) FROM inner_src)
+----
+111	4
+
+# the same for a source a branch differs from by a delta rather than copying
+statement ok
+CREATE TABLE d_src (k INTEGER PRIMARY KEY, v INTEGER)
+
+statement ok
+INSERT INTO d_src SELECT range, range FROM range(4)
+
+statement ok
+CHECKPOINT
+
+statement ok
+PRAGMA git4data_create_branch('d_outer', '')
+
+statement ok
+PRAGMA git4data_materialize('d_src', 'd_outer', 'd_mid')
+
+statement ok
+PRAGMA git4data_create_branch('d_inner', '')
+
+statement ok
+CREATE TABLE d_add (k INTEGER PRIMARY KEY, v INTEGER)
+
+statement ok
+CREATE TABLE d_del (k INTEGER PRIMARY KEY)
+
+statement ok
+PRAGMA git4data_bind_branch_delta('d_mid', 'd_inner', 'd_add', 'd_del')
+
+statement ok
+INSERT INTO d_add VALUES (100, 100)
+
+statement ok
+PRAGMA git4data_drop_branch('d_outer')
+
+query II
+SELECT (SELECT count(*) FROM d_mid AT (BRANCH => 'd_inner')), (SELECT count(*) FROM d_mid)
+----
+5	4
+
+# and a source that was renamed under the mapping is the same table: the guard follows the oid, as the
+# read path does
+statement ok
+CREATE TABLE e_src (k INTEGER PRIMARY KEY, v INTEGER)
+
+statement ok
+INSERT INTO e_src SELECT range, range FROM range(3)
+
+statement ok
+CHECKPOINT
+
+statement ok
+PRAGMA git4data_create_branch('e_outer', '')
+
+statement ok
+PRAGMA git4data_materialize('e_src', 'e_outer', 'e_mid')
+
+statement ok
+PRAGMA git4data_create_branch('e_inner', '')
+
+statement ok
+CREATE TABLE e_copy (k INTEGER PRIMARY KEY, v INTEGER)
+
+statement ok
+INSERT INTO e_copy SELECT k, v FROM e_mid
+
+statement ok
+PRAGMA git4data_bind_branch_table('e_mid', 'e_inner', 'e_copy')
+
+statement ok
+ALTER TABLE e_mid RENAME TO e_mid2
+
+statement ok
+PRAGMA git4data_drop_branch('e_outer')
+
+query II
+SELECT (SELECT count(*) FROM e_mid2 AT (BRANCH => 'e_inner')), (SELECT count(*) FROM e_mid2)
+----
+3	3
+
+# A mapping read back from a file has no oids - they are the catalog's and do not survive a reopen - so
+# across a restart the *name* is what says another branch is about a table, and the guard has to read it
+# from both halves of a mapping: the table a branch was given, and the source it is about.
+statement ok
+CREATE TABLE g_src (k INTEGER PRIMARY KEY, v INTEGER)
+
+statement ok
+INSERT INTO g_src SELECT range, range FROM range(4)
+
+statement ok
+PRAGMA git4data_create_branch('g_outer', '')
+
+statement ok
+PRAGMA git4data_materialize('g_src', 'g_outer', 'g_mid')
+
+statement ok
+PRAGMA git4data_create_branch('g_inner', '')
+
+statement ok
+PRAGMA git4data_materialize('g_mid', 'g_inner', 'g_copy')
+
+statement ok
+CREATE TABLE h_src (k INTEGER PRIMARY KEY, v INTEGER)
+
+statement ok
+INSERT INTO h_src SELECT range, range FROM range(3)
+
+statement ok
+PRAGMA git4data_create_branch('h_outer', '')
+
+statement ok
+PRAGMA git4data_materialize('h_src', 'h_outer', 'h_mid')
+
+statement ok
+PRAGMA git4data_create_branch('h_inner', '')
+
+statement ok
+CREATE TABLE h_add (k INTEGER PRIMARY KEY, v INTEGER)
+
+statement ok
+CREATE TABLE h_del (k INTEGER PRIMARY KEY)
+
+statement ok
+PRAGMA git4data_bind_branch_delta('h_mid', 'h_inner', 'h_add', 'h_del')
+
+statement ok
+CHECKPOINT
+
+restart
+
+statement ok
+PRAGMA git4data_drop_branch('g_outer')
+
+statement ok
+PRAGMA git4data_drop_branch('h_outer')
+
+query II
+SELECT (SELECT count(*) FROM g_mid AT (BRANCH => 'g_inner')), (SELECT count(*) FROM g_mid)
+----
+4	4
+
+query II
+SELECT (SELECT count(*) FROM h_mid AT (BRANCH => 'h_inner')), (SELECT count(*) FROM h_mid)
+----
+3	3

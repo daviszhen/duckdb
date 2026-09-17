@@ -177,9 +177,10 @@ public:
 	//! Whether any branch was forked from a reference that captured this branch's line. Such a child
 	//! reads this branch's storage, so dropping it would leave the child reading a table that is gone.
 	bool HasLineDependents(const string &name) const;
-	//! Whether a table another branch was given - as its own line, or as a side of its delta - is one this
-	//! branch holds too. Dropping the branch takes its own copies with it, and a table two branches share
-	//! is not only the dropped one's to take: the other would silently fall back to its pin.
+	//! Whether another branch depends on a table - as its own line, as a side of its delta, or as the
+	//! source table it is about - that this branch holds too. Dropping the branch takes its own copies with
+	//! it, and a table two branches share is not only the dropped one's to take: the other would silently
+	//! fall back to its pin, or be left about a table that is gone.
 	bool OtherBranchUsesTable(const string &name, const string &table, idx_t oid) const;
 	vector<Git4DataBranch> List() const;
 	idx_t Count() const;

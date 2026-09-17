@@ -247,12 +247,16 @@ bool BranchRegistry::OtherBranchUsesTable(const string &name, const string &tabl
 			continue;
 		}
 		for (auto &storage : entry.second.storage_tables) {
-			if (StringUtil::CIEquals(storage.storage, table) || (oid != 0 && storage.oid == oid)) {
+			// the table it was given, and the table it is *about*: a branch's source can be another
+			// branch's copy, and dropping that leaves the mapping pointing at nothing
+			if (StringUtil::CIEquals(storage.storage, table) || (oid != 0 && storage.oid == oid) ||
+			    StringUtil::CIEquals(storage.source, table) || (oid != 0 && storage.source_oid == oid)) {
 				return true;
 			}
 		}
 		for (auto &delta : entry.second.deltas) {
-			if (StringUtil::CIEquals(delta.added, table) || StringUtil::CIEquals(delta.removed, table)) {
+			if (StringUtil::CIEquals(delta.added, table) || StringUtil::CIEquals(delta.removed, table) ||
+			    StringUtil::CIEquals(delta.source, table) || (oid != 0 && delta.source_oid == oid)) {
 				return true;
 			}
 		}
