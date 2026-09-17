@@ -451,19 +451,46 @@ static string PragmaGit4DataMaterialize(ClientContext &context, const FunctionPa
 	auto escaped_source = StringUtil::Replace(source_table, "'", "''");
 	auto escaped_branch = StringUtil::Replace(branch_name, "'", "''");
 	auto escaped_storage = StringUtil::Replace(storage_table, "'", "''");
+	// A second materialize of one source replaces the mapping, and the copy the first one made is then a
+	// table of the identical line with nothing pointing at it - measured: the branch read the new table
+	// while the first was still there, and dropping the branch took only the second, so the first
+	// survived that too. Materializing costs a table, so the one this feature created is dropped here.
+	// The caller's own table is left alone, and the drop comes last so the copy above still reads the
+	// branch as it was - the branch reads the table of its own that is about to go.
+	string replaced;
+	Git4DataStorageTable existing;
+	if (transaction_manager.branches.GetStorageTable(branch_name, source_table, existing) && existing.owned &&
+	    existing.storage != storage_table) {
+		auto resolved = Git4DataResolveTableName(context, existing.storage, existing.oid);
+		if (!resolved.empty()) {
+			replaced = StringUtil::Format("\nDROP TABLE IF EXISTS %s;", KeywordHelper::WriteOptionallyQuoted(resolved));
+		}
+	}
 	return StringUtil::Format("CREATE TABLE %s (%s);\nINSERT INTO %s SELECT * FROM %s AT (BRANCH => '%s');\n"
-	                          "PRAGMA git4data_bind_branch_table('%s', '%s', '%s');",
+	                          "PRAGMA git4data_bind_branch_table('%s', '%s', '%s', 'true');%s",
 	                          quoted_storage, columns, quoted_storage,
 	                          KeywordHelper::WriteOptionallyQuoted(source_table), escaped_branch, escaped_source,
-	                          escaped_branch, escaped_storage);
+	                          escaped_branch, escaped_storage, replaced);
 }
 
 //! Record that a branch reads a table of its own. Only meaningful as the last statement of a
-//! materialize, once the copy has been made.
+//! materialize, once the copy has been made. The optional fourth argument says the feature created the
+//! table rather than the caller handing one over, which decides whether a later materialize may drop it.
 static void PragmaGit4DataBindBranchTable(ClientContext &context, const FunctionParameters &parameters) {
 	auto source_table = parameters.values[0].ToString();
 	auto branch_name = parameters.values[1].ToString();
 	auto storage_table = parameters.values[2].ToString();
+	auto owned = false;
+	if (parameters.values.size() > 3) {
+		auto flag = StringUtil::Lower(parameters.values[3].ToString());
+		if (flag != "true" && flag != "false") {
+			throw InvalidInputException(
+			    "The fourth argument of git4data_bind_branch_table says whether the table was created for the branch, "
+			    "so it is true or false, not \"%s\"",
+			    parameters.values[3].ToString());
+		}
+		owned = flag == "true";
+	}
 	auto &transaction_manager = GetGit4DataTransactionManager(context);
 	Git4DataBranch branch;
 	if (!transaction_manager.branches.Get(branch_name, branch)) {
@@ -476,7 +503,7 @@ static void PragmaGit4DataBindBranchTable(ClientContext &context, const Function
 	// takes its name after it is dropped, and the source's so the mapping follows the source if it is
 	// renamed
 	transaction_manager.branches.SetStorageTable(branch_name, source_table, storage_table, storage_entry.oid,
-	                                             source_entry.oid);
+	                                             source_entry.oid, owned);
 	// the copy is the branch's line from here on, so a delta beside it would be a second one that nothing
 	// reads - the branch reads its own table the moment it has one
 	transaction_manager.branches.ClearDeltaTable(branch_name, source_table);
@@ -1328,8 +1355,11 @@ void PragmaFunctions::RegisterFunction(BuiltinFunctions &set) {
 	set.AddFunction(PragmaFunction::PragmaCall(
 	    "git4data_bind_branch_delta", PragmaGit4DataBindBranchDelta,
 	    {LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR}));
+	// who created the table is optional, so a binding written by hand keeps the three-argument form and
+	// its table is not the feature's to drop
 	set.AddFunction(PragmaFunction::PragmaCall("git4data_bind_branch_table", PragmaGit4DataBindBranchTable,
-	                                           {LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR}));
+	                                           {LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR},
+	                                           LogicalType::VARCHAR));
 	set.AddFunction(PragmaFunction::PragmaCall(
 	    "git4data_merge", PragmaGit4DataMerge,
 	    {LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR}));

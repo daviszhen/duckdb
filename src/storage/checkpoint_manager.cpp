@@ -342,15 +342,16 @@ void SingleFileCheckpointWriter::CreateCheckpoint() {
 						    delta_obj.WriteProperty<string>(102, "removed", data_branches[i].deltas[d].removed);
 					    });
 				    });
-				obj.WriteList(104, "storage_tables", data_branches[i].storage_tables.size(),
-				              [&](Serializer::List &storage_list, idx_t s) {
-					              storage_list.WriteObject([&](Serializer &storage_obj) {
-						              storage_obj.WriteProperty<string>(100, "source",
-						                                                data_branches[i].storage_tables[s].source);
-						              storage_obj.WriteProperty<string>(101, "storage",
-						                                                data_branches[i].storage_tables[s].storage);
-					              });
-				              });
+				obj.WriteList(
+				    104, "storage_tables", data_branches[i].storage_tables.size(),
+				    [&](Serializer::List &storage_list, idx_t s) {
+					    storage_list.WriteObject([&](Serializer &storage_obj) {
+						    storage_obj.WriteProperty<string>(100, "source", data_branches[i].storage_tables[s].source);
+						    storage_obj.WriteProperty<string>(101, "storage",
+						                                      data_branches[i].storage_tables[s].storage);
+						    storage_obj.WriteProperty<bool>(102, "owned", data_branches[i].storage_tables[s].owned);
+					    });
+				    });
 			});
 		});
 		registry_serializer.End();
@@ -544,7 +545,10 @@ void SingleFileCheckpointReader::LoadFromStorage() {
 					return storage_list.ReadObject([&](Deserializer &storage_obj) {
 						auto source = storage_obj.ReadProperty<string>(100, "source");
 						auto storage = storage_obj.ReadProperty<string>(101, "storage");
-						transaction_manager.branches.SetStorageTable(name, source, storage);
+						// false when the block predates a mapping saying who created its table, which
+						// only means a second materialize leaves that older copy alone
+						auto owned = storage_obj.ReadPropertyWithExplicitDefault<bool>(102, "owned", false);
+						transaction_manager.branches.SetStorageTable(name, source, storage, 0, 0, owned);
 					});
 				});
 			});

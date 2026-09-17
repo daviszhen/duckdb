@@ -100,7 +100,7 @@ bool BranchRegistry::Create(const string &name, transaction_t pin, const string 
 }
 
 void BranchRegistry::SetStorageTable(const string &branch, const string &source_table, const string &storage_table,
-                                     idx_t storage_oid, idx_t source_oid) {
+                                     idx_t storage_oid, idx_t source_oid, bool owned) {
 	lock_guard<mutex> guard(lock);
 	auto entry = branches.find(branch);
 	if (entry == branches.end()) {
@@ -111,12 +111,30 @@ void BranchRegistry::SetStorageTable(const string &branch, const string &source_
 			existing.storage = storage_table;
 			existing.oid = storage_oid;
 			existing.source_oid = source_oid;
+			existing.owned = owned;
 			dirty.store(true);
 			return;
 		}
 	}
-	entry->second.storage_tables.push_back(Git4DataStorageTable {source_table, storage_table, storage_oid, source_oid});
+	entry->second.storage_tables.push_back(
+	    Git4DataStorageTable {source_table, storage_table, storage_oid, source_oid, owned});
 	dirty.store(true);
+}
+
+bool BranchRegistry::GetStorageTable(const string &branch, const string &source_table,
+                                     Git4DataStorageTable &result) const {
+	lock_guard<mutex> guard(lock);
+	auto entry = branches.find(branch);
+	if (entry == branches.end()) {
+		return false;
+	}
+	for (auto &existing : entry->second.storage_tables) {
+		if (existing.source == source_table) {
+			result = existing;
+			return true;
+		}
+	}
+	return false;
 }
 
 void BranchRegistry::ClearDeltaTable(const string &branch, const string &source_table) {

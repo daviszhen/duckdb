@@ -109,6 +109,11 @@ struct Git4DataStorageTable {
 	//! image and stop reading the line it was given - measured. The catalog's oids survive a rename, so
 	//! a read whose name does not match can still recognise the table it was given.
 	idx_t source_oid = 0;
+	//! Whether `materialize` created the table rather than a caller handing one over. Only a table the
+	//! feature created is the feature's to drop: a second materialize replaces the mapping, and taking
+	//! the earlier copy with it is what keeps that from costing the caller a table nothing points at.
+	//! A table bound by hand is left alone.
+	bool owned = false;
 };
 
 //! What a branch changes about one source table when it holds no copy of it. Both tables are the
@@ -191,9 +196,14 @@ public:
 		dirty.store(false);
 	}
 	//! Give a branch its own table for a source table, so writes to it no longer touch the source. The
-	//! oid is the table's, and is checked again on every read.
+	//! oid is the table's, and is checked again on every read. `owned` says the feature created that
+	//! table rather than a caller handing one over.
 	void SetStorageTable(const string &branch, const string &source_table, const string &storage_table,
-	                     idx_t storage_oid = 0, idx_t source_oid = 0);
+	                     idx_t storage_oid = 0, idx_t source_oid = 0, bool owned = false);
+	//! The table a branch reads for a source table instead of its pinned image, and whether the feature
+	//! created it. Returns false when the branch has none, which is also what a branch reading its base
+	//! through a delta has.
+	bool GetStorageTable(const string &branch, const string &source_table, Git4DataStorageTable &result) const;
 	//! Record that a branch differs from its base by a delta rather than by a copy of it. A branch with a
 	//! table of its own for this source keeps that instead: one line, one source of truth.
 	void SetDeltaTable(const string &branch, const string &source_table, const string &added, const string &removed,

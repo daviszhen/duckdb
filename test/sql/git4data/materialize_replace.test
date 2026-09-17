@@ -1,0 +1,125 @@
+# name: test/sql/git4data/materialize_replace.test
+# description: A second materialize replaces the branch's line without leaving the first copy behind
+# group: [git4data]
+
+load {TEST_DIR}/materialize_replace.db
+
+statement ok
+CREATE TABLE t (k INTEGER PRIMARY KEY, v INTEGER)
+
+statement ok
+INSERT INTO t SELECT range, range FROM range(10)
+
+statement ok
+CHECKPOINT
+
+statement ok
+PRAGMA git4data_create_branch('b', '')
+
+statement ok
+PRAGMA git4data_materialize('t', 'b', 't_b1')
+
+# the branch has a line of its own now, and writing to it is what the copy bought
+statement ok
+UPDATE t_b1 SET v = 111 WHERE k = 1
+
+query I
+SELECT v FROM t AT (BRANCH => 'b') WHERE k = 1
+----
+111
+
+# Materializing the same source into a second table replaces the mapping, because a branch reads one
+# table of its own per source. Measured before the fix: the branch read the new table while the first
+# copy was still there, holding the identical line, with nothing pointing at it - and dropping the
+# branch took only the second, so the first survived that too.
+statement ok
+PRAGMA git4data_materialize('t', 'b', 't_b2')
+
+# the second copy carries what the branch holds, not the pinned image: the copy is made while the
+# branch still reads the first table, and the first is dropped only after
+query II
+SELECT (SELECT count(*) FROM t AT (BRANCH => 'b')), (SELECT v FROM t AT (BRANCH => 'b') WHERE k = 1)
+----
+10	111
+
+query II
+SELECT (SELECT count(*) FROM t_b2), (SELECT v FROM t_b2 WHERE k = 1)
+----
+10	111
+
+# and the copy the feature made the first time is gone, because a materialize costs a table and
+# nothing pointed at this one any more
+statement error
+SELECT count(*) FROM t_b1
+----
+<REGEX>:.*Table with name t_b1 does not exist.*
+
+# the branch reads the second copy, so it is the one that carries the line from here on
+statement ok
+UPDATE t_b2 SET v = 222 WHERE k = 1
+
+query I
+SELECT v FROM t AT (BRANCH => 'b') WHERE k = 1
+----
+222
+
+# A table the caller bound by hand is not the feature's to drop, so a later materialize leaves it
+# alone - it was never created for the branch, and the caller may still be reading it.
+statement ok
+CREATE TABLE t_mine (k INTEGER PRIMARY KEY, v INTEGER)
+
+statement ok
+INSERT INTO t_mine VALUES (7, 7)
+
+statement ok
+PRAGMA git4data_bind_branch_table('t', 'b', 't_mine')
+
+query I
+SELECT v FROM t AT (BRANCH => 'b') WHERE k = 7
+----
+7
+
+statement ok
+PRAGMA git4data_materialize('t', 'b', 't_b3')
+
+query I
+SELECT count(*) FROM t_mine
+----
+1
+
+query I
+SELECT v FROM t AT (BRANCH => 'b') WHERE k = 7
+----
+7
+
+# who created a mapping's table survives a reopen, so the replacement still drops its own copy after
+# a restart rather than leaving it behind for the rest of the database's life
+statement ok
+CHECKPOINT
+
+restart
+
+statement ok
+PRAGMA git4data_materialize('t', 'b', 't_b4')
+
+query I
+SELECT v FROM t AT (BRANCH => 'b') WHERE k = 7
+----
+7
+
+statement error
+SELECT count(*) FROM t_b3
+----
+<REGEX>:.*Table with name t_b3 does not exist.*
+
+# the table the caller bound is still there after all of that
+query I
+SELECT count(*) FROM t_mine
+----
+1
+
+# a flag that is neither true nor false is refused rather than taken for one of them
+statement error
+PRAGMA git4data_bind_branch_table('t', 'b', 't_mine', 'maybe')
+----
+<REGEX>:.*it is true or false, not "maybe".*
