@@ -1,0 +1,262 @@
+# name: test/sql/git4data/apply.test
+# description: Writing to a delta branch with ordinary SQL, recorded as the delta
+# group: [git4data]
+
+load {TEST_DIR}/apply.db
+
+statement ok
+CREATE TABLE t (k INTEGER PRIMARY KEY, v INTEGER)
+
+statement ok
+INSERT INTO t SELECT range, range FROM range(10)
+
+statement ok
+CHECKPOINT
+
+statement ok
+PRAGMA git4data_create_snapshot('before')
+
+statement ok
+PRAGMA git4data_create_branch('b', '')
+
+statement ok
+CREATE TABLE t_add (k INTEGER PRIMARY KEY, v INTEGER)
+
+statement ok
+CREATE TABLE t_del (k INTEGER PRIMARY KEY)
+
+# A write has nowhere to be recorded until the branch differs from its base by a delta, and the
+# sentence says which call gives it somewhere. This is the rule the rest of the feature follows:
+# nothing is promised that the reads cannot deliver.
+statement error
+PRAGMA git4data_apply('t', 'b', 'UPDATE t SET v = 1')
+----
+<REGEX>:.*does not differ from its base by a delta.*
+
+statement ok
+PRAGMA git4data_bind_branch_delta('t', 'b', 't_add', 't_del')
+
+query I
+SELECT count(*) FROM t AT (BRANCH => 'b')
+----
+10
+
+# DELETE: the affected keys go into the table that hides rows from the base, and the rows stay in the
+# base - which is what "a branch costs the change" means. The live table is not touched at all.
+statement ok
+PRAGMA git4data_apply('t', 'b', 'DELETE FROM t WHERE k < 3')
+
+query I
+SELECT count(*) FROM t AT (BRANCH => 'b')
+----
+7
+
+query I
+SELECT count(*) FROM t
+----
+10
+
+query II
+SELECT k, count(*) FROM t_del GROUP BY k ORDER BY k
+----
+0	1
+1	1
+2	1
+
+# the diff between the snapshot taken before the writes and the branch sees them, because a read of
+# the branch is what it diffs - there is no second copy to keep in step
+query II
+SELECT g4d_change, count(*) FROM git4data_diff('t', 'before', 'b') GROUP BY g4d_change ORDER BY g4d_change
+----
+removed	3
+
+# UPDATE: the key is hidden from the base and the new row is added, which is what an update is in a
+# delta's terms. Both halves are in the tables the caller owns, so they can be read.
+statement ok
+PRAGMA git4data_apply('t', 'b', 'UPDATE t SET v = v + 100 WHERE k = 3')
+
+query I
+SELECT v FROM t AT (BRANCH => 'b') WHERE k = 3
+----
+103
+
+query I
+SELECT v FROM t WHERE k = 3
+----
+3
+
+query II
+SELECT k, v FROM t_add WHERE k = 3
+----
+3	103
+
+query I
+SELECT count(*) FROM t_del WHERE k = 3
+----
+1
+
+# an update that rewrites the key is a removal of the old one and an addition of the new, and the
+# branch shows exactly one row for it
+statement ok
+PRAGMA git4data_apply('t', 'b', 'UPDATE t SET k = 500 WHERE k = 4')
+
+query II
+SELECT (SELECT count(*) FROM t AT (BRANCH => 'b') WHERE k = 4),
+       (SELECT v FROM t AT (BRANCH => 'b') WHERE k = 500)
+----
+0	4
+
+query I
+SELECT count(*) FROM t AT (BRANCH => 'b')
+----
+7
+
+# INSERT: the row is added, and the live table still does not have it
+statement ok
+PRAGMA git4data_apply('t', 'b', 'INSERT INTO t VALUES (100, 100)')
+
+query II
+SELECT (SELECT v FROM t AT (BRANCH => 'b') WHERE k = 100), (SELECT count(*) FROM t WHERE k = 100)
+----
+100	0
+
+# an insert of a key the branch already shows is refused, which is what the same insert into the
+# table itself would hit - the branch's primary key is the table's
+statement error
+PRAGMA git4data_apply('t', 'b', 'INSERT INTO t VALUES (5, 5)')
+----
+<REGEX>:.*insert collides with a row the branch already shows.*
+
+# a key the branch *hides* is not a key it shows, so inserting it adds the row and the base row stays
+# hidden: one row for that key, not two
+statement ok
+PRAGMA git4data_apply('t', 'b', 'INSERT INTO t VALUES (0, 999)')
+
+query II
+SELECT count(*), max(v) FROM t AT (BRANCH => 'b') WHERE k = 0
+----
+1	999
+
+query I
+SELECT count(*) FROM t AT (BRANCH => 'b')
+----
+9
+
+# an insert with a column list, and one that takes its rows from another table
+statement ok
+PRAGMA git4data_apply('t', 'b', 'INSERT INTO t (v, k) VALUES (7, 700)')
+
+query I
+SELECT v FROM t AT (BRANCH => 'b') WHERE k = 700
+----
+7
+
+statement ok
+CREATE TABLE more (k INTEGER, v INTEGER)
+
+statement ok
+INSERT INTO more VALUES (800, 800)
+
+statement ok
+PRAGMA git4data_apply('t', 'b', 'INSERT INTO t SELECT * FROM more')
+
+query II
+SELECT (SELECT v FROM t AT (BRANCH => 'b') WHERE k = 800), (SELECT count(*) FROM t WHERE k = 800)
+----
+800	0
+
+query I
+SELECT count(*) FROM t AT (BRANCH => 'b')
+----
+11
+
+# The statement has to write the table the delta is for, and write it directly. Each refusal names
+# what was wrong rather than recording a change against the wrong line.
+statement error
+PRAGMA git4data_apply('t', 'b', 'UPDATE other SET v = 1')
+----
+<REGEX>:.*the statement writes "other".*
+
+statement error
+PRAGMA git4data_apply('t', 'b', 'DELETE FROM other')
+----
+<REGEX>:.*the statement writes "other".*
+
+statement error
+PRAGMA git4data_apply('t', 'nowhere', 'UPDATE t SET v = 1')
+----
+<REGEX>:.*Branch "nowhere" does not exist.*
+
+statement error
+PRAGMA git4data_apply('t', 'b', 'CREATE TABLE x (a INTEGER)')
+----
+<REGEX>:.*takes one INSERT, UPDATE or DELETE statement.*
+
+statement error
+PRAGMA git4data_apply('t', 'b', 'UPDATE t SET v = 1; DELETE FROM t WHERE k = 1')
+----
+<REGEX>:.*takes one statement.*
+
+statement error
+PRAGMA git4data_apply('t', 'b', 'INSERT INTO t VALUES (1, 1) ON CONFLICT DO NOTHING')
+----
+<REGEX>:.*does not take ON CONFLICT.*
+
+statement error
+PRAGMA git4data_apply('t', 'b', 'INSERT INTO t VALUES (1, 1) RETURNING k')
+----
+<REGEX>:.*does not take RETURNING.*
+
+statement error
+PRAGMA git4data_apply('t', 'b', 'INSERT INTO t DEFAULT VALUES')
+----
+<REGEX>:.*does not take DEFAULT VALUES.*
+
+statement error
+PRAGMA git4data_apply('t', 'b', 'DELETE FROM t USING more WHERE t.k = more.k')
+----
+<REGEX>:.*does not take DELETE ... USING.*
+
+statement error
+PRAGMA git4data_apply('t', 'b', 'UPDATE t SET v = 1 FROM more WHERE t.k = more.k')
+----
+<REGEX>:.*does not take UPDATE ... FROM.*
+
+# a refusal leaves the branch alone: nothing was written before the statement was checked
+query I
+SELECT count(*) FROM t AT (BRANCH => 'b')
+----
+11
+
+# the line the branch holds is the delta, so it comes back with the file
+statement ok
+CHECKPOINT
+
+restart
+
+query III
+SELECT (SELECT count(*) FROM t AT (BRANCH => 'b')),
+       (SELECT v FROM t AT (BRANCH => 'b') WHERE k = 3),
+       (SELECT v FROM t AT (BRANCH => 'b') WHERE k = 800)
+----
+11	103	800
+
+# and it can still be written to after the reopen
+statement ok
+PRAGMA git4data_apply('t', 'b', 'DELETE FROM t WHERE k = 800')
+
+query I
+SELECT count(*) FROM t AT (BRANCH => 'b')
+----
+10
+
+# The changes a branch accumulated through plain SQL are the changes any other reference has over
+# this one, so a pick applies them to the live table: the feature's other modules need no special
+# case for a line that was written through this one.
+statement ok
+PRAGMA git4data_pick('t', 'b', 'before', 'fail')
+
+query III
+SELECT (SELECT count(*) FROM t), (SELECT v FROM t WHERE k = 3), (SELECT v FROM t WHERE k = 500)
+----
+10	103	4

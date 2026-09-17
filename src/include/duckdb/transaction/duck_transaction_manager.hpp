@@ -211,6 +211,9 @@ public:
 	//! Forget a branch's delta for a source table, which is what giving it a table of its own does - the
 	//! copy is the line from then on, and a delta beside it would be read by nothing.
 	void ClearDeltaTable(const string &branch, const string &source_table);
+	//! The delta a branch differs from its base by, if it has one. Returns false when it has none, which
+	//! is also what a branch with a table of its own has for that source.
+	bool GetDeltaTable(const string &branch, const string &source_table, Git4DataBranchDelta &result) const;
 	//! Restore a branch read from disk without the checks Create performs
 	void Restore(const string &name, transaction_t pin, const string &parent, timestamp_t created,
 	             const string &base_line = string());
