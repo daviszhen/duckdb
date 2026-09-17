@@ -1,0 +1,186 @@
+# name: test/sql/git4data/alias_names.test
+# description: A table whose own columns are named like the names the generated SQL uses
+# group: [git4data]
+
+load {TEST_DIR}/alias_names.db
+
+# Every name the pick and the merge put into the SQL they generate: their table aliases, the keys of
+# their conflict helper, and the columns the diff reports. A column that carries one of them used to
+# make the generated statement ambiguous or the result unnameable - measured: the merge failed with
+# `Binder Error: Ambiguous reference to column name "g4d_b"`, and a diff over a key column named
+# g4d_change failed with `table "git4data_diff" has duplicate column name "g4d_change"`.
+statement ok
+CREATE TABLE t (
+    k INTEGER PRIMARY KEY,
+    v INTEGER,
+    g4d_l INTEGER,
+    g4d_b INTEGER,
+    g4d_s INTEGER,
+    g4d_x INTEGER,
+    g4d_y INTEGER,
+    g4d_tk INTEGER,
+    g4d_both INTEGER,
+    g4d_r INTEGER,
+    g4d_pick_conflicts INTEGER,
+    g4d_merge_conflicts INTEGER
+)
+
+statement ok
+INSERT INTO t SELECT range, range, range, range, range, range, range, range, range, range, range, range FROM range(10)
+
+statement ok
+CHECKPOINT
+
+statement ok
+PRAGMA git4data_create_branch('root', '')
+
+statement ok
+PRAGMA git4data_create_branch('left', 'root')
+
+statement ok
+PRAGMA git4data_create_branch('right', 'root')
+
+statement ok
+CHECKPOINT
+
+statement ok
+PRAGMA git4data_materialize('t', 'left', 't_left')
+
+statement ok
+PRAGMA git4data_materialize('t', 'right', 't_right')
+
+# each side changes a different row
+statement ok
+INSERT INTO t_left VALUES (1000, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1)
+
+statement ok
+INSERT INTO t_right VALUES (2000, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2)
+
+# the merge's own aliases now step around the columns rather than colliding with them
+statement ok
+PRAGMA git4data_merge('t', 'left', 'right', 'fail')
+
+query II
+SELECT (SELECT count(*) FROM t AT (BRANCH => 'left')), (SELECT v FROM t AT (BRANCH => 'left') WHERE k = 2000)
+----
+12	2
+
+# the pick builds a conflict helper out of aliases of its own, and the same columns are in the way
+statement ok
+CREATE TABLE t2 (
+    k INTEGER PRIMARY KEY,
+    v INTEGER,
+    g4d_l INTEGER,
+    g4d_b INTEGER,
+    g4d_s INTEGER,
+    g4d_tk INTEGER,
+    g4d_pick_conflicts INTEGER
+)
+
+statement ok
+INSERT INTO t2 SELECT range, range, range, range, range, range, range FROM range(10)
+
+statement ok
+CHECKPOINT
+
+statement ok
+PRAGMA git4data_create_branch('pbase', '')
+
+statement ok
+PRAGMA git4data_create_branch('psource', 'pbase')
+
+statement ok
+PRAGMA git4data_materialize('t2', 'psource', 't2_source')
+
+statement ok
+UPDATE t2_source SET v = 111 WHERE k = 1
+
+statement ok
+UPDATE t2_source SET v = 222, g4d_l = 555 WHERE k = 2
+
+statement ok
+PRAGMA git4data_pick('t2', 'psource', 'pbase', 'fail')
+
+query II
+SELECT (SELECT v FROM t2 WHERE k = 1), (SELECT v FROM t2 WHERE k = 2)
+----
+111	222
+
+# and the helper names step around a column of that name too, so the conflict check itself is sound:
+# a key both sides changed differently is a conflict, and fail refuses rather than picking a winner
+statement ok
+UPDATE t2 SET v = 999 WHERE k = 1
+
+statement error
+PRAGMA git4data_pick('t2', 'psource', 'pbase', 'fail')
+----
+<REGEX>:.*pick conflict.*
+
+# the diff's own three columns are the one place where stepping around is not possible: the key
+# columns carry the table's names, and renaming either side would hand a caller the wrong column.
+# So the diff refuses, and the sentence names the column and what to do.
+statement ok
+CREATE TABLE t3 (g4d_change INTEGER PRIMARY KEY, v INTEGER)
+
+statement ok
+INSERT INTO t3 SELECT range, range FROM range(10)
+
+statement ok
+CHECKPOINT
+
+statement ok
+PRAGMA git4data_create_branch('t3b', '')
+
+statement ok
+INSERT INTO t3 VALUES (100, 100)
+
+statement error
+SELECT * FROM git4data_diff('t3', 't3b', 't3b')
+----
+<REGEX>:.*key column named "g4d_change".*
+
+# a key column named like the diff's *other* two columns is refused the same way
+statement ok
+CREATE TABLE t4 (g4d_row_id INTEGER PRIMARY KEY, v INTEGER)
+
+statement ok
+INSERT INTO t4 SELECT range, range FROM range(10)
+
+statement ok
+CHECKPOINT
+
+statement ok
+PRAGMA git4data_create_branch('t4b', '')
+
+statement ok
+INSERT INTO t4 VALUES (100, 100)
+
+statement error
+SELECT * FROM git4data_diff('t4', 't4b', 't4b')
+----
+<REGEX>:.*key column named "g4d_row_id".*
+
+# a column of that name that is *not* the key is not in the diff's way: the diff reports the key and
+# its own three columns, and those four names are distinct
+statement ok
+CREATE TABLE t5 (k INTEGER PRIMARY KEY, g4d_change INTEGER, g4d_row_id INTEGER)
+
+statement ok
+INSERT INTO t5 SELECT range, range, range FROM range(10)
+
+statement ok
+CHECKPOINT
+
+statement ok
+PRAGMA git4data_create_branch('t5b', '')
+
+statement ok
+INSERT INTO t5 VALUES (100, 100, 100)
+
+statement ok
+PRAGMA git4data_create_branch('t5c', '')
+
+query II
+SELECT g4d_change, count(*) FROM git4data_diff('t5', 't5b', 't5c') GROUP BY g4d_change
+----
+added	1

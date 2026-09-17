@@ -288,6 +288,53 @@ static string PragmaGit4DataRestoreAt(ClientContext &context, const FunctionPara
 //! The predicate that says two aliased rows hold the same values, NULL-safe column by column
 static string BuildGit4DataRowComparison(TableCatalogEntry &table, const string &left_alias, const string &right_alias);
 
+//! The column names of a table, if it is there. Used to keep generated names clear of them.
+static void Git4DataAddColumnNames(ClientContext &context, const string &table_name, case_insensitive_set_t &names) {
+	auto entry = Catalog::GetEntry<TableCatalogEntry>(context, QualifiedName(Identifier(table_name)),
+	                                                  OnEntryNotFound::RETURN_NULL);
+	if (!entry) {
+		return;
+	}
+	for (auto &column : entry->GetColumns().Logical()) {
+		names.insert(column.Name().GetIdentifierName());
+	}
+}
+
+//! The columns every table a generated statement reads brings into scope: the source table, and for
+//! each named reference the table that reference reads its rows from - a branch with a line of its own
+//! reads that table rather than the source's columns.
+static case_insensitive_set_t Git4DataScopeColumnNames(ClientContext &context,
+                                                       DuckTransactionManager &transaction_manager,
+                                                       const string &table_name, const vector<string> &references) {
+	case_insensitive_set_t names;
+	Git4DataAddColumnNames(context, table_name, names);
+	for (auto &reference : references) {
+		Git4DataStorageTable storage;
+		if (!transaction_manager.branches.GetStorageTable(reference, table_name, storage)) {
+			continue;
+		}
+		auto resolved = Git4DataResolveTableName(context, storage.storage, storage.oid);
+		if (!resolved.empty()) {
+			Git4DataAddColumnNames(context, resolved, names);
+		}
+	}
+	return names;
+}
+
+//! A name for one of the feature's own aliases or helper tables that no column in the statement carries.
+//! An alias is in scope beside those columns, so one that a column happens to share makes the generated
+//! SQL ambiguous - measured, with a column named g4d_b: "Ambiguous reference to column name \"g4d_b\""
+//! from the merge. Names are lengthened until they are clear rather than refused, because the caller's
+//! table is not at fault and the aliases are the feature's own. A column named like a name this function
+//! is *asked* for simply moves the feature's name along.
+static string Git4DataFreeName(const string &base, const case_insensitive_set_t &taken) {
+	auto name = base;
+	while (taken.find(name) != taken.end()) {
+		name += "_";
+	}
+	return name;
+}
+
 static string PragmaGit4DataPick(ClientContext &context, const FunctionParameters &parameters) {
 	auto table_name = parameters.values[0].ToString();
 	auto source = parameters.values[1].ToString();
@@ -333,6 +380,13 @@ static string PragmaGit4DataPick(ClientContext &context, const FunctionParameter
 	// not a conflict - the same rule a merge applies.
 	auto base_image = FormatGit4DataAtClause(table_name, base, base_unit);
 	auto source_image = FormatGit4DataAtClause(table_name, source, source_unit);
+	// the statement reads the live table and both images, so no alias may be a column of any of them
+	auto taken = Git4DataScopeColumnNames(context, transaction_manager, table_name, {base, source});
+	auto alias_live = Git4DataFreeName("g4d_l", taken);
+	auto alias_base = Git4DataFreeName("g4d_b", taken);
+	auto alias_source = Git4DataFreeName("g4d_s", taken);
+	auto alias_keys = Git4DataFreeName("g4d_tk", taken);
+	auto conflict_name = Git4DataFreeName("g4d_pick_conflicts", taken);
 	string conflict_table;
 	if (policy != "overwrite") {
 		string key_list_joined;
@@ -353,39 +407,45 @@ static string PragmaGit4DataPick(ClientContext &context, const FunctionParameter
 				presence_base += " OR ";
 				presence_source += " OR ";
 			}
-			key_list_joined += "g4d_tk." + quoted;
-			join_live += StringUtil::Format("g4d_l.%s = g4d_tk.%s", quoted, quoted);
-			join_base += StringUtil::Format("g4d_b.%s = g4d_tk.%s", quoted, quoted);
-			join_source += StringUtil::Format("g4d_s.%s = g4d_tk.%s", quoted, quoted);
+			key_list_joined += alias_keys + "." + quoted;
+			join_live += StringUtil::Format("%s.%s = %s.%s", alias_live, quoted, alias_keys, quoted);
+			join_base += StringUtil::Format("%s.%s = %s.%s", alias_base, quoted, alias_keys, quoted);
+			join_source += StringUtil::Format("%s.%s = %s.%s", alias_source, quoted, alias_keys, quoted);
 			// a key is never null, so a null one in an outer join means that side has no such row
-			presence_base += StringUtil::Format("(g4d_l.%s IS NULL) <> (g4d_b.%s IS NULL)", quoted, quoted);
-			presence_source += StringUtil::Format("(g4d_l.%s IS NULL) <> (g4d_s.%s IS NULL)", quoted, quoted);
+			presence_base +=
+			    StringUtil::Format("(%s.%s IS NULL) <> (%s.%s IS NULL)", alias_live, quoted, alias_base, quoted);
+			presence_source +=
+			    StringUtil::Format("(%s.%s IS NULL) <> (%s.%s IS NULL)", alias_live, quoted, alias_source, quoted);
 		}
-		auto live_key = "g4d_l." + KeywordHelper::WriteOptionallyQuoted(key_columns[0]);
+		auto live_key = alias_live + "." + KeywordHelper::WriteOptionallyQuoted(key_columns[0]);
 		auto changed_from_base = StringUtil::Format("((%s) OR (%s IS NOT NULL AND NOT (%s)))", presence_base, live_key,
-		                                            BuildGit4DataRowComparison(table, "g4d_l", "g4d_b"));
-		auto differs_from_source = StringUtil::Format("((%s) OR (%s IS NOT NULL AND NOT (%s)))", presence_source,
-		                                              live_key, BuildGit4DataRowComparison(table, "g4d_l", "g4d_s"));
+		                                            BuildGit4DataRowComparison(table, alias_live, alias_base));
+		auto differs_from_source =
+		    StringUtil::Format("((%s) OR (%s IS NOT NULL AND NOT (%s)))", presence_source, live_key,
+		                       BuildGit4DataRowComparison(table, alias_live, alias_source));
 		conflict_table = StringUtil::Format(
-		    "CREATE OR REPLACE TEMP TABLE g4d_pick_conflicts AS WITH g4d_tk AS (SELECT %s FROM %s WHERE g4d_change IN "
-		    "('added', 'removed', 'changed')), g4d_l AS (SELECT * FROM %s), g4d_b AS (SELECT * FROM %s), g4d_s AS "
-		    "(SELECT * FROM %s) SELECT %s FROM g4d_tk LEFT JOIN g4d_l ON (%s) LEFT JOIN g4d_b ON (%s) LEFT JOIN "
-		    "g4d_s ON (%s) WHERE (%s) AND (%s);\n",
-		    key_list, diff, quoted_table, base_image, source_image, key_list_joined, join_live, join_base, join_source,
-		    changed_from_base, differs_from_source);
+		    "CREATE OR REPLACE TEMP TABLE %s AS WITH %s AS (SELECT %s FROM %s WHERE g4d_change IN "
+		    "('added', 'removed', 'changed')), %s AS (SELECT * FROM %s), %s AS (SELECT * FROM %s), %s AS "
+		    "(SELECT * FROM %s) SELECT %s FROM %s LEFT JOIN %s ON (%s) LEFT JOIN %s ON (%s) LEFT JOIN "
+		    "%s ON (%s) WHERE (%s) AND (%s);\n",
+		    conflict_name, alias_keys, key_list, diff, alias_live, quoted_table, alias_base, base_image, alias_source,
+		    source_image, key_list_joined, alias_keys, alias_live, join_live, alias_base, join_base, alias_source,
+		    join_source, changed_from_base, differs_from_source);
 	}
 
 	// A changed row is applied as a delete followed by an insert: there is no in-place update to reach
 	// for here, and the outcome is the same.
 	string result = conflict_table;
 	if (policy == "fail") {
-		result += "SELECT CASE WHEN EXISTS (SELECT 1 FROM g4d_pick_conflicts) THEN error('pick conflict: the live "
-		          "table changed the same rows since the base - pass policy skip to leave them, or overwrite to "
-		          "take the source') ELSE 0 END;\n";
+		result += StringUtil::Format(
+		    "SELECT CASE WHEN EXISTS (SELECT 1 FROM %s) THEN error('pick conflict: the live "
+		    "table changed the same rows since the base - pass policy skip to leave them, or overwrite to "
+		    "take the source') ELSE 0 END;\n",
+		    conflict_name);
 	}
-	auto conflict_filter = policy == "skip" ? StringUtil::Format(" AND (%s) NOT IN (SELECT %s FROM g4d_pick_conflicts)",
-	                                                             key_list, key_list)
-	                                        : string();
+	auto conflict_filter =
+	    policy == "skip" ? StringUtil::Format(" AND (%s) NOT IN (SELECT %s FROM %s)", key_list, key_list, conflict_name)
+	                     : string();
 	result += StringUtil::Format("DELETE FROM %s WHERE (%s) IN (SELECT %s FROM %s WHERE g4d_change IN ('removed', "
 	                             "'changed')%s);\n",
 	                             quoted_table, key_list, key_list, diff, conflict_filter);
@@ -398,7 +458,7 @@ static string PragmaGit4DataPick(ClientContext &context, const FunctionParameter
 	                             quoted_table, source_image, key_list, key_list, diff, conflict_filter, key_list,
 	                             key_list, quoted_table);
 	if (!conflict_table.empty()) {
-		result += "\nDROP TABLE g4d_pick_conflicts;";
+		result += StringUtil::Format("\nDROP TABLE %s;", conflict_name);
 	}
 	return result;
 }
@@ -807,6 +867,17 @@ static string PragmaGit4DataMerge(ClientContext &context, const FunctionParamete
 	auto escape = [](const string &value) {
 		return StringUtil::Replace(value, "'", "''");
 	};
+	// The statement reads the source table, the table being merged into and the right side's image, so
+	// no alias may be a column of any of them - a column named g4d_b made this ambiguous, measured.
+	auto taken = Git4DataScopeColumnNames(context, transaction_manager, table_name, {right_name});
+	Git4DataAddColumnNames(context, merge_into, taken);
+	auto alias_left = Git4DataFreeName("g4d_l", taken);
+	auto alias_right = Git4DataFreeName("g4d_r", taken);
+	auto alias_both = Git4DataFreeName("g4d_both", taken);
+	auto alias_both_rows = Git4DataFreeName("g4d_b", taken);
+	auto alias_x = Git4DataFreeName("g4d_x", taken);
+	auto alias_y = Git4DataFreeName("g4d_y", taken);
+	auto conflict_name = Git4DataFreeName("g4d_merge_conflicts", taken);
 	string key_list;
 	string key_list_both;
 	string key_match_xy;
@@ -820,9 +891,9 @@ static string PragmaGit4DataMerge(ClientContext &context, const FunctionParamete
 			key_match_by += " AND ";
 		}
 		key_list += quoted;
-		key_list_both += "g4d_b." + quoted;
-		key_match_xy += "g4d_x." + quoted + " = g4d_y." + quoted;
-		key_match_by += "g4d_y." + quoted + " = g4d_b." + quoted;
+		key_list_both += alias_both_rows + "." + quoted;
+		key_match_xy += alias_x + "." + quoted + " = " + alias_y + "." + quoted;
+		key_match_by += alias_y + "." + quoted + " = " + alias_both_rows + "." + quoted;
 	}
 	auto quoted_table = KeywordHelper::WriteOptionallyQuoted(table_name);
 	auto quoted_into = KeywordHelper::WriteOptionallyQuoted(merge_into);
@@ -834,21 +905,22 @@ static string PragmaGit4DataMerge(ClientContext &context, const FunctionParamete
 	    FormatGit4DataAtClause(table_name, right_name, ResolveGit4DataReference(transaction_manager, right_name));
 
 	string result = StringUtil::Format(
-	    "CREATE OR REPLACE TEMP TABLE g4d_merge_conflicts AS WITH g4d_l AS (SELECT %s FROM %s), "
-	    "g4d_r AS (SELECT %s FROM %s), g4d_both AS (SELECT %s FROM g4d_l INTERSECT SELECT %s FROM "
-	    "g4d_r) SELECT %s FROM g4d_both g4d_b WHERE NOT EXISTS (SELECT 1 FROM (SELECT * FROM %s) "
-	    "g4d_x JOIN (SELECT * FROM %s) g4d_y ON (%s) WHERE %s AND (%s));\n",
-	    key_list, diff_left, key_list, diff_right, key_list, key_list, key_list_both, quoted_into, right_image,
-	    key_match_xy, key_match_by, BuildGit4DataRowComparison(table, "g4d_x", "g4d_y"));
+	    "CREATE OR REPLACE TEMP TABLE %s AS WITH %s AS (SELECT %s FROM %s), "
+	    "%s AS (SELECT %s FROM %s), %s AS (SELECT %s FROM %s INTERSECT SELECT %s FROM "
+	    "%s) SELECT %s FROM %s %s WHERE NOT EXISTS (SELECT 1 FROM (SELECT * FROM %s) "
+	    "%s JOIN (SELECT * FROM %s) %s ON (%s) WHERE %s AND (%s));\n",
+	    conflict_name, alias_left, key_list, diff_left, alias_right, key_list, diff_right, alias_both, key_list,
+	    alias_left, key_list, alias_right, key_list_both, alias_both, alias_both_rows, quoted_into, alias_x,
+	    right_image, alias_y, key_match_xy, key_match_by, BuildGit4DataRowComparison(table, alias_x, alias_y));
 	if (policy == "fail") {
-		result += "SELECT CASE WHEN EXISTS (SELECT 1 FROM g4d_merge_conflicts) THEN error('merge conflict: use "
-		          "policy skip or accept, or resolve it first') ELSE 0 END;\n";
+		result += StringUtil::Format("SELECT CASE WHEN EXISTS (SELECT 1 FROM %s) THEN error('merge conflict: use "
+		                             "policy skip or accept, or resolve it first') ELSE 0 END;\n",
+		                             conflict_name);
 	}
 	// with accept the right side wins outright; otherwise a conflicting key is left as the left has it
-	auto conflict_filter =
-	    policy == "accept"
-	        ? string()
-	        : StringUtil::Format(" AND (%s) NOT IN (SELECT %s FROM g4d_merge_conflicts)", key_list, key_list);
+	auto conflict_filter = policy == "accept" ? string()
+	                                          : StringUtil::Format(" AND (%s) NOT IN (SELECT %s FROM %s)", key_list,
+	                                                               key_list, conflict_name);
 	// Accepting means the right side's row replaces whatever the left has for that key, including when
 	// the right side added it and the left also has one - so every key the right touched is cleared
 	// first, not only the ones it removed or changed.
@@ -861,7 +933,7 @@ static string PragmaGit4DataMerge(ClientContext &context, const FunctionParamete
 	    "(SELECT %s FROM %s);\n",
 	    quoted_into, right_image, key_list, key_list, diff_right, "'added', 'changed'", conflict_filter, key_list,
 	    key_list, quoted_into);
-	result += "DROP TABLE g4d_merge_conflicts;";
+	result += StringUtil::Format("DROP TABLE %s;", conflict_name);
 	if (drop_merge_base) {
 		// the reference was only there for the two diffs above, which have run by now
 		result +=

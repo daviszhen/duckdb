@@ -127,8 +127,8 @@ static optional_ptr<TableCatalogEntry> Git4DataTableByOid(ClientContext &context
 }
 
 string Git4DataResolveTableName(ClientContext &context, const string &name, idx_t oid) {
-	auto named = Catalog::GetEntry<TableCatalogEntry>(context, QualifiedName(Identifier(name)),
-	                                                  OnEntryNotFound::RETURN_NULL);
+	auto named =
+	    Catalog::GetEntry<TableCatalogEntry>(context, QualifiedName(Identifier(name)), OnEntryNotFound::RETURN_NULL);
 	if (named) {
 		return name;
 	}
@@ -749,6 +749,23 @@ static unique_ptr<FunctionData> Git4DataDiffBind(ClientContext &context, TableFu
 	auto result =
 	    Git4DataDiffFun::CreateBindData(context, input.inputs[0].GetValue<string>(), input.inputs[1].GetValue<string>(),
 	                                    input.inputs[2].GetValue<string>());
+	auto &bind_data = result->Cast<Git4DataDiffBindData>();
+	// The three columns below are this function's own, and the key columns follow them, carrying names
+	// that belong to the table. A key column with one of those three names would leave the result with
+	// two columns of that name, which the binder refuses - measured, with a key column named
+	// g4d_change: Binder Error: table "git4data_diff" has duplicate column name "g4d_change". Renaming
+	// either side is worse than refusing: a caller asking for g4d_change would silently be handed the
+	// table's column rather than the change marker. The table is not at fault, but it is the side that
+	// can be renamed, so the sentence says so.
+	for (auto &key_name : bind_data.key_names) {
+		auto raw_name = key_name.GetIdentifierName();
+		if (raw_name == "g4d_change" || raw_name == "g4d_row_id" || raw_name == "g4d_counterpart_row_id") {
+			throw InvalidInputException(
+			    "Table \"%s\" has a key column named \"%s\", which is one of the columns a diff reports, so the result "
+			    "would carry that name twice. Rename the column and ask again.",
+			    bind_data.table_name, raw_name);
+		}
+	}
 	names.emplace_back("g4d_change");
 	return_types.emplace_back(LogicalType::VARCHAR);
 	names.emplace_back("g4d_row_id");
@@ -757,7 +774,6 @@ static unique_ptr<FunctionData> Git4DataDiffBind(ClientContext &context, TableFu
 	return_types.emplace_back(LogicalType::UBIGINT);
 	// the key follows, so a caller can match a changed row against the live table by key rather
 	// than by a physical row id that the reference scan does not expose
-	auto &bind_data = result->Cast<Git4DataDiffBindData>();
 	for (idx_t i = 0; i < bind_data.key_columns.size(); i++) {
 		names.push_back(bind_data.key_names[i]);
 		return_types.push_back(bind_data.key_types[i]);
