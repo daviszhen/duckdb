@@ -34,6 +34,11 @@
 #include "duckdb/logging/log_manager.hpp"
 #include "duckdb/transaction/duck_transaction_manager.hpp"
 #include "duckdb/parser/parser.hpp"
+#include "duckdb/parser/parsed_expression_iterator.hpp"
+#include "duckdb/parser/tableref/at_clause.hpp"
+#include "duckdb/parser/expression/constant_expression.hpp"
+#include "duckdb/parser/literal.hpp"
+#include "duckdb/parser/expression/subquery_expression.hpp"
 #include "duckdb/parser/tableref/basetableref.hpp"
 #include "duckdb/parser/statement/insert_statement.hpp"
 #include "duckdb/parser/statement/update_statement.hpp"
@@ -779,6 +784,45 @@ static string PragmaGit4DataCloneDatabase(ClientContext &context, const Function
 	                          escape(source), escape(target), cloned_log ? "true" : "false");
 }
 
+//! Point every reference to the source table inside a parsed statement at the branch the statement is
+//! being applied to. The call writes *the branch*, so a bare `t` in the statement means the branch's
+//! line - reading the live table instead would be a silent wrong answer, and it was one: measured, an
+//! insert whose rows came from the table itself copied the live table's value (v = 1) where the branch
+//! held 101. A reference that already names a reference of its own is left alone, because naming one is
+//! a decision rather than an omission.
+static void Git4DataPointExprAtBranch(ParsedExpression &expr, const string &table_name, const string &branch_name);
+
+static void Git4DataPointRefAtBranch(TableRef &ref, const string &table_name, const string &branch_name) {
+	if (ref.type != TableReferenceType::BASE_TABLE) {
+		// the iterator has already walked into joins, subqueries and table functions
+		return;
+	}
+	auto &base = ref.Cast<BaseTableRef>();
+	if (base.at_clause || base.GetQualifiedName().Name().GetIdentifierName() != table_name) {
+		return;
+	}
+	// a ConstantExpression is built from a Literal, and a string constant is a string literal
+	base.at_clause =
+	    make_uniq<AtClause>(Identifier("BRANCH"), make_uniq<ConstantExpression>(Literal::String(branch_name)));
+}
+
+static void Git4DataPointQueryAtBranch(QueryNode &node, const string &table_name, const string &branch_name) {
+	ParsedExpressionIterator::EnumerateQueryNodeChildren(
+	    node, [&](unique_ptr<ParsedExpression> &child) { Git4DataPointExprAtBranch(*child, table_name, branch_name); },
+	    [&](TableRef &ref) { Git4DataPointRefAtBranch(ref, table_name, branch_name); });
+}
+
+static void Git4DataPointExprAtBranch(ParsedExpression &expr, const string &table_name, const string &branch_name) {
+	if (expr.GetExpressionClass() == ExpressionClass::SUBQUERY) {
+		auto &subquery = expr.Cast<SubqueryExpression>();
+		if (subquery.Subquery()) {
+			Git4DataPointQueryAtBranch(*subquery.SubqueryMutable()->node, table_name, branch_name);
+		}
+	}
+	ParsedExpressionIterator::EnumerateChildren(
+	    expr, [&](unique_ptr<ParsedExpression> &child) { Git4DataPointExprAtBranch(*child, table_name, branch_name); });
+}
+
 //! The statement a delta branch is written through has to name the table the delta is for, and name it
 //! directly: a write through another name would be recorded against the wrong line, and a join has no
 //! single row of that table to record.
@@ -904,6 +948,24 @@ static string PragmaGit4DataApply(ClientContext &context, const FunctionParamete
 		                          quoted_removed, key_list, key_list, from_name, from_alias, quoted_removed,
 		                          alias_removed, match(alias_removed, from_alias));
 	};
+
+	// the statements read the branch, so their own references to the table are pointed at it before
+	// anything is rendered
+	for (auto &statement : parser.statements) {
+		switch (statement->type) {
+		case StatementType::INSERT_STATEMENT:
+			Git4DataPointQueryAtBranch(*statement->Cast<InsertStatement>().node, table_name, branch_name);
+			break;
+		case StatementType::UPDATE_STATEMENT:
+			Git4DataPointQueryAtBranch(*statement->Cast<UpdateStatement>().node, table_name, branch_name);
+			break;
+		case StatementType::DELETE_STATEMENT:
+			Git4DataPointQueryAtBranch(*statement->Cast<DeleteStatement>().node, table_name, branch_name);
+			break;
+		default:
+			break;
+		}
+	}
 
 	// Every statement is translated against the same delta, and the whole group is handed back as one
 	// string so the caller's statements land in one transaction: either all of them are recorded or

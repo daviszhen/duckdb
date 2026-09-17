@@ -222,11 +222,43 @@ PRAGMA git4data_apply('t', 'b', 'UPDATE t SET v = 1 FROM more WHERE t.k = more.k
 ----
 <REGEX>:.*does not take UPDATE ... FROM.*
 
+# The statement is applied to the *branch*, so a bare reference to the table inside it means the
+# branch's line and not the live table. Measured before this was pointed at the branch: an insert whose
+# rows came from the table itself copied the live table's value (1) where the branch held 101.
+statement ok
+PRAGMA git4data_apply('t', 'b', 'INSERT INTO t (k, v) SELECT k + 1000, v FROM t WHERE k = 3')
+
+query II
+SELECT (SELECT v FROM t AT (BRANCH => 'b') WHERE k = 1003), (SELECT v FROM t WHERE k = 3)
+----
+103	3
+
+# and a subquery inside a predicate reads the branch too
+statement ok
+PRAGMA git4data_apply('t', 'b', 'DELETE FROM t WHERE k IN (SELECT k FROM t WHERE k = 700)')
+
+query I
+SELECT count(*) FROM t AT (BRANCH => 'b') WHERE k = 700
+----
+0
+
+# a reference the statement names itself is left alone: naming one is a decision, not an omission
+statement ok
+PRAGMA git4data_create_snapshot('pinned')
+
+statement ok
+PRAGMA git4data_apply('t', 'b', 'INSERT INTO t (k, v) SELECT k + 2000, v FROM t AT (SNAPSHOT => ''pinned'') WHERE k = 3')
+
+query I
+SELECT v FROM t AT (BRANCH => 'b') WHERE k = 2003
+----
+3
+
 # a refusal leaves the branch alone: nothing was written before the statement was checked
 query I
 SELECT count(*) FROM t AT (BRANCH => 'b')
 ----
-11
+12
 
 # the line the branch holds is the delta, so it comes back with the file
 statement ok
@@ -239,7 +271,7 @@ SELECT (SELECT count(*) FROM t AT (BRANCH => 'b')),
        (SELECT v FROM t AT (BRANCH => 'b') WHERE k = 3),
        (SELECT v FROM t AT (BRANCH => 'b') WHERE k = 800)
 ----
-11	103	800
+12	103	800
 
 # and it can still be written to after the reopen
 statement ok
@@ -248,7 +280,7 @@ PRAGMA git4data_apply('t', 'b', 'DELETE FROM t WHERE k = 800')
 query I
 SELECT count(*) FROM t AT (BRANCH => 'b')
 ----
-10
+11
 
 # The changes a branch accumulated through plain SQL are the changes any other reference has over
 # this one, so a pick applies them to the live table: the feature's other modules need no special
@@ -259,7 +291,7 @@ PRAGMA git4data_pick('t', 'b', 'before', 'fail')
 query III
 SELECT (SELECT count(*) FROM t), (SELECT v FROM t WHERE k = 3), (SELECT v FROM t WHERE k = 500)
 ----
-10	103	4
+11	103	4
 
 # A group of statements is one unit of work: they are translated against the same delta and handed back
 # together, so the caller's statements land in one transaction. Measured on a fresh table:
