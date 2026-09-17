@@ -335,6 +335,23 @@ static string Git4DataFreeName(const string &base, const case_insensitive_set_t 
 	return name;
 }
 
+//! The name of one of the feature's temporary helper tables, which has to clear a second thing as well:
+//! the statement that creates it is `CREATE OR REPLACE TEMP TABLE`, so a table the caller already holds
+//! under that name would be replaced and then dropped along with the helper. Measured: a caller's own
+//! `CREATE TEMP TABLE g4d_merge_conflicts (x)` holding a row was gone after a merge, and the pick's
+//! helper has the same shape. A permanent table of that name is not destroyed - the temporary one
+//! shadows it for the length of the group, and the drop takes the temporary one - but it is left alone
+//! rather than shadowed, which costs only a longer internal name.
+static string Git4DataFreeHelperName(ClientContext &context, const string &base, const case_insensitive_set_t &taken) {
+	auto name = base;
+	while (
+	    taken.find(name) != taken.end() ||
+	    Catalog::GetEntry<TableCatalogEntry>(context, QualifiedName(Identifier(name)), OnEntryNotFound::RETURN_NULL)) {
+		name += "_";
+	}
+	return name;
+}
+
 static string PragmaGit4DataPick(ClientContext &context, const FunctionParameters &parameters) {
 	auto table_name = parameters.values[0].ToString();
 	auto source = parameters.values[1].ToString();
@@ -386,7 +403,7 @@ static string PragmaGit4DataPick(ClientContext &context, const FunctionParameter
 	auto alias_base = Git4DataFreeName("g4d_b", taken);
 	auto alias_source = Git4DataFreeName("g4d_s", taken);
 	auto alias_keys = Git4DataFreeName("g4d_tk", taken);
-	auto conflict_name = Git4DataFreeName("g4d_pick_conflicts", taken);
+	auto conflict_name = Git4DataFreeHelperName(context, "g4d_pick_conflicts", taken);
 	string conflict_table;
 	if (policy != "overwrite") {
 		string key_list_joined;
@@ -877,7 +894,7 @@ static string PragmaGit4DataMerge(ClientContext &context, const FunctionParamete
 	auto alias_both_rows = Git4DataFreeName("g4d_b", taken);
 	auto alias_x = Git4DataFreeName("g4d_x", taken);
 	auto alias_y = Git4DataFreeName("g4d_y", taken);
-	auto conflict_name = Git4DataFreeName("g4d_merge_conflicts", taken);
+	auto conflict_name = Git4DataFreeHelperName(context, "g4d_merge_conflicts", taken);
 	string key_list;
 	string key_list_both;
 	string key_match_xy;
@@ -934,6 +951,7 @@ static string PragmaGit4DataMerge(ClientContext &context, const FunctionParamete
 	    quoted_into, right_image, key_list, key_list, diff_right, "'added', 'changed'", conflict_filter, key_list,
 	    key_list, quoted_into);
 	result += StringUtil::Format("DROP TABLE %s;", conflict_name);
+
 	if (drop_merge_base) {
 		// the reference was only there for the two diffs above, which have run by now
 		result +=

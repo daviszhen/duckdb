@@ -184,3 +184,108 @@ query II
 SELECT g4d_change, count(*) FROM git4data_diff('t5', 't5b', 't5c') GROUP BY g4d_change
 ----
 added	1
+
+# A helper table is created with CREATE OR REPLACE TEMP TABLE, so a temporary table the caller already
+# holds under that name was replaced and then dropped along with the helper. Measured, in one session:
+# a caller's `CREATE TEMP TABLE g4d_merge_conflicts (x)` holding a row was gone after a merge -
+# "Catalog Error: Table with name g4d_merge_conflicts does not exist". The helper's name steps aside for
+# a table of that name the same way it steps aside for a column, so both survive.
+#
+# This scenario deliberately uses a table whose columns are *not* named after the helpers: on `t` above
+# the columns alone already move every generated name, which masks whether the helper name was stepped
+# at all - measured while checking the fix, and the reason this second pair of tables exists.
+statement ok
+CREATE TABLE m (k INTEGER PRIMARY KEY, v INTEGER)
+
+statement ok
+INSERT INTO m SELECT range, range FROM range(10)
+
+statement ok
+CHECKPOINT
+
+statement ok
+PRAGMA git4data_create_branch('mroot', '')
+
+statement ok
+PRAGMA git4data_create_branch('mleft', 'mroot')
+
+statement ok
+PRAGMA git4data_create_branch('mright', 'mroot')
+
+statement ok
+CHECKPOINT
+
+statement ok
+PRAGMA git4data_materialize('m', 'mleft', 'm_left')
+
+statement ok
+PRAGMA git4data_materialize('m', 'mright', 'm_right')
+
+statement ok
+INSERT INTO m_left VALUES (1000, 1)
+
+statement ok
+INSERT INTO m_right VALUES (2000, 2)
+
+statement ok
+PRAGMA git4data_merge('m', 'mleft', 'mright', 'fail')
+
+statement ok
+CREATE TEMP TABLE g4d_merge_conflicts (x INTEGER)
+
+statement ok
+INSERT INTO g4d_merge_conflicts VALUES (42)
+
+statement ok
+PRAGMA git4data_merge('m', 'mleft', 'mright', 'fail')
+
+# the caller's table is still there, with its row, and the merge still happened
+query I
+SELECT count(*) FROM g4d_merge_conflicts
+----
+1
+
+query I
+SELECT max(x) FROM g4d_merge_conflicts
+----
+42
+
+query I
+SELECT count(*) FROM m AT (BRANCH => 'mleft')
+----
+12
+
+# the pick's helper has the same shape, and a *permanent* table of that name is left alone rather than
+# shadowed for the length of the group
+statement ok
+CREATE TEMP TABLE g4d_pick_conflicts (x INTEGER)
+
+statement ok
+INSERT INTO g4d_pick_conflicts VALUES (43)
+
+statement ok
+PRAGMA git4data_create_branch('psource2', 'mroot')
+
+statement ok
+PRAGMA git4data_materialize('m', 'psource2', 'm_source2')
+
+statement ok
+UPDATE m_source2 SET v = 111 WHERE k = 1
+
+statement ok
+PRAGMA git4data_pick('m', 'psource2', 'mroot', 'fail')
+
+query I
+SELECT count(*) FROM g4d_pick_conflicts
+----
+1
+
+query I
+SELECT max(x) FROM g4d_pick_conflicts
+----
+43
+
+query I
+SELECT v FROM m WHERE k = 1
+----
+111
