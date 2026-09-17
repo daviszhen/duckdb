@@ -254,6 +254,77 @@ SELECT v FROM t AT (BRANCH => 'b') WHERE k = 2003
 ----
 3
 
+# An update that rewrites a key onto a key the branch already shows is the collision the same statement
+# against the table itself raises. Measured before the check: it left the branch showing *two* rows for
+# k = 5, where `UPDATE t SET k = 5 WHERE k = 3` against the table is a duplicate-key error. These
+# probes use a table of their own so the keys they name are the ones they say.
+statement ok
+CREATE TABLE c (k INTEGER PRIMARY KEY, v INTEGER)
+
+statement ok
+INSERT INTO c SELECT range, range FROM range(10)
+
+statement ok
+CHECKPOINT
+
+statement ok
+PRAGMA git4data_create_branch('cb', '')
+
+statement ok
+CREATE TABLE c_add (k INTEGER PRIMARY KEY, v INTEGER)
+
+statement ok
+CREATE TABLE c_del (k INTEGER PRIMARY KEY)
+
+statement ok
+PRAGMA git4data_bind_branch_delta('c', 'cb', 'c_add', 'c_del')
+
+statement error
+PRAGMA git4data_apply('c', 'cb', 'UPDATE c SET k = 5 WHERE k = 3')
+----
+<REGEX>:.*update collides with a row the branch already shows.*
+
+# and nothing of it is left behind: the key it would have collided with is unchanged, and the row that
+# was being rewritten is still there under its own key
+query III
+SELECT (SELECT count(*) FROM c AT (BRANCH => 'cb') WHERE k = 5),
+       (SELECT count(*) FROM c AT (BRANCH => 'cb') WHERE k = 3),
+       (SELECT count(*) FROM c AT (BRANCH => 'cb'))
+----
+1	1	10
+
+# rewriting a key onto a key the branch does not have is an ordinary update, and the row keeps its other
+# columns: `SET v = 99` then `SET k = 400` leaves one row at 400 carrying 99
+statement ok
+PRAGMA git4data_apply('c', 'cb', 'UPDATE c SET v = 99 WHERE k = 8')
+
+statement ok
+PRAGMA git4data_apply('c', 'cb', 'UPDATE c SET k = 400 WHERE k = 8')
+
+query II
+SELECT (SELECT v FROM c AT (BRANCH => 'cb') WHERE k = 400),
+       (SELECT count(*) FROM c AT (BRANCH => 'cb') WHERE k = 8)
+----
+99	0
+
+# two rows swapping keys is not a collision either: each key the statement writes is one it is replacing
+statement ok
+PRAGMA git4data_apply('c', 'cb', 'UPDATE c SET k = 9000 WHERE k = 9')
+
+statement ok
+PRAGMA git4data_apply('c', 'cb', 'UPDATE c SET k = 9 WHERE k = 400')
+
+statement ok
+PRAGMA git4data_apply('c', 'cb', 'UPDATE c SET k = 400 WHERE k = 9000')
+
+# the values travel with their rows: k = 400 ends up carrying what k = 9 held, and k = 9 what k = 400 held
+query III
+SELECT (SELECT v FROM c AT (BRANCH => 'cb') WHERE k = 400),
+       (SELECT v FROM c AT (BRANCH => 'cb') WHERE k = 9),
+       (SELECT count(*) FROM c AT (BRANCH => 'cb'))
+----
+9	99	10
+
 # a refusal leaves the branch alone: nothing was written before the statement was checked
 query I
 SELECT count(*) FROM t AT (BRANCH => 'b')

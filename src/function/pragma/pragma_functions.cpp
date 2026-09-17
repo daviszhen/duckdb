@@ -1026,7 +1026,11 @@ static string PragmaGit4DataApply(ClientContext &context, const FunctionParamete
 						break;
 					}
 				}
-				new_columns += value.empty() ? KeywordHelper::WriteOptionallyQuoted(name) : value;
+				// every column is named: a SET expression that is a literal or an expression takes its
+				// name from the expression otherwise, and the rows table is joined on its keys -
+				// measured, `SET k = 5` produced a column called "5" and the join could not find the key
+				new_columns += value.empty() ? KeywordHelper::WriteOptionallyQuoted(name)
+				                             : (value + " AS " + KeywordHelper::WriteOptionallyQuoted(name));
 			}
 			string result =
 			    StringUtil::Format("CREATE OR REPLACE TEMP TABLE %s AS SELECT %s FROM %s%s;\n", keys_name, key_list,
@@ -1037,7 +1041,20 @@ static string PragmaGit4DataApply(ClientContext &context, const FunctionParamete
 			    StringUtil::Format("DELETE FROM %s %s WHERE EXISTS (SELECT 1 FROM %s %s WHERE %s);\n", quoted_added,
 			                       alias_added, keys_name, alias_keys, match(alias_added, alias_keys));
 			result += add_removals(keys_name, alias_keys);
-			result += StringUtil::Format("INSERT INTO %s SELECT * FROM %s;\n", quoted_added, rows_name);
+			// A key the statement rewrites onto a key the branch already shows is the collision the same
+			// statement against the table itself raises, and here it was a silent wrong answer: measured,
+			// `UPDATE t SET k = 5 WHERE k = 3` with both keys present left the branch showing *two* rows
+			// for k = 5, where the table itself refuses with a duplicate key. Keys the statement is
+			// replacing are not collisions - a row keeping its key, or two rows swapping theirs, is an
+			// ordinary update - so the check asks whether a new key is one the branch shows and the
+			// statement is not rewriting.
+			result += StringUtil::Format(
+			    "INSERT INTO %s SELECT * FROM %s %s WHERE (SELECT CASE WHEN EXISTS (SELECT 1 FROM %s JOIN %s %s ON "
+			    "(%s) WHERE NOT EXISTS (SELECT 1 FROM %s %s WHERE %s)) THEN error('update collides with a row the "
+			    "branch already shows: two rows would carry the same key, which the table itself refuses. Delete "
+			    "the row that key belongs to, or rewrite it to a key the branch does not have') ELSE 1 END) = 1;\n",
+			    quoted_added, rows_name, alias_rows, branch_image, rows_name, alias_rows,
+			    match(alias_branch, alias_rows), keys_name, alias_keys, match(alias_keys, alias_branch));
 			result += StringUtil::Format("DROP TABLE %s;\nDROP TABLE %s;", keys_name, rows_name);
 			return result;
 		}
