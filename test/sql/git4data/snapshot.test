@@ -77,3 +77,22 @@ statement error
 SELECT count(*) FROM t AT (SNAPSHOT => 's3')
 ----
 <REGEX>:.*does not exist.*
+
+# The reference registry is not transactional: a reference taken inside a transaction that rolls back
+# stays. That is worth an assertion rather than an assumption - it is not a silent wrongness, because what
+# a reference pins is the last *committed* commit, which a rolled-back transaction did not change, but it
+# is a behaviour someone will meet.
+statement ok
+BEGIN
+
+statement ok
+PRAGMA git4data_create_snapshot('in_tx')
+
+statement ok
+ROLLBACK
+
+statement ok
+PRAGMA git4data_snapshots
+
+statement ok
+PRAGMA git4data_drop_snapshot('in_tx')
