@@ -107,6 +107,24 @@ struct Git4DataSnapshotScanState : public GlobalTableFunctionState {
 	}
 };
 
+//! The table carrying this oid in the default schema, or nothing. A mapping is written in *names*, and a
+//! name can be dropped, recreated or renamed under it; the oid is what survives a rename, so it is what
+//! lets a read find the table a mapping was made against when its name no longer resolves.
+static optional_ptr<TableCatalogEntry> Git4DataTableByOid(ClientContext &context, idx_t oid) {
+	if (oid == 0) {
+		return nullptr;
+	}
+	auto &schema = Catalog::GetCatalog(context, INVALID_CATALOG).GetSchema(context, DEFAULT_SCHEMA);
+	optional_ptr<TableCatalogEntry> result;
+	schema.Scan(context, CatalogType::TABLE_ENTRY, [&](CatalogEntry &entry) {
+		if (result || entry.oid != oid) {
+			return;
+		}
+		result = &entry.Cast<TableCatalogEntry>();
+	});
+	return result;
+}
+
 //! The table backing a branch for a source table, or empty when the branch has no line of its own
 //! there. A mapping whose table has since been dropped falls back to the pinned image rather than
 //! failing, because the branch itself is still a valid reference.
@@ -132,8 +150,15 @@ static string Git4DataBranchStorageTable(ClientContext &context, const Git4DataB
 		auto storage = Catalog::GetEntry<TableCatalogEntry>(context, QualifiedName(Identifier(entry.storage)),
 		                                                    OnEntryNotFound::RETURN_NULL);
 		if (!storage) {
+			// the name it was given no longer resolves, which is what a rename looks like: the oid is
+			// what tells the table it was given from any other
+			storage = Git4DataTableByOid(context, entry.oid);
+		}
+		if (!storage) {
 			continue;
 		}
+		// the name it has now, not the one the mapping was written with
+		auto resolved = storage->name.GetIdentifierName();
 		if (entry.oid != 0 && entry.oid != storage->oid) {
 			throw InvalidInputException(
 			    "Branch \"%s\" was given table \"%s\" for \"%s\", and the table carrying that name now is not it - "
@@ -141,7 +166,7 @@ static string Git4DataBranchStorageTable(ClientContext &context, const Git4DataB
 			    "table of its own again with git4data_bind_branch_table.",
 			    branch.name, entry.storage, table_name);
 		}
-		return entry.storage;
+		return resolved;
 	}
 	return string();
 }
@@ -252,14 +277,23 @@ static Git4DataLineState ResolveGit4DataLineState(ClientContext &context, DuckTr
 	string added;
 	string removed;
 	for (auto &delta : branch.deltas) {
-		if (delta.source != table_name) {
+		// the source's name can change under the mapping, and its oid is what survives that
+		auto &requested = Catalog::GetEntry<TableCatalogEntry>(context, QualifiedName(Identifier(table_name)));
+		if (delta.source != table_name && (delta.source_oid == 0 || delta.source_oid != requested.oid)) {
 			continue;
 		}
-		// the delta's tables are the caller's, so one that has since been dropped falls back to the base
+		// the delta's tables are the caller's: one that has since been dropped falls back to the base, and
+		// one that was *renamed* is found by oid, because the caller meant that table
 		auto added_table = Catalog::GetEntry<TableCatalogEntry>(context, QualifiedName(Identifier(delta.added)),
 		                                                        OnEntryNotFound::RETURN_NULL);
+		if (!added_table) {
+			added_table = Git4DataTableByOid(context, delta.added_oid);
+		}
 		auto removed_table = Catalog::GetEntry<TableCatalogEntry>(context, QualifiedName(Identifier(delta.removed)),
 		                                                          OnEntryNotFound::RETURN_NULL);
+		if (!removed_table) {
+			removed_table = Git4DataTableByOid(context, delta.removed_oid);
+		}
 		if (added_table && removed_table) {
 			// a table that took the name of one of these after it was dropped is a different table, and
 			// reading it would apply a delta the caller never made
@@ -273,8 +307,8 @@ static Git4DataLineState ResolveGit4DataLineState(ClientContext &context, DuckTr
 			}
 			auto &source = Catalog::GetEntry<TableCatalogEntry>(context, QualifiedName(Identifier(table_name)));
 			Git4DataCheckDeltaColumns(source, *added_table, *removed_table);
-			added = delta.added;
-			removed = delta.removed;
+			added = added_table->name.GetIdentifierName();
+			removed = removed_table->name.GetIdentifierName();
 		}
 	}
 	if (!added.empty() || !removed.empty()) {

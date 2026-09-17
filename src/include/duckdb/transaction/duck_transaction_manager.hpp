@@ -125,6 +125,9 @@ struct Git4DataBranchDelta {
 	//! file, since the catalog's oids do not survive a reopen.
 	idx_t added_oid = 0;
 	idx_t removed_oid = 0;
+	//! The source table's own oid when the delta was bound, so the delta follows a source that is renamed
+	//! rather than silently ceasing to apply
+	idx_t source_oid = 0;
 };
 
 struct Git4DataBranch {
@@ -194,7 +197,7 @@ public:
 	//! Record that a branch differs from its base by a delta rather than by a copy of it. A branch with a
 	//! table of its own for this source keeps that instead: one line, one source of truth.
 	void SetDeltaTable(const string &branch, const string &source_table, const string &added, const string &removed,
-	                   idx_t added_oid = 0, idx_t removed_oid = 0);
+	                   idx_t added_oid = 0, idx_t removed_oid = 0, idx_t source_oid = 0);
 	//! Forget a branch's delta for a source table, which is what giving it a table of its own does - the
 	//! copy is the line from then on, and a delta beside it would be read by nothing.
 	void ClearDeltaTable(const string &branch, const string &source_table);

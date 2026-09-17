@@ -138,7 +138,7 @@ void BranchRegistry::ClearDeltaTable(const string &branch, const string &source_
 }
 
 void BranchRegistry::SetDeltaTable(const string &branch, const string &source_table, const string &added,
-                                   const string &removed, idx_t added_oid, idx_t removed_oid) {
+                                   const string &removed, idx_t added_oid, idx_t removed_oid, idx_t source_oid) {
 	lock_guard<mutex> guard(lock);
 	auto entry = branches.find(branch);
 	if (entry == branches.end()) {
@@ -150,11 +150,13 @@ void BranchRegistry::SetDeltaTable(const string &branch, const string &source_ta
 			delta.removed = removed;
 			delta.added_oid = added_oid;
 			delta.removed_oid = removed_oid;
+			delta.source_oid = source_oid;
 			dirty.store(true);
 			return;
 		}
 	}
-	entry->second.deltas.push_back(Git4DataBranchDelta {source_table, added, removed, added_oid, removed_oid});
+	entry->second.deltas.push_back(
+	    Git4DataBranchDelta {source_table, added, removed, added_oid, removed_oid, source_oid});
 	dirty.store(true);
 }
 

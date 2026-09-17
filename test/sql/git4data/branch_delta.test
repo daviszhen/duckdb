@@ -455,3 +455,59 @@ statement error
 PRAGMA git4data_bind_branch_delta('t_f', 'fc', 'fc_add', 'fc_del')
 ----
 <REGEX>:.*inherits a line that differs by a delta.*
+
+# A delta is written in names too, and both its own tables and the source it applies to can be renamed
+# under it. The oids it recorded find them again - measured before this: renaming the added table dropped
+# the row it held, and renaming the source dropped the whole delta, both without a word.
+statement ok
+CREATE TABLE t_g (k INTEGER PRIMARY KEY, v INTEGER)
+
+statement ok
+INSERT INTO t_g SELECT range, range FROM range(10)
+
+statement ok
+PRAGMA git4data_create_branch('gd', '')
+
+statement ok
+CREATE TABLE gd_add (k INTEGER PRIMARY KEY, v INTEGER)
+
+statement ok
+CREATE TABLE gd_del (k INTEGER PRIMARY KEY)
+
+statement ok
+PRAGMA git4data_bind_branch_delta('t_g', 'gd', 'gd_add', 'gd_del')
+
+statement ok
+INSERT INTO gd_add VALUES (100, 100)
+
+statement ok
+INSERT INTO gd_del VALUES (3)
+
+query III
+SELECT (SELECT count(*) FROM t_g AT (BRANCH => 'gd')),
+       (SELECT count(*) FROM t_g AT (BRANCH => 'gd') WHERE k = 100),
+       (SELECT count(*) FROM t_g AT (BRANCH => 'gd') WHERE k = 3)
+----
+10	1	0
+
+statement ok
+ALTER TABLE gd_add RENAME TO gd_add2
+
+statement ok
+ALTER TABLE t_g RENAME TO t_g2
+
+query III
+SELECT (SELECT count(*) FROM t_g2 AT (BRANCH => 'gd')),
+       (SELECT count(*) FROM t_g2 AT (BRANCH => 'gd') WHERE k = 100),
+       (SELECT count(*) FROM t_g2 AT (BRANCH => 'gd') WHERE k = 3)
+----
+10	1	0
+
+# and writing to the renamed tables still lands on the branch
+statement ok
+INSERT INTO gd_add2 VALUES (200, 200)
+
+query I
+SELECT count(*) FROM t_g2 AT (BRANCH => 'gd')
+----
+11

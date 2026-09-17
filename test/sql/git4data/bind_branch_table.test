@@ -120,8 +120,30 @@ SELECT v FROM t_renamed AT (BRANCH => 'b') WHERE k = 5000
 ----
 -5000
 
+# the table the branch was *given* can be renamed too, and the mapping is written in names: the oid is
+# what finds it again, and the plan then carries the name it has now rather than the one it was given
+statement ok
+ALTER TABLE t_alt RENAME TO t_alt_renamed
+
+query II
+SELECT (SELECT count(*) FROM t_renamed AT (BRANCH => 'b')),
+       (SELECT v FROM t_renamed AT (BRANCH => 'b') WHERE k = 5000)
+----
+1	-5000
+
+statement ok
+UPDATE t_alt_renamed SET v = 5000 WHERE k = 5000
+
+query I
+SELECT v FROM t_renamed AT (BRANCH => 'b') WHERE k = 5000
+----
+5000
+
 # the name goes back, so the sections below still read the table they were written against - and the
 # mapping keeps following it, because it is the same table's oid either way
+statement ok
+ALTER TABLE t_alt_renamed RENAME TO t_alt
+
 statement ok
 ALTER TABLE t_renamed RENAME TO t
 
@@ -134,4 +156,4 @@ restart
 query II
 SELECT (SELECT count(*) FROM t AT (BRANCH => 'b')), (SELECT v FROM t AT (BRANCH => 'b') WHERE k = 5000)
 ----
-1	-5000
+1	5000

@@ -560,7 +560,7 @@ static void PragmaGit4DataBindBranchDelta(ClientContext &context, const Function
 		                            branch_name, source_table);
 	}
 	transaction_manager.branches.SetDeltaTable(branch_name, source_table, added_table, removed_table, added.oid,
-	                                           removed.oid);
+	                                           removed.oid, source.oid);
 }
 
 //! A copy-on-write clone of one file, which is what "zero-copy" means at this level: the copy costs
