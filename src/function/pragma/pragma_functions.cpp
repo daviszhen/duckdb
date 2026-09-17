@@ -628,6 +628,16 @@ static void PragmaGit4DataBindBranchTable(ClientContext &context, const Function
 	// both tables have to be there, or the mapping would be a promise the reads then have to break
 	auto &source_entry = Catalog::GetEntry<TableCatalogEntry>(context, QualifiedName(Identifier(source_table)));
 	auto &storage_entry = Catalog::GetEntry<TableCatalogEntry>(context, QualifiedName(Identifier(storage_table)));
+	// The read maps a branch's own table onto the source's columns *by position*, so the table has to have
+	// the source's columns in the source's order. Measured: a table holding (v, k) where the source holds
+	// (k, v) read back as k = 777 and v = 1 from a row that held k = 1 and v = 777. The delta path has
+	// always checked this for its two tables; the storage path did not.
+	if (storage_entry.GetColumns().GetColumnNames() != source_entry.GetColumns().GetColumnNames() ||
+	    storage_entry.GetColumns().GetColumnTypes() != source_entry.GetColumns().GetColumnTypes()) {
+		throw InvalidInputException("Table \"%s\" is read as the rows of \"%s\" for this branch, and a read maps "
+		                            "its columns by position - so it needs that table's columns, in that order.",
+		                            storage_table, source_table);
+	}
 	// A branch's own line has to be a table of its own. Pointed at the source itself the branch stops
 	// being a branch: measured, it then read the *live* table - 11 rows after a row was inserted and 6
 	// after five were deleted, where its pin held 10 either way.

@@ -359,7 +359,23 @@ static Git4DataLineState ResolveGit4DataLineState(ClientContext &context, DuckTr
 	state.delta_bound = at;
 	auto storage = Git4DataBranchStorageTable(context, branch, table_name);
 	if (!storage.empty()) {
-		// the branch's own line is a table: read as it is now, or as it stood at the commit asked for
+		// the branch's own line is a table: read as it is now, or as it stood at the commit asked for.
+		// Its columns are mapped onto the source's by position, so the shape is checked on every read as
+		// well as when it was bound: DDL afterwards can leave the table unable to stand in, and the read
+		// would otherwise swap or rename what a caller sees - measured, a table holding (v, k) read back
+		// as k = 777 and v = 1 from a row that held k = 1 and v = 777.
+		{
+			auto &source_entry = Catalog::GetEntry<TableCatalogEntry>(context, QualifiedName(Identifier(table_name)));
+			auto &storage_entry = Catalog::GetEntry<TableCatalogEntry>(context, QualifiedName(Identifier(storage)));
+			if (storage_entry.GetColumns().GetColumnNames() != source_entry.GetColumns().GetColumnNames() ||
+			    storage_entry.GetColumns().GetColumnTypes() != source_entry.GetColumns().GetColumnTypes()) {
+				throw InvalidInputException(
+				    "Branch \"%s\" reads table \"%s\" as its own line for \"%s\", and that table no longer has "
+				    "that table's columns in that order - a read maps them by position, so the values would be "
+				    "someone else's. Point the branch at a table of its own again with git4data_bind_branch_table.",
+				    branch.name, storage, table_name);
+			}
+		}
 		state.base_table = storage;
 		state.own_storage = true;
 	} else if (!branch.base_line.empty()) {

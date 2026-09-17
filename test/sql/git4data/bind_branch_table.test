@@ -218,3 +218,62 @@ query I
 SELECT v FROM t AT (BRANCH => 'b') WHERE k = 5000
 ----
 5000
+
+# A branch's own table stands in for the source, and the read maps its columns onto the source's *by
+# position* - so it has to have that table's columns in that order. Measured before this was checked: a
+# table holding (v, k) where the source holds (k, v) read back as k = 777 and v = 1 from a row that held
+# k = 1 and v = 777. The delta path has always checked its two tables; the storage path did not.
+statement ok
+CREATE TABLE t_reordered (v INTEGER, k INTEGER PRIMARY KEY)
+
+statement ok
+INSERT INTO t_reordered VALUES (777, 1)
+
+statement error
+PRAGMA git4data_bind_branch_table('t', 'b', 't_reordered')
+----
+<REGEX>:.*a read maps its columns by position.*
+
+statement ok
+CREATE TABLE t_extra (k INTEGER PRIMARY KEY, v INTEGER, w INTEGER)
+
+statement error
+PRAGMA git4data_bind_branch_table('t', 'b', 't_extra')
+----
+<REGEX>:.*a read maps its columns by position.*
+
+# and the shape is checked on every read as well, because DDL afterwards can leave the table unable to
+# stand in - the read would otherwise hand a caller someone else's values
+statement ok
+CREATE TABLE t_ddl (k INTEGER PRIMARY KEY, v INTEGER)
+
+statement ok
+INSERT INTO t_ddl SELECT range, range FROM range(10)
+
+statement ok
+PRAGMA git4data_create_branch('ddl_branch', '')
+
+statement ok
+PRAGMA git4data_bind_branch_table('t', 'ddl_branch', 't_ddl')
+
+query I
+SELECT count(*) FROM t AT (BRANCH => 'ddl_branch')
+----
+10
+
+statement ok
+ALTER TABLE t_ddl ADD COLUMN w INTEGER
+
+statement error
+SELECT count(*) FROM t AT (BRANCH => 'ddl_branch')
+----
+<REGEX>:.*reads table "t_ddl" as its own line.*no longer has that table's columns.*
+
+# putting it back is the way out
+statement ok
+ALTER TABLE t_ddl DROP COLUMN w
+
+query I
+SELECT count(*) FROM t AT (BRANCH => 'ddl_branch')
+----
+10
