@@ -114,6 +114,31 @@ PRAGMA git4data_bind_branch_delta('nokey', 'base', 'same_columns', 'same_columns
 ----
 <REGEX>:.*has no primary key, so a delta cannot say which rows it removes.*
 
+# One table cannot be both sides of a delta: the added rows are rows the branch *has* and the removed
+# keys are keys it does not, so a key in the same table for both means a row hidden and shown at once.
+# A source whose only column is its key satisfies both column checks, which is how this was reachable -
+# measured before the refusal: a delete written through such a delta left the row visible while the
+# table quietly gained its key.
+statement ok
+CREATE TABLE keys_only (k INTEGER PRIMARY KEY)
+
+statement ok
+INSERT INTO keys_only SELECT range FROM range(10)
+
+statement ok
+CHECKPOINT
+
+statement ok
+PRAGMA git4data_create_branch('keys_branch', '')
+
+statement ok
+CREATE TABLE keys_both (k INTEGER PRIMARY KEY)
+
+statement error
+PRAGMA git4data_bind_branch_delta('keys_only', 'keys_branch', 'keys_both', 'keys_both')
+----
+<REGEX>:.*cannot hold both the rows added to.*
+
 statement error
 PRAGMA git4data_bind_branch_delta('t', 'missing', 't_add', 't_del')
 ----

@@ -689,6 +689,16 @@ static void PragmaGit4DataBindBranchDelta(ClientContext &context, const Function
 		                            "%llu key column(s), in the order the source declares them",
 		                            removed_table, source_table, expected_key_names.size());
 	}
+	// One table cannot be both sides of a delta: the added rows are rows the branch *has* and the removed
+	// keys are keys it does *not*, so a key in the same table for both means a row that is hidden and
+	// shown at once. A source table whose only column is its key satisfies both column checks, which is
+	// how this was reachable at all - measured: a delete written through such a delta left the row
+	// visible while the table quietly gained its key.
+	if (added.oid == removed.oid) {
+		throw InvalidInputException("Table \"%s\" cannot hold both the rows added to \"%s\" and the keys removed "
+		                            "from it: the two sides mean opposite things. Name two tables.",
+		                            added_table, source_table);
+	}
 	// A branch that inherited a line which differs by a delta would have to apply two of them, and a read
 	// cannot. Refusing here rather than at the first read is the same rule the rest of this file follows:
 	// nothing is promised that the reads cannot deliver.
