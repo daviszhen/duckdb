@@ -57,6 +57,14 @@ static string Git4DataKeyString(DataChunk &chunk, const vector<idx_t> &positions
 	return key;
 }
 
+//! How many removed keys a read will build hashes for. Past this the strings decide alone, which keeps a
+//! read's memory at what the strings cost: 77 bytes a key measured, against 77 plus the hash set's own
+//! footprint. The figure is where the trade stops paying - the hashes saved 0.754 s at 500,000 keys and
+//! cost 25.2 MB there, against 0.549 s saved and 1 MB at 400,000 rows with one key.
+constexpr idx_t Git4DataHashKeysLimit() {
+	return 100000;
+}
+
 //! The hash of a row's key tuple, computed from the chunk's vectors rather than from the key string.
 //! It is never the answer - the string above is - but building a string for every row of a table to
 //! find the few a delta removed is what made a delta read cost about 1.4 us a row (measured, 0.554 s
@@ -98,7 +106,8 @@ static TransactionData Git4DataDeltaTransactionData(ClientContext &context, opti
 //! arbitrary columns and this is the only place the tuple is compared, so it is held as one string.
 static void Git4DataCollectRemovedKeys(ClientContext &context, const string &removed_table,
                                        const vector<LogicalType> &key_types, idx_t key_count, VisibilityBound bound,
-                                       unordered_set<string> &result, unordered_set<hash_t> &hashes_result) {
+                                       unordered_set<string> &result, unordered_set<hash_t> &hashes_result,
+                                       bool &hashes_usable) {
 	if (removed_table.empty()) {
 		return;
 	}
@@ -124,10 +133,34 @@ static void Git4DataCollectRemovedKeys(ClientContext &context, const string &rem
 	QueryContext query_context;
 	groups.InitializeScan(query_context, scan.table_state, removed_ids, nullptr);
 	ScanOptions options(Git4DataDeltaTransactionData(context, table.GetStorage().GetAttached(), bound));
+	// The hashes are a fast path for the common delta - a handful of keys against a large base, where
+	// they turn a per-row string build into one hash lookup and measured 0.554 s into 0.005 s on 400,000
+	// rows. They are also a second set, and one that costs memory the strings already cost: at 500,000
+	// removed keys a read peaks at 84.6 MB with them against 59.4 MB without, and the win at that size is
+	// only 1.968 s into 1.214 s. So they are built only for a removed side that is small, and whether they
+	// will be is decided here, from the size of that table before anything is read: a set that was
+	// *dropped* part-way would answer every lookup with "not in it" and be read as a complete answer -
+	// which is what the first version of this did, and what delta_large.test caught (301,001 rows where
+	// the branch held 201,000).
+	// The decision is made up front from the size of that table, and the flag says whether what ends up in
+	// the set is the *whole* removed side: the set is cleared, and the flag with it, the moment it passes
+	// the limit - a set dropped part-way would answer every lookup with "not in it" and be read as a
+	// complete answer, which is what delta_large.test caught (301,001 rows where the branch held 201,000).
+	// A removed side that is not on disk yet - rows the caller wrote and has not committed - reports no
+	// rows here, so the running size is what turns the hashes off for those.
+	hashes_usable = groups.GetTotalRows() <= Git4DataHashKeysLimit();
 	auto collect = [&]() {
-		Git4DataHashKeyColumns(chunk, positions, hashes);
+		if (hashes_usable) {
+			Git4DataHashKeyColumns(chunk, positions, hashes);
+		}
 		for (idx_t row = 0; row < chunk.size(); row++) {
-			hashes_result.insert(Git4DataRowKeyHash(hashes, row));
+			if (hashes_usable) {
+				hashes_result.insert(Git4DataRowKeyHash(hashes, row));
+				if (result.size() > Git4DataHashKeysLimit()) {
+					hashes_result.clear();
+					hashes_usable = false;
+				}
+			}
 			result.insert(Git4DataKeyString(chunk, positions, row));
 		}
 	};
@@ -170,8 +203,10 @@ struct Git4DataSnapshotScanState : public GlobalTableFunctionState {
 	//! Where the key columns sit in the scanned columns, so a row's key can be built from a chunk
 	vector<idx_t> key_positions;
 	unordered_set<string> removed_keys;
-	//! The hashes of those keys, so a row that cannot be one of them is not turned into a string
+	//! The hashes of those keys, so a row that cannot be one of them is not turned into a string, and
+	//! whether that set is the whole removed side - past a limit it is not built at all
 	unordered_set<hash_t> removed_key_hashes;
+	bool hashes_usable = false;
 	DataChunk key_hashes;
 	//! The database the delta's tables live in, so a scan of them can run under the caller's transaction
 	optional_ptr<AttachedDatabase> delta_database;
@@ -620,7 +655,8 @@ static unique_ptr<GlobalTableFunctionState> Git4DataSnapshotScanInit(ClientConte
 		result->added_storage = added_table.GetStorage();
 	}
 	Git4DataCollectRemovedKeys(context, bind_data.delta_removed, ordered_key_types, key_columns.size(),
-	                           bind_data.delta_bound, result->removed_keys, result->removed_key_hashes);
+	                           bind_data.delta_bound, result->removed_keys, result->removed_key_hashes,
+	                           result->hashes_usable);
 	// the delta's own tables are read as the caller has them, so their database is remembered here
 	if (!bind_data.delta_removed.empty()) {
 		auto &removed_entry =
@@ -691,12 +727,17 @@ static void Git4DataSnapshotScanFunction(ClientContext &context, TableFunctionIn
 		}
 		SelectionVector kept(count);
 		idx_t kept_count = 0;
-		Git4DataHashKeyColumns(state.scan_chunk, state.key_positions, state.key_hashes);
+		// an empty set means this read did not build hashes at all - a removed side past the limit - and
+		// then every row goes to the exact comparison below
+		auto use_hashes = state.hashes_usable;
+		if (use_hashes) {
+			Git4DataHashKeyColumns(state.scan_chunk, state.key_positions, state.key_hashes);
+		}
 		for (idx_t row = 0; row < count; row++) {
 			// the hash decides nothing on its own: a row it does not match cannot be a removed row, and
 			// one it does gets the exact comparison, so the answer is the string's, as it always was
-			if (state.removed_key_hashes.find(Git4DataRowKeyHash(state.key_hashes, row)) ==
-			    state.removed_key_hashes.end()) {
+			if (use_hashes && state.removed_key_hashes.find(Git4DataRowKeyHash(state.key_hashes, row)) ==
+			                      state.removed_key_hashes.end()) {
 				kept.set_index(kept_count++, row);
 				continue;
 			}
@@ -827,6 +868,9 @@ struct Git4DataDiffState : public GlobalTableFunctionState {
 	bool right_local_open = false;
 	bool left_own_storage = false;
 	bool right_own_storage = false;
+	//! Whether each side's hash set is the whole removed side
+	bool left_hashes_usable = false;
+	bool right_hashes_usable = false;
 	//! Whether each side has opened the added scan yet: it is consumed as it walks and the state is
 	//! shared, so a side that found it already open would read no added rows at all - which is what a
 	//! diff of a reference against itself did, reporting its own added row as a removed one.
@@ -1097,10 +1141,11 @@ static unique_ptr<GlobalTableFunctionState> Git4DataDiffInit(ClientContext &cont
 	result->key_hashes.Initialize(Allocator::Get(context), hash_types);
 	// what each side removed from its base, read once: a side that differs by a delta is not the table
 	Git4DataCollectRemovedKeys(context, bind_data.left_delta_removed, bind_data.key_types, bind_data.key_columns.size(),
-	                           bind_data.left_delta_bound, result->left_removed_keys, result->left_removed_key_hashes);
+	                           bind_data.left_delta_bound, result->left_removed_keys, result->left_removed_key_hashes,
+	                           result->left_hashes_usable);
 	Git4DataCollectRemovedKeys(context, bind_data.right_delta_removed, bind_data.key_types,
 	                           bind_data.key_columns.size(), bind_data.right_delta_bound, result->right_removed_keys,
-	                           result->right_removed_key_hashes);
+	                           result->right_removed_key_hashes, result->right_hashes_usable);
 	{
 		auto delta_table = !bind_data.left_delta_removed.empty()    ? bind_data.left_delta_removed
 		                   : !bind_data.left_delta_added.empty()    ? bind_data.left_delta_added
@@ -1141,10 +1186,10 @@ static unique_ptr<GlobalTableFunctionState> Git4DataDiffInit(ClientContext &cont
 //! the ones that can.
 static bool Git4DataDiffRowRemoved(Git4DataDiffState &state, const vector<idx_t> &key_positions,
                                    const unordered_set<string> *removed_keys,
-                                   const unordered_set<hash_t> *removed_key_hashes, idx_t row) {
+                                   const unordered_set<hash_t> *removed_key_hashes, bool hashes_usable, idx_t row) {
 	// a table with no primary key has no key columns to hash, and then there is nothing to skip: the
 	// comparison below is the same empty key it was before this fast path existed
-	if (removed_key_hashes && state.key_hashes.ColumnCount() > 0 &&
+	if (removed_key_hashes && hashes_usable && state.key_hashes.ColumnCount() > 0 &&
 	    removed_key_hashes->find(Git4DataRowKeyHash(state.key_hashes, row)) == removed_key_hashes->end()) {
 		return false;
 	}
@@ -1155,9 +1200,9 @@ static bool Git4DataDiffRowRemoved(Git4DataDiffState &state, const vector<idx_t>
 static void Git4DataDiffCollect(ClientContext &context, Git4DataDiffState &state, TableScanState &scan,
                                 VisibilityBound bound, const string &added_table, VisibilityBound added_bound,
                                 const unordered_set<string> *removed_keys,
-                                const unordered_set<hash_t> *removed_key_hashes, optional_ptr<DataTable> side_storage,
-                                bool side_own_storage, bool &side_local_open, bool &side_added_open,
-                                bool &side_added_local_open,
+                                const unordered_set<hash_t> *removed_key_hashes, bool hashes_usable,
+                                optional_ptr<DataTable> side_storage, bool side_own_storage, bool &side_local_open,
+                                bool &side_added_open, bool &side_added_local_open,
                                 const std::function<void(DataChunk &, row_t, idx_t)> &callback) {
 	// the key columns come first in the scan, so their positions are the first key_count columns
 	vector<idx_t> key_positions;
@@ -1190,14 +1235,15 @@ static void Git4DataDiffCollect(ClientContext &context, Git4DataDiffState &state
 		if (count == 0) {
 			break;
 		}
-		if (removed_key_hashes && state.key_hashes.ColumnCount() > 0) {
+		if (removed_key_hashes && hashes_usable && state.key_hashes.ColumnCount() > 0) {
 			Git4DataHashKeyColumns(state.scan_chunk, key_positions, state.key_hashes);
 		}
 		// the row id column is not necessarily flat - a scan may hand back a dictionary
 		// the row id sits after the keys, and after the values when those are carried too
 		auto row_ids = state.scan_chunk.data[state.key_count + state.value_count].Values<row_t>();
 		for (idx_t i = 0; i < count; i++) {
-			if (removed_keys && Git4DataDiffRowRemoved(state, key_positions, removed_keys, removed_key_hashes, i)) {
+			if (removed_keys &&
+			    Git4DataDiffRowRemoved(state, key_positions, removed_keys, removed_key_hashes, hashes_usable, i)) {
 				// this side removed the row from its base, so it is not part of what the side holds
 				continue;
 			}
@@ -1332,8 +1378,8 @@ static void Git4DataDiffFunction(ClientContext &context, TableFunctionInput &dat
 		if (state.phase == Git4DataDiffState::Phase::LEFT) {
 			Git4DataDiffCollect(
 			    context, state, state.left_scan, state.left_bound, state.left_added_table, state.left_delta_bound,
-			    &state.left_removed_keys, &state.left_removed_key_hashes, state.left_storage, state.left_own_storage,
-			    state.left_local_open, state.left_added_open, state.left_added_local_open,
+			    &state.left_removed_keys, &state.left_removed_key_hashes, state.left_hashes_usable, state.left_storage,
+			    state.left_own_storage, state.left_local_open, state.left_added_open, state.left_added_local_open,
 			    [&](DataChunk &chunk, row_t row_id, idx_t row) {
 				    auto key = Git4DataDiffRowKey(chunk, state.key_count, row);
 				    Git4DataDiffState::KeyedRow entry;
@@ -1349,9 +1395,9 @@ static void Git4DataDiffFunction(ClientContext &context, TableFunctionInput &dat
 			unordered_set<string> matched;
 			Git4DataDiffCollect(
 			    context, state, state.right_scan, state.right_bound, state.right_added_table, state.right_delta_bound,
-			    &state.right_removed_keys, &state.right_removed_key_hashes, state.right_storage,
-			    state.right_own_storage, state.right_local_open, state.right_added_open, state.right_added_local_open,
-			    [&](DataChunk &chunk, row_t row_id, idx_t row) {
+			    &state.right_removed_keys, &state.right_removed_key_hashes, state.right_hashes_usable,
+			    state.right_storage, state.right_own_storage, state.right_local_open, state.right_added_open,
+			    state.right_added_local_open, [&](DataChunk &chunk, row_t row_id, idx_t row) {
 				    auto key = Git4DataDiffRowKey(chunk, state.key_count, row);
 				    auto hash = Git4DataDiffKeyHash(key);
 				    auto entry = state.left_by_key.find(hash);
@@ -1400,8 +1446,9 @@ static void Git4DataDiffFunction(ClientContext &context, TableFunctionInput &dat
 	if (state.phase == Git4DataDiffState::Phase::LEFT) {
 		Git4DataDiffCollect(context, state, state.left_scan, state.left_bound, state.left_added_table,
 		                    state.left_delta_bound, &state.left_removed_keys, &state.left_removed_key_hashes,
-		                    state.left_storage, state.left_own_storage, state.left_local_open, state.left_added_open,
-		                    state.left_added_local_open, [&](DataChunk &chunk, row_t row_id, idx_t row) {
+		                    state.left_hashes_usable, state.left_storage, state.left_own_storage, state.left_local_open,
+		                    state.left_added_open, state.left_added_local_open,
+		                    [&](DataChunk &chunk, row_t row_id, idx_t row) {
 			                    state.left_rows.insert(row_id);
 			                    if (state.key_count > 0) {
 				                    state.left_keys.emplace(row_id, Git4DataDiffRowKey(chunk, state.key_count, row));
@@ -1413,8 +1460,8 @@ static void Git4DataDiffFunction(ClientContext &context, TableFunctionInput &dat
 		vector<pair<row_t, vector<Value>>> added_rows;
 		Git4DataDiffCollect(context, state, state.right_scan, state.right_bound, state.right_added_table,
 		                    state.right_delta_bound, &state.right_removed_keys, &state.right_removed_key_hashes,
-		                    state.right_storage, state.right_own_storage, state.right_local_open,
-		                    state.right_added_open, state.right_added_local_open,
+		                    state.right_hashes_usable, state.right_storage, state.right_own_storage,
+		                    state.right_local_open, state.right_added_open, state.right_added_local_open,
 		                    [&](DataChunk &chunk, row_t row_id, idx_t row) {
 			                    state.right_rows.insert(row_id);
 			                    if (state.left_rows.find(row_id) == state.left_rows.end()) {
