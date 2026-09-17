@@ -204,3 +204,17 @@ statement error
 SELECT count(*) FROM r1_m2
 ----
 <REGEX>:.*Table with name r1_m2 does not exist.*
+
+# A branch's own line has to be a table of its own. Pointed at the source itself the branch stops being a
+# branch: measured before this was refused, it read the *live* table - 11 rows after a row was inserted
+# and 6 after five were deleted, where its pin held 10 either way.
+statement error
+PRAGMA git4data_bind_branch_table('t', 'b', 't')
+----
+<REGEX>:.*is "t" itself, and a branch's own line has to be a table of its own.*
+
+# the branch is untouched by the refusal and still reads its own table
+query I
+SELECT v FROM t AT (BRANCH => 'b') WHERE k = 5000
+----
+5000

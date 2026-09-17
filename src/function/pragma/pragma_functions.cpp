@@ -628,6 +628,15 @@ static void PragmaGit4DataBindBranchTable(ClientContext &context, const Function
 	// both tables have to be there, or the mapping would be a promise the reads then have to break
 	auto &source_entry = Catalog::GetEntry<TableCatalogEntry>(context, QualifiedName(Identifier(source_table)));
 	auto &storage_entry = Catalog::GetEntry<TableCatalogEntry>(context, QualifiedName(Identifier(storage_table)));
+	// A branch's own line has to be a table of its own. Pointed at the source itself the branch stops
+	// being a branch: measured, it then read the *live* table - 11 rows after a row was inserted and 6
+	// after five were deleted, where its pin held 10 either way.
+	if (source_entry.oid == storage_entry.oid) {
+		throw InvalidInputException("Table \"%s\" is \"%s\" itself, and a branch's own line has to be a table "
+		                            "of its own - given the source, the branch reads the live table instead of the "
+		                            "state it pins. Materialize the branch to get a copy.",
+		                            storage_table, source_table);
+	}
 	// both oids go with the mapping: the storage table's so a read can tell it from another table that
 	// takes its name after it is dropped, and the source's so the mapping follows the source if it is
 	// renamed
@@ -688,6 +697,22 @@ static void PragmaGit4DataBindBranchDelta(ClientContext &context, const Function
 		throw InvalidInputException("Table \"%s\" holds the keys removed from \"%s\", so it needs exactly those "
 		                            "%llu key column(s), in the order the source declares them",
 		                            removed_table, source_table, expected_key_names.size());
+	}
+	// Neither side of a delta can be the source itself: the added rows are read *as* rows of it, so the
+	// same table there means every row is read twice and the branch follows the live table - measured, a
+	// ten-row source with itself as the added table read twenty rows and then twenty-one; and the keys
+	// removed from it are keys of the live table, which the branch would hide by.
+	if (added.oid == source.oid) {
+		throw InvalidInputException("Table \"%s\" cannot hold the rows added to it: a branch's delta adds rows "
+		                            "to what it inherits, so the added table has to be one of its own. Every row "
+		                            "would be read twice, and the branch would follow the live table.",
+		                            added_table);
+	}
+	if (removed.oid == source.oid) {
+		throw InvalidInputException("Table \"%s\" cannot hold the keys removed from it: those keys are the live "
+		                            "table's own rows, which the branch would then hide. The removed table has to "
+		                            "be one of the branch's.",
+		                            removed_table);
 	}
 	// One table cannot be both sides of a delta: the added rows are rows the branch *has* and the removed
 	// keys are keys it does *not*, so a key in the same table for both means a row that is hidden and

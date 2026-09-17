@@ -139,6 +139,20 @@ PRAGMA git4data_bind_branch_delta('keys_only', 'keys_branch', 'keys_both', 'keys
 ----
 <REGEX>:.*cannot hold both the rows added to.*
 
+# Neither side of a delta can be the source table itself. The added rows are read *as* rows of it, so
+# the same table there means every row is read twice and the branch follows the live table - measured
+# before this was refused, a ten-row source with itself as the added table read twenty rows and then
+# twenty-one once the live table grew. The removed keys would be the live table's own rows.
+statement error
+PRAGMA git4data_bind_branch_delta('keys_only', 'keys_branch', 'keys_only', 'keys_both')
+----
+<REGEX>:.*cannot hold the rows added to it.*
+
+statement error
+PRAGMA git4data_bind_branch_delta('keys_only', 'keys_branch', 'keys_both', 'keys_only')
+----
+<REGEX>:.*cannot hold the keys removed from it.*
+
 statement error
 PRAGMA git4data_bind_branch_delta('t', 'missing', 't_add', 't_del')
 ----
