@@ -469,11 +469,13 @@ static void PragmaGit4DataBindBranchTable(ClientContext &context, const Function
 		throw InvalidInputException("Branch \"%s\" does not exist", branch_name);
 	}
 	// both tables have to be there, or the mapping would be a promise the reads then have to break
-	Catalog::GetEntry<TableCatalogEntry>(context, QualifiedName(Identifier(source_table)));
+	auto &source_entry = Catalog::GetEntry<TableCatalogEntry>(context, QualifiedName(Identifier(source_table)));
 	auto &storage_entry = Catalog::GetEntry<TableCatalogEntry>(context, QualifiedName(Identifier(storage_table)));
-	// the table's oid goes with the mapping, so a read can tell this table from another one that takes
-	// its name after it is dropped
-	transaction_manager.branches.SetStorageTable(branch_name, source_table, storage_table, storage_entry.oid);
+	// both oids go with the mapping: the storage table's so a read can tell it from another table that
+	// takes its name after it is dropped, and the source's so the mapping follows the source if it is
+	// renamed
+	transaction_manager.branches.SetStorageTable(branch_name, source_table, storage_table, storage_entry.oid,
+	                                             source_entry.oid);
 	// the copy is the branch's line from here on, so a delta beside it would be a second one that nothing
 	// reads - the branch reads its own table the moment it has one
 	transaction_manager.branches.ClearDeltaTable(branch_name, source_table);

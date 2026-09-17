@@ -104,6 +104,11 @@ struct Git4DataStorageTable {
 	string source;
 	string storage;
 	idx_t oid = 0;
+	//! The source table's own oid when the mapping was made. A source table can be *renamed*, and the
+	//! mapping is keyed by its name, so without this the branch would silently fall back to its pinned
+	//! image and stop reading the line it was given - measured. The catalog's oids survive a rename, so
+	//! a read whose name does not match can still recognise the table it was given.
+	idx_t source_oid = 0;
 };
 
 //! What a branch changes about one source table when it holds no copy of it. Both tables are the
@@ -185,7 +190,7 @@ public:
 	//! Give a branch its own table for a source table, so writes to it no longer touch the source. The
 	//! oid is the table's, and is checked again on every read.
 	void SetStorageTable(const string &branch, const string &source_table, const string &storage_table,
-	                     idx_t storage_oid = 0);
+	                     idx_t storage_oid = 0, idx_t source_oid = 0);
 	//! Record that a branch differs from its base by a delta rather than by a copy of it. A branch with a
 	//! table of its own for this source keeps that instead: one line, one source of truth.
 	void SetDeltaTable(const string &branch, const string &source_table, const string &added, const string &removed,

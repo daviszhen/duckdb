@@ -98,6 +98,33 @@ SELECT (SELECT count(*) FROM t AT (BRANCH => 'b')), (SELECT v FROM t AT (BRANCH 
 ----
 1	5000
 
+# A source table can be renamed, and the mapping is keyed by the source's *name* - so without the source's
+# oid the name would match nothing, and the branch would silently read its pinned image instead of the
+# line it holds. Measured before this: after the rename the branch read ten rows of the pinned image where
+# it holds one row of its own table.
+statement ok
+ALTER TABLE t RENAME TO t_renamed
+
+query II
+SELECT (SELECT count(*) FROM t_renamed AT (BRANCH => 'b')),
+       (SELECT v FROM t_renamed AT (BRANCH => 'b') WHERE k = 5000)
+----
+1	5000
+
+# and the branch's own table is still the thing it reads, so a write to it shows through the new name
+statement ok
+UPDATE t_alt SET v = -5000 WHERE k = 5000
+
+query I
+SELECT v FROM t_renamed AT (BRANCH => 'b') WHERE k = 5000
+----
+-5000
+
+# the name goes back, so the sections below still read the table they were written against - and the
+# mapping keeps following it, because it is the same table's oid either way
+statement ok
+ALTER TABLE t_renamed RENAME TO t
+
 # and the binding survives a reopen, because it is part of the branch
 statement ok
 CHECKPOINT
@@ -107,4 +134,4 @@ restart
 query II
 SELECT (SELECT count(*) FROM t AT (BRANCH => 'b')), (SELECT v FROM t AT (BRANCH => 'b') WHERE k = 5000)
 ----
-1	5000
+1	-5000

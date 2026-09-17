@@ -117,9 +117,17 @@ struct Git4DataSnapshotScanState : public GlobalTableFunctionState {
 //! catalog's oids do not survive a reopen.
 static string Git4DataBranchStorageTable(ClientContext &context, const Git4DataBranch &branch,
                                          const string &table_name) {
+	// The mapping is keyed by the source table's *name*, and a source table can be renamed. The name it
+	// was given under then matches nothing, and the branch would silently read its pinned image instead of
+	// the line it holds - measured. The source's oid survives a rename, so a name that matches nothing is
+	// looked up by oid as well, and the mapping follows the table it was made against.
+	auto requested = Catalog::GetEntry<TableCatalogEntry>(context, QualifiedName(Identifier(table_name)),
+	                                                      OnEntryNotFound::RETURN_NULL);
 	for (auto &entry : branch.storage_tables) {
 		if (entry.source != table_name) {
-			continue;
+			if (!requested || entry.source_oid == 0 || entry.source_oid != requested->oid) {
+				continue;
+			}
 		}
 		auto storage = Catalog::GetEntry<TableCatalogEntry>(context, QualifiedName(Identifier(entry.storage)),
 		                                                    OnEntryNotFound::RETURN_NULL);
