@@ -1,0 +1,133 @@
+# name: test/sql/git4data/concurrent_write.test
+# description: Two connections writing one branch's delta, and what each of them sees
+# group: [git4data]
+
+load {TEST_DIR}/concurrent_write.db
+
+# The write path is ordinary DML against two tables of the caller's, so two connections writing one branch
+# is two connections writing those tables. What that has to give is what any table gives: committed writes
+# visible to the other connection, a transaction's own writes visible to itself and to nobody else, and a
+# rollback that takes them away. None of that was pinned by a test before this file.
+statement ok
+CREATE TABLE t (k INTEGER PRIMARY KEY, v INTEGER)
+
+statement ok
+INSERT INTO t SELECT range, range FROM range(10)
+
+statement ok
+CHECKPOINT
+
+statement ok
+PRAGMA git4data_create_branch('b', '')
+
+statement ok
+CREATE TABLE t_add (k INTEGER PRIMARY KEY, v INTEGER)
+
+statement ok
+CREATE TABLE t_del (k INTEGER PRIMARY KEY)
+
+statement ok
+PRAGMA git4data_bind_branch_delta('t', 'b', 't_add', 't_del')
+
+statement ok con1
+PRAGMA git4data_apply('t', 'b', 'UPDATE t SET v = 111 WHERE k = 1')
+
+# a second connection reads what the first committed, through the branch
+query I con2
+SELECT v FROM t AT (BRANCH => 'b') WHERE k = 1
+----
+111
+
+# and writes its own change, on another key
+statement ok con2
+PRAGMA git4data_apply('t', 'b', 'UPDATE t SET v = 222 WHERE k = 2')
+
+query II con1
+SELECT (SELECT v FROM t AT (BRANCH => 'b') WHERE k = 1), (SELECT v FROM t AT (BRANCH => 'b') WHERE k = 2)
+----
+111	222
+
+# A transaction that has written the branch has not committed it: the connection that wrote it sees the
+# write, the other does not.
+statement ok con1
+BEGIN
+
+statement ok con1
+PRAGMA git4data_apply('t', 'b', 'UPDATE t SET v = 999 WHERE k = 3')
+
+query I con1
+SELECT v FROM t AT (BRANCH => 'b') WHERE k = 3
+----
+999
+
+query I con2
+SELECT v FROM t AT (BRANCH => 'b') WHERE k = 3
+----
+3
+
+# the other connection writes a different key while that transaction is open
+statement ok con2
+PRAGMA git4data_apply('t', 'b', 'UPDATE t SET v = 444 WHERE k = 4')
+
+statement ok con1
+ROLLBACK
+
+query II con1
+SELECT (SELECT v FROM t AT (BRANCH => 'b') WHERE k = 3), (SELECT v FROM t AT (BRANCH => 'b') WHERE k = 4)
+----
+3	444
+
+# Both connections changing the same key, one after the other, leaves one row holding the later value:
+# an update in a delta is a removal and an addition of that key, so the second writing connection takes
+# the first's added row out before adding its own.
+statement ok con1
+PRAGMA git4data_apply('t', 'b', 'UPDATE t SET v = 555 WHERE k = 5')
+
+statement ok con2
+PRAGMA git4data_apply('t', 'b', 'UPDATE t SET v = 666 WHERE k = 5')
+
+query II con1
+SELECT (SELECT v FROM t AT (BRANCH => 'b') WHERE k = 5), (SELECT count(*) FROM t AT (BRANCH => 'b') WHERE k = 5)
+----
+666	1
+
+# Two transactions that both change one key from the same starting point cannot both commit: each of them
+# added a row for that key, and the added table's primary key refuses the second. Measured - the failure
+# is at commit time and says which key, rather than one of the two silently winning.
+statement ok con1
+BEGIN
+
+statement ok con1
+PRAGMA git4data_apply('t', 'b', 'UPDATE t SET v = 111 WHERE k = 6')
+
+statement ok con2
+BEGIN
+
+statement ok con2
+PRAGMA git4data_apply('t', 'b', 'UPDATE t SET v = 222 WHERE k = 6')
+
+statement ok con1
+COMMIT
+
+statement error con2
+COMMIT
+----
+<REGEX>:.*duplicate key.*
+
+# what stands is the first commit, one row for that key, and the other transaction rolls its work back
+query II con1
+SELECT (SELECT v FROM t AT (BRANCH => 'b') WHERE k = 6), (SELECT count(*) FROM t AT (BRANCH => 'b') WHERE k = 6)
+----
+111	1
+
+# a refused commit ends that transaction itself, so the connection is usable straight away
+query I con2
+SELECT count(*) FROM t AT (BRANCH => 'b') WHERE k = 6
+----
+1
+
+# and the live table never took any of it
+query II con2
+SELECT (SELECT v FROM t WHERE k = 3), (SELECT v FROM t WHERE k = 5)
+----
+3	5
