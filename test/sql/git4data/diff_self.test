@@ -1,0 +1,105 @@
+# name: test/sql/git4data/diff_self.test
+# description: A reference against itself differs in nothing, including when it holds a delta
+# group: [git4data]
+
+load {TEST_DIR}/diff_self.db
+
+# The diff walks the added table of each side, and that walk is consumed as it goes. The two sides share
+# the state that holds it, so a side that found it already open read no added rows at all - which made a
+# diff of a reference against itself report its own added row as removed. Measured before this, on a
+# branch whose delta had replaced one key (a key in both the hidden set and the added rows, which is what
+# an update is in a delta's terms):
+#
+#   SELECT g4d_change, k FROM git4data_diff('t','b','b');   -- removed 1
+#   PRAGMA git4data_pick('t','b','b');                      -- a no-op, and the live table lost k = 1
+#
+# The second line is why this matters: the pick diffs the source against the base, so a self-pick
+# computed that phantom removal and applied it.
+statement ok
+CREATE TABLE t (k INTEGER PRIMARY KEY, v INTEGER)
+
+statement ok
+INSERT INTO t SELECT range, range FROM range(10)
+
+statement ok
+CHECKPOINT
+
+statement ok
+PRAGMA git4data_create_branch('b', '')
+
+statement ok
+CREATE TABLE t_add (k INTEGER PRIMARY KEY, v INTEGER)
+
+statement ok
+CREATE TABLE t_del (k INTEGER PRIMARY KEY)
+
+statement ok
+PRAGMA git4data_bind_branch_delta('t', 'b', 't_add', 't_del')
+
+query I
+SELECT count(*) FROM git4data_diff('t', 'b', 'b')
+----
+0
+
+# an update puts the key in both tables of the delta: the base row is hidden and the new one is added
+statement ok
+PRAGMA git4data_apply('t', 'b', 'UPDATE t SET v = 111 WHERE k = 1')
+
+query I
+SELECT count(*) FROM git4data_diff('t', 'b', 'b')
+----
+0
+
+# a delete, an insert and a rewritten key all leave a self-diff empty too
+statement ok
+PRAGMA git4data_apply('t', 'b', 'DELETE FROM t WHERE k = 2; INSERT INTO t VALUES (500, 500)')
+
+statement ok
+PRAGMA git4data_apply('t', 'b', 'UPDATE t SET k = 600 WHERE k = 3')
+
+query I
+SELECT count(*) FROM git4data_diff('t', 'b', 'b')
+----
+0
+
+# and a pick of a reference from itself changes nothing, which is what a no-op has to do
+query III
+SELECT (SELECT count(*) FROM t), (SELECT count(*) FROM t WHERE k = 1), (SELECT count(*) FROM t WHERE k = 3)
+----
+10	1	1
+
+statement ok
+PRAGMA git4data_pick('t', 'b', 'b')
+
+query III
+SELECT (SELECT count(*) FROM t), (SELECT count(*) FROM t WHERE k = 1), (SELECT count(*) FROM t WHERE k = 3)
+----
+10	1	1
+
+# The same bookkeeping is what a captured line needs: two references of one branch share its added table
+# and differ only in the commit their delta is read at, so the second side has to walk that table itself
+# and at its own bound.
+statement ok
+PRAGMA git4data_create_snapshot('cap', 'b')
+
+statement ok
+PRAGMA git4data_apply('t', 'b', 'INSERT INTO t VALUES (900, 900)')
+
+query II
+SELECT g4d_change, k FROM git4data_diff('t', 'cap', 'b')
+----
+added	900
+
+query II
+SELECT g4d_change, k FROM git4data_diff('t', 'b', 'cap')
+----
+removed	900
+
+# and the pick built on the same diff takes the branch's added row onto the live table
+statement ok
+PRAGMA git4data_pick('t', 'b', 'cap', 'fail')
+
+query I
+SELECT count(*) FROM t WHERE k = 900
+----
+1

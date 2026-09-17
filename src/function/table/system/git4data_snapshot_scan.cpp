@@ -810,6 +810,13 @@ struct Git4DataDiffState : public GlobalTableFunctionState {
 	bool right_local_open = false;
 	bool left_own_storage = false;
 	bool right_own_storage = false;
+	//! Whether each side has opened the added scan yet: it is consumed as it walks and the state is
+	//! shared, so a side that found it already open would read no added rows at all - which is what a
+	//! diff of a reference against itself did, reporting its own added row as a removed one.
+	bool left_added_open = false;
+	bool right_added_open = false;
+	bool left_added_local_open = false;
+	bool right_added_local_open = false;
 	//! The added table currently open, for the scan of the caller's own uncommitted rows
 	optional_ptr<DataTable> added_storage;
 	//! Whether that added table has had its local-storage scan set up
@@ -1132,7 +1139,8 @@ static void Git4DataDiffCollect(ClientContext &context, Git4DataDiffState &state
                                 VisibilityBound bound, const string &added_table, VisibilityBound added_bound,
                                 const unordered_set<string> *removed_keys,
                                 const unordered_set<hash_t> *removed_key_hashes, optional_ptr<DataTable> side_storage,
-                                bool side_own_storage, bool &side_local_open,
+                                bool side_own_storage, bool &side_local_open, bool &side_added_open,
+                                bool &side_added_local_open,
                                 const std::function<void(DataChunk &, row_t, idx_t)> &callback) {
 	// the key columns come first in the scan, so their positions are the first key_count columns
 	vector<idx_t> key_positions;
@@ -1183,7 +1191,11 @@ static void Git4DataDiffCollect(ClientContext &context, Git4DataDiffState &state
 		return;
 	}
 	// then the rows this side added, which are its own and so read as of everything committed
-	if (state.open_added_table != added_table) {
+	// The added scan is consumed as it walks, so each side has to open it for itself: the two sides
+	// share this state, and a side that found the scan already open would read nothing - which is what
+	// a diff of a reference against itself did, reporting its own added row as a removed one. Measured:
+	// `git4data_pick(t, b, b)` - a no-op - deleted that row from the live table.
+	if (!side_added_open || state.open_added_table != added_table) {
 		auto &table = Catalog::GetEntry<TableCatalogEntry>(context, QualifiedName(Identifier(added_table)));
 		if (state.added_chunk.ColumnCount() == 0) {
 			state.added_chunk.Initialize(Allocator::Get(context), state.scan_types);
@@ -1196,8 +1208,10 @@ static void Git4DataDiffCollect(ClientContext &context, Git4DataDiffState &state
 		state.added_bound = added_bound;
 		state.added_storage = table.GetStorage();
 		state.added_local_open = false;
+		side_added_open = true;
+		side_added_local_open = false;
 	}
-	ScanOptions added_options(Git4DataDeltaTransactionData(context, state.delta_database, state.added_bound));
+	ScanOptions added_options(Git4DataDeltaTransactionData(context, state.delta_database, added_bound));
 	while (true) {
 		state.added_chunk.Reset();
 		state.added_scan.table_state.Scan(added_options, state.added_chunk);
@@ -1219,8 +1233,9 @@ static void Git4DataDiffCollect(ClientContext &context, Git4DataDiffState &state
 	}
 	auto &transaction = DuckTransaction::Get(context, *state.delta_database);
 	auto &local_storage = LocalStorage::Get(transaction);
-	if (!state.added_local_open) {
+	if (!side_added_local_open) {
 		local_storage.InitializeScan(*state.added_storage, state.added_scan.local_state, nullptr);
+		side_added_local_open = true;
 		state.added_local_open = true;
 	}
 	while (true) {
@@ -1301,7 +1316,8 @@ static void Git4DataDiffFunction(ClientContext &context, TableFunctionInput &dat
 			Git4DataDiffCollect(
 			    context, state, state.left_scan, state.left_bound, state.left_added_table, state.left_delta_bound,
 			    &state.left_removed_keys, &state.left_removed_key_hashes, state.left_storage, state.left_own_storage,
-			    state.left_local_open, [&](DataChunk &chunk, row_t row_id, idx_t row) {
+			    state.left_local_open, state.left_added_open, state.left_added_local_open,
+			    [&](DataChunk &chunk, row_t row_id, idx_t row) {
 				    auto key = Git4DataDiffRowKey(chunk, state.key_count, row);
 				    Git4DataDiffState::KeyedRow entry;
 				    entry.key = key;
@@ -1317,7 +1333,8 @@ static void Git4DataDiffFunction(ClientContext &context, TableFunctionInput &dat
 			Git4DataDiffCollect(
 			    context, state, state.right_scan, state.right_bound, state.right_added_table, state.right_delta_bound,
 			    &state.right_removed_keys, &state.right_removed_key_hashes, state.right_storage,
-			    state.right_own_storage, state.right_local_open, [&](DataChunk &chunk, row_t row_id, idx_t row) {
+			    state.right_own_storage, state.right_local_open, state.right_added_open, state.right_added_local_open,
+			    [&](DataChunk &chunk, row_t row_id, idx_t row) {
 				    auto key = Git4DataDiffRowKey(chunk, state.key_count, row);
 				    auto hash = Git4DataDiffKeyHash(key);
 				    auto entry = state.left_by_key.find(hash);
@@ -1366,8 +1383,8 @@ static void Git4DataDiffFunction(ClientContext &context, TableFunctionInput &dat
 	if (state.phase == Git4DataDiffState::Phase::LEFT) {
 		Git4DataDiffCollect(context, state, state.left_scan, state.left_bound, state.left_added_table,
 		                    state.left_delta_bound, &state.left_removed_keys, &state.left_removed_key_hashes,
-		                    state.left_storage, state.left_own_storage, state.left_local_open,
-		                    [&](DataChunk &chunk, row_t row_id, idx_t row) {
+		                    state.left_storage, state.left_own_storage, state.left_local_open, state.left_added_open,
+		                    state.left_added_local_open, [&](DataChunk &chunk, row_t row_id, idx_t row) {
 			                    state.left_rows.insert(row_id);
 			                    if (state.key_count > 0) {
 				                    state.left_keys.emplace(row_id, Git4DataDiffRowKey(chunk, state.key_count, row));
@@ -1380,6 +1397,7 @@ static void Git4DataDiffFunction(ClientContext &context, TableFunctionInput &dat
 		Git4DataDiffCollect(context, state, state.right_scan, state.right_bound, state.right_added_table,
 		                    state.right_delta_bound, &state.right_removed_keys, &state.right_removed_key_hashes,
 		                    state.right_storage, state.right_own_storage, state.right_local_open,
+		                    state.right_added_open, state.right_added_local_open,
 		                    [&](DataChunk &chunk, row_t row_id, idx_t row) {
 			                    state.right_rows.insert(row_id);
 			                    if (state.left_rows.find(row_id) == state.left_rows.end()) {
