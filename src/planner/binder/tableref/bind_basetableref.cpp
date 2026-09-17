@@ -305,6 +305,9 @@ BoundStatement Binder::Bind(BaseTableRef &ref) {
 		    make_uniq<LogicalGet>(table_index, scan_function, std::move(bind_data), std::move(return_types),
 		                          std::move(return_names), std::move(virtual_columns));
 		if (is_reference_at) {
+			// the read itself carries a name and resolves it again, so a table reached by a name that
+			// resolves to a different table is caught here, where both are still known
+			Git4DataSnapshotScanFun::CheckReferenceSource(context, table, ref.GetQualifiedName().ToString());
 			logical_get->function = Git4DataSnapshotScanFun::GetFunction();
 			logical_get->bind_data = Git4DataSnapshotScanFun::CreateBindData(
 			    context, ref.Table().GetIdentifierName(), at_clause->GetValue().ToString(), reference_kind);

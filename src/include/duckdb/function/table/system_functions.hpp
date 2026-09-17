@@ -71,6 +71,10 @@ struct Git4DataSnapshotScanFun {
 	//! AT (SNAPSHOT => 'name') or AT (BRANCH => 'name').
 	static unique_ptr<FunctionData> CreateBindData(ClientContext &context, const string &table_name,
 	                                               const string &reference_name, Git4DataRefKind kind);
+	//! Refuse a reference read of a table that the name it was reached by does not resolve to. A binder
+	//! has the table the caller named; the read itself only carries a name, so this is where a read of
+	//! one table by another table's name can still be caught.
+	static void CheckReferenceSource(ClientContext &context, TableCatalogEntry &table, const string &written_name);
 };
 
 //! The rows that differ between two references, as (row_id, change)

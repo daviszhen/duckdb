@@ -877,10 +877,33 @@ static void Git4DataPointExprAtBranch(ParsedExpression &expr, const string &tabl
 	    expr, [&](unique_ptr<ParsedExpression> &child) { Git4DataPointExprAtBranch(*child, table_name, branch_name); });
 }
 
+//! The table a write statement names has to be the table the delta is for, resolved and compared - the
+//! name alone would match a same-named table in another schema.
+static void Git4DataCheckApplyTargetTable(ClientContext &context, const QualifiedName &written_name,
+                                          TableCatalogEntry &source) {
+	auto &table_name = source.name.GetIdentifierName();
+	// the name is not the table: a statement can reach a same-named table in another schema, and the write
+	// is recorded against the name the pragma resolved. Both are resolved here, so the table is compared
+	// rather than its name.
+	auto by_name = Catalog::GetEntry<TableCatalogEntry>(context, written_name, OnEntryNotFound::RETURN_NULL);
+	if (by_name && by_name->oid == source.oid) {
+		return;
+	}
+	throw InvalidInputException(
+	    "git4data_apply was given \"%s\", but the statement writes \"%s\", which is %s: the write would be "
+	    "recorded in the delta of \"%s\". Write the table the branch's delta is for.",
+	    table_name, written_name.ToString(),
+	    by_name
+	        ? "a different table of that name, in schema \"" + by_name->ParentSchema().name.GetIdentifierName() + "\""
+	        : "not a table",
+	    table_name);
+}
+
 //! The statement a delta branch is written through has to name the table the delta is for, and name it
 //! directly: a write through another name would be recorded against the wrong line, and a join has no
 //! single row of that table to record.
-static void Git4DataCheckApplyTarget(TableRef &ref, const string &table_name) {
+static void Git4DataCheckApplyTarget(ClientContext &context, TableRef &ref, TableCatalogEntry &source) {
+	auto &table_name = source.name.GetIdentifierName();
 	if (ref.type != TableReferenceType::BASE_TABLE) {
 		throw InvalidInputException("git4data_apply takes a statement that names \"%s\" directly, not one that "
 		                            "writes through another table or a subquery",
@@ -895,6 +918,7 @@ static void Git4DataCheckApplyTarget(TableRef &ref, const string &table_name) {
 		                            "has to write the table the branch's delta is for",
 		                            table_name, written);
 	}
+	Git4DataCheckApplyTargetTable(context, base.GetQualifiedName(), source);
 }
 
 //! Apply one statement of ordinary SQL to a branch that inherits by delta. The statement is translated
@@ -921,8 +945,12 @@ static string PragmaGit4DataApply(ClientContext &context, const FunctionParamete
 	if (!transaction_manager.branches.Get(branch_name, branch)) {
 		throw InvalidInputException("Branch \"%s\" does not exist", branch_name);
 	}
+	// the source table can be renamed under the mapping, and the mapping follows the table it was bound to:
+	// the oid finds the delta a name no longer does, exactly as it does on a read
+	auto already = Catalog::GetEntry<TableCatalogEntry>(context, QualifiedName(Identifier(table_name)),
+	                                                    OnEntryNotFound::RETURN_NULL);
 	Git4DataBranchDelta delta;
-	if (!transaction_manager.branches.GetDeltaTable(branch_name, table_name, delta)) {
+	if (!transaction_manager.branches.GetDeltaTable(branch_name, table_name, delta, already ? already->oid : 0)) {
 		throw InvalidInputException(
 		    "Branch \"%s\" does not differ from its base by a delta for \"%s\", so a write has nowhere to be "
 		    "recorded. Give the branch a delta for that table first, or materialize the branch and write to the "
@@ -1038,7 +1066,7 @@ static string PragmaGit4DataApply(ClientContext &context, const FunctionParamete
 				throw InvalidInputException("git4data_apply does not take RETURNING: nothing is written where the rows "
 				                            "would come from");
 			}
-			Git4DataCheckApplyTarget(*node->table, table_name);
+			Git4DataCheckApplyTarget(context, *node->table, table);
 			auto condition = node->condition ? node->condition->ToString() : string();
 			string result =
 			    StringUtil::Format("CREATE OR REPLACE TEMP TABLE %s AS SELECT %s FROM %s%s;\n", rows_name, key_list,
@@ -1060,7 +1088,7 @@ static string PragmaGit4DataApply(ClientContext &context, const FunctionParamete
 				throw InvalidInputException("git4data_apply does not take RETURNING: nothing is written where the rows "
 				                            "would come from");
 			}
-			Git4DataCheckApplyTarget(*node->table, table_name);
+			Git4DataCheckApplyTarget(context, *node->table, table);
 			auto &set_info = *node->set_info;
 			auto condition = set_info.condition ? set_info.condition->ToString() : string();
 			// the new rows: the branch's own columns, with the assigned ones replaced by what they are
@@ -1134,6 +1162,10 @@ static string PragmaGit4DataApply(ClientContext &context, const FunctionParamete
 			if (!node->select_statement) {
 				throw InvalidInputException("git4data_apply needs rows to insert");
 			}
+			// the rows are *for* the table the delta is for, and the statement is translated rather than
+			// executed, so the name it writes is never read again. The target is a qualified name here; the
+			// insert's table reference is not always there.
+			Git4DataCheckApplyTargetTable(context, node->qualified_name, table);
 			// the column list the insert names, or the table's own columns in order when it names none
 			vector<string> insert_columns;
 			for (auto &column : node->columns) {

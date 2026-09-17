@@ -220,8 +220,10 @@ public:
 	//! it had no delta for that source, so a caller cannot report having cleared one it did not.
 	bool ClearDeltaTable(const string &branch, const string &source_table);
 	//! The delta a branch differs from its base by, if it has one. Returns false when it has none, which
-	//! is also what a branch with a table of its own has for that source.
-	bool GetDeltaTable(const string &branch, const string &source_table, Git4DataBranchDelta &result) const;
+	//! is also what a branch with a table of its own has for that source. A source table can be renamed
+	//! under the mapping, so an oid that matches is a delta for that table as well as a name that does.
+	bool GetDeltaTable(const string &branch, const string &source_table, Git4DataBranchDelta &result,
+	                   idx_t source_oid = 0) const;
 	//! Restore a branch read from disk without the checks Create performs
 	void Restore(const string &name, transaction_t pin, const string &parent, timestamp_t created,
 	             const string &base_line = string());

@@ -262,6 +262,34 @@ string Git4DataResolveTableName(ClientContext &context, const string &name, idx_
 	return by_oid->name.GetIdentifierName();
 }
 
+//! A reference is keyed by the name a table resolves to, and every lookup behind a read resolves that
+//! name again. The binder is the last place where the table the caller named is still known, so a name
+//! that reaches one table and resolves to another is refused here rather than answered from that other
+//! table, which has a line of its own.
+void Git4DataSnapshotScanFun::CheckReferenceSource(ClientContext &context, TableCatalogEntry &table,
+                                                   const string &written_name) {
+	auto name = table.name.GetIdentifierName();
+	auto by_name =
+	    Catalog::GetEntry<TableCatalogEntry>(context, QualifiedName(Identifier(name)), OnEntryNotFound::RETURN_NULL);
+	if (by_name && by_name->oid == table.oid) {
+		return;
+	}
+	if (!by_name) {
+		throw InvalidInputException(
+		    "Table \"%s\" is reached as \"%s\", and a reference read is answered by name: \"%s\" resolves to no "
+		    "table here, so a read of \"%s\" at a reference would be answered from whichever table that name does "
+		    "resolve to. Read the table the reference is about, or read this one without a reference.",
+		    written_name, name, name, written_name);
+	}
+	throw InvalidInputException(
+	    "Table \"%s\" is reached as \"%s\", and a reference read is answered by name: \"%s\" resolves to \"%s\" "
+	    "in schema \"%s\", which is a different table with a line of its own, so a read of \"%s\" at a reference "
+	    "would answer with that table's line. Read the table the reference is about, or read this one without a "
+	    "reference.",
+	    written_name, name, name, by_name->name.GetIdentifierName(), by_name->ParentSchema().name.GetIdentifierName(),
+	    written_name);
+}
+
 //! The table backing a branch for a source table, or empty when the branch has no line of its own
 //! there. A mapping whose table has since been dropped falls back to the pinned image rather than
 //! failing, because the branch itself is still a valid reference.

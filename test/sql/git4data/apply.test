@@ -518,3 +518,36 @@ SELECT (SELECT v FROM g AT (BRANCH => 'gb') WHERE k = 3),
        (SELECT count(*) FROM g_del WHERE k = 3)
 ----
 3	0	0
+
+# A source table can be renamed under a mapping, and the mapping follows the table it was bound to - a read
+# already did. The write path looked the delta up by the name it was bound under, so a renamed source
+# refused with "does not differ from its base by a delta"; the oid finds it, the way it does on a read.
+statement ok
+ALTER TABLE g RENAME TO g2
+
+statement error
+PRAGMA git4data_apply('g', 'gb', 'INSERT INTO g VALUES (200, 200)')
+----
+<REGEX>:.*Table with name g does not exist.*
+
+statement ok
+PRAGMA git4data_apply('g2', 'gb', 'INSERT INTO g2 VALUES (200, 200)')
+
+query II
+SELECT k, v FROM g2 AT (BRANCH => 'gb') WHERE k = 200
+----
+200	200
+
+statement ok
+PRAGMA git4data_apply('g2', 'gb', 'DELETE FROM g2 WHERE k = 100')
+
+query I
+SELECT count(*) FROM g2 AT (BRANCH => 'gb') WHERE k = 100
+----
+0
+
+# the delta edit went to the tables the mapping named, not to tables of the renamed source
+query II
+SELECT (SELECT count(*) FROM g_add WHERE k = 200), (SELECT count(*) FROM g_del WHERE k = 100)
+----
+1	1

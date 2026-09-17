@@ -1,0 +1,211 @@
+# name: test/sql/git4data/schema_scope.test
+# description: A reference is read by the name a table resolves to, so a table reached through another schema's name is refused
+# group: [git4data]
+
+# A reference is keyed by the *name* a table resolves to: the branch's own line and a delta are both
+# recorded against a name, and every lookup behind a read resolves that name again. A read that reached
+# one table and resolved the name to another would therefore be answered from that other table, which has
+# a line of its own. Measured before the check: with t holding (1, 10) and s2.t holding (7, 700),
+# `SELECT * FROM s2.t AT (BRANCH => 'b')` returned (1, 10).
+
+statement ok
+CREATE TABLE t (k INTEGER PRIMARY KEY, v INTEGER)
+
+statement ok
+INSERT INTO t VALUES (1, 10), (2, 20), (3, 30)
+
+statement ok
+CHECKPOINT
+
+# the other schema's table is there before the references are taken, so a read that followed the
+# search path to it has rows to show and the difference is visible in the values
+statement ok
+CREATE SCHEMA s2
+
+statement ok
+CREATE TABLE s2.t (k INTEGER PRIMARY KEY, v INTEGER)
+
+statement ok
+INSERT INTO s2.t VALUES (1, 100), (2, 200), (3, 300)
+
+# a name with a dot in it is a name, not a qualification
+statement ok
+CREATE TABLE "a.b" (k INTEGER PRIMARY KEY, v INTEGER)
+
+statement ok
+INSERT INTO "a.b" VALUES (1, 10)
+
+statement ok
+PRAGMA git4data_create_branch('b', '')
+
+statement ok
+PRAGMA git4data_create_snapshot('s')
+
+# the table itself reads as its own line, so the refusals below are about the name and not the read
+query II
+SELECT k, v FROM t AT (BRANCH => 'b') ORDER BY k
+----
+1	10
+2	20
+3	30
+
+query II
+SELECT k, v FROM s2.t ORDER BY k
+----
+1	100
+2	200
+3	300
+
+# a branch read of the other schema's table: "t" resolves to the default schema's table
+statement error
+SELECT * FROM s2.t AT (BRANCH => 'b')
+----
+<REGEX>:.*Table "s2.t" is reached as "t".*
+
+# and the same for a snapshot
+statement error
+SELECT * FROM s2.t AT (SNAPSHOT => 's')
+----
+<REGEX>:.*Table "s2.t" is reached as "t".*
+
+# a qualified name that resolves to the table it reaches is the read it says it is
+query II
+SELECT k, v FROM main.t AT (BRANCH => 'b') ORDER BY k
+----
+1	10
+2	20
+3	30
+
+# the name is resolved the way the read resolves it, so a bare name under another schema is that
+# schema's table - and the default schema's table is then the one reached by another name
+statement ok
+SET schema='s2'
+
+query II
+SELECT k, v FROM t AT (BRANCH => 'b') ORDER BY k
+----
+1	100
+2	200
+3	300
+
+statement error
+SELECT * FROM main.t AT (BRANCH => 'b')
+----
+<REGEX>:.*Table "main.t" is reached as "t".*
+
+statement ok
+SET schema='main'
+
+# a branch that holds its own line for the table is refused on the same name
+statement ok
+PRAGMA git4data_create_branch('bs', '')
+
+statement ok
+CREATE TABLE b_store (k INTEGER PRIMARY KEY, v INTEGER)
+
+statement ok
+INSERT INTO b_store VALUES (1, 111)
+
+statement ok
+PRAGMA git4data_bind_branch_table('t', 'bs', 'b_store')
+
+statement error
+SELECT * FROM s2.t AT (BRANCH => 'bs')
+----
+<REGEX>:.*Table "s2.t" is reached as "t".*
+
+query II
+SELECT k, v FROM t AT (BRANCH => 'bs')
+----
+1	111
+
+# a branch that differs by a delta is refused on the same name too
+statement ok
+CREATE TABLE t_add (k INTEGER PRIMARY KEY, v INTEGER)
+
+statement ok
+CREATE TABLE t_del (k INTEGER PRIMARY KEY)
+
+statement ok
+INSERT INTO t_add VALUES (5, 50)
+
+statement ok
+INSERT INTO t_del VALUES (1)
+
+statement ok
+PRAGMA git4data_bind_branch_delta('t', 'b', 't_add', 't_del')
+
+statement error
+SELECT * FROM s2.t AT (BRANCH => 'b')
+----
+<REGEX>:.*Table "s2.t" is reached as "t".*
+
+query II
+SELECT k, v FROM t AT (BRANCH => 'b') ORDER BY k
+----
+2	20
+3	30
+5	50
+
+# A write is translated rather than executed, so the name a statement writes is read once and never
+# again: the table the rows are for has to be the table the delta is for, not a table of that name in
+# another schema. Measured before the check: `INSERT INTO s2.t VALUES (9, 900)` put (9, 900) in the
+# delta of "t", a change to a table the caller never named.
+statement error
+PRAGMA git4data_apply('t', 'b', 'INSERT INTO s2.t VALUES (9, 900)')
+----
+<REGEX>:.*statement writes "s2.t".*
+
+statement error
+PRAGMA git4data_apply('t', 'b', 'DELETE FROM s2.t')
+----
+<REGEX>:.*statement writes "s2.t".*
+
+statement error
+PRAGMA git4data_apply('t', 'b', 'UPDATE s2.t SET v = 1')
+----
+<REGEX>:.*statement writes "s2.t".*
+
+# a statement that *reads* the other schema's table would have that read answered by the branch's
+# line for "t", so it is refused where the read is
+statement error
+PRAGMA git4data_apply('t', 'b', 'INSERT INTO t SELECT * FROM s2.t')
+----
+<REGEX>:.*Table "s2.t" is reached as "t".*
+
+# none of the four recorded anything
+query II
+SELECT k, v FROM t AT (BRANCH => 'b') ORDER BY k
+----
+2	20
+3	30
+5	50
+
+query I
+SELECT count(*) FROM t_add
+----
+1
+
+# the write the caller meant still lands, and only it
+statement ok
+PRAGMA git4data_apply('t', 'b', 'INSERT INTO t VALUES (9, 900)')
+
+query II
+SELECT k, v FROM t AT (BRANCH => 'b') ORDER BY k
+----
+2	20
+3	30
+5	50
+9	900
+
+# The check compares the name with what that name resolves to, so a table whose *name* contains a dot is
+# still the table the name resolves to - it is not read as a schema qualification and must not be refused.
+query II
+SELECT k, v FROM "a.b" AT (BRANCH => 'b')
+----
+1	10
+
+query II
+SELECT k, v FROM "a.b"
+----
+1	10

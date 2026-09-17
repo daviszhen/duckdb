@@ -173,15 +173,15 @@ bool BranchRegistry::ClearDeltaTable(const string &branch, const string &source_
 	return false;
 }
 
-bool BranchRegistry::GetDeltaTable(const string &branch, const string &source_table,
-                                   Git4DataBranchDelta &result) const {
+bool BranchRegistry::GetDeltaTable(const string &branch, const string &source_table, Git4DataBranchDelta &result,
+                                   idx_t source_oid) const {
 	lock_guard<mutex> guard(lock);
 	auto entry = branches.find(branch);
 	if (entry == branches.end()) {
 		return false;
 	}
 	for (auto &delta : entry->second.deltas) {
-		if (StringUtil::CIEquals(delta.source, source_table)) {
+		if (StringUtil::CIEquals(delta.source, source_table) || (source_oid != 0 && delta.source_oid == source_oid)) {
 			result = delta;
 			return true;
 		}
