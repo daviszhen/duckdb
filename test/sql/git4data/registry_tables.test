@@ -242,3 +242,50 @@ query I
 SELECT count(*) FROM duckdb_columns() WHERE table_name = 'rt'
 ----
 2
+
+# A reference is a row now, so a rollback takes it - and the in-memory registries have to follow, or the
+# rest of the session keeps showing a reference that is on no disk. They are rebuilt from the tables after a
+# rollback, which is what this asserts.
+statement ok
+CREATE TABLE rb_src (k INTEGER PRIMARY KEY, v INTEGER)
+
+statement ok
+INSERT INTO rb_src VALUES (1, 1)
+
+statement ok
+CHECKPOINT
+
+statement ok
+BEGIN
+
+statement ok
+PRAGMA git4data_create_snapshot('rb_gone')
+
+statement ok
+ROLLBACK
+
+statement error
+SELECT count(*) FROM rb_src AT (SNAPSHOT => 'rb_gone')
+----
+<REGEX>:.*Snapshot "rb_gone" does not exist.*
+
+query I
+SELECT count(*) FROM git4data.snapshots WHERE name = 'rb_gone'
+----
+0
+
+# and a reference made after the rollback is unaffected by the rebuild
+statement ok
+PRAGMA git4data_create_snapshot('rb_kept')
+
+query I
+SELECT count(*) FROM git4data.snapshots WHERE name = 'rb_kept'
+----
+1
+
+restart
+
+query I
+SELECT count(*) FROM git4data.snapshots WHERE name = 'rb_kept'
+----
+1

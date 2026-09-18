@@ -52,6 +52,11 @@ void Git4DataCheckRegistryWrite(const TableCatalogEntry &table);
 //! The same for a schema a statement names: dropping the schema the registry lives in is another way to take
 //! every reference at once.
 void Git4DataCheckRegistrySchema(const string &schema);
+//! Rebuild the in-memory registries after a rollback. When the tables are there they are read again; when
+//! they are not and the file's records never came from them, the rollback took the tables with it - the very
+//! first reference of a database creates them in the same transaction - so the registries are emptied rather
+//! than left holding references that are no longer anywhere on disk.
+void Git4DataReloadRegistry(QueryContext context, AttachedDatabase &db);
 //! Whether a schema name is the one the registry keeps its references in
 bool Git4DataIsRegistrySchema(const string &schema);
 //! Whether a table is one the registry keeps its references in

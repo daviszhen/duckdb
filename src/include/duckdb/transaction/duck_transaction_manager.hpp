@@ -300,11 +300,35 @@ public:
 		return VisibilityBound::Through(snapshot_pin < branch_pin ? snapshot_pin : branch_pin);
 	}
 	//! Pinned snapshots keep superseded versions readable
+	//! Set by a rollback, consumed by the next operation that touches the registries
+	std::atomic<bool> registry_reload_needed {false};
+	bool registry_from_block = false;
 	SnapshotRegistry snapshots;
 
 	//! The highest bound any reference is pinned at, read from the registries rather than cached: a row
 	//! inserted at or after it came after every reference, so none of them sees it.
 	VisibilityBound HighestPinnedBound() const;
+	//! The registries are held in tables, so a rolled-back transaction takes its rows with it while the
+	//! in-memory copy still holds them. A rollback sets this, and the next operation that reads or writes the
+	//! registries rebuilds them from the tables before it does - otherwise a reference that a rollback removed
+	//! stays visible for the rest of the session and then is gone after the next open.
+	void MarkRegistryReloadNeeded() noexcept {
+		registry_reload_needed.store(true);
+	}
+	//! Whether a rebuild is due, clearing the flag. One rebuild serves every flag set before it.
+	bool ConsumeRegistryReloadNeeded() noexcept {
+		return registry_reload_needed.exchange(false);
+	}
+	//! Whether the registries were loaded from the checkpoint's metadata block because this file has no
+	//! registry tables (a file written before them). A rebuild then has nothing to read and must leave what is
+	//! in memory alone: those references are committed, and only a file whose records are in tables can be
+	//! rebuilt - or, when its tables were rolled away with the change, cleared.
+	bool RegistryFromBlock() const noexcept {
+		return registry_from_block;
+	}
+	void SetRegistryFromBlock(bool value) noexcept {
+		registry_from_block = value;
+	}
 	//! Whether no transaction that started before the last commit is still active. Such a transaction
 	//! reads rows the last commit has already deleted, so it is the one reader a reference's bounds say
 	//! nothing about; when there is none, a row the last commit deleted is reachable only by a

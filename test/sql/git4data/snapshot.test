@@ -78,10 +78,10 @@ SELECT count(*) FROM t AT (SNAPSHOT => 's3')
 ----
 <REGEX>:.*does not exist.*
 
-# The reference registry is not transactional: a reference taken inside a transaction that rolls back
-# stays. That is worth an assertion rather than an assumption - it is not a silent wrongness, because what
-# a reference pins is the last *committed* commit, which a rolled-back transaction did not change, but it
-# is a behaviour someone will meet.
+# A reference is a row in the registry tables now, so a rollback takes it with the rest of the transaction,
+# and the in-memory registries are rebuilt from the tables so the rest of the session agrees. Before that the
+# registry was outside the transaction and a rolled-back reference stayed; the design note records that as
+# withdrawn, since a reference that is on no disk should not be readable.
 statement ok
 BEGIN
 
@@ -91,11 +91,13 @@ PRAGMA git4data_create_snapshot('in_tx')
 statement ok
 ROLLBACK
 
-statement ok
-PRAGMA git4data_snapshots
+statement error
+SELECT count(*) FROM t AT (SNAPSHOT => 'in_tx')
+----
+<REGEX>:.*Snapshot "in_tx" does not exist.*
 
 statement ok
-PRAGMA git4data_drop_snapshot('in_tx')
+PRAGMA git4data_snapshots
 
 # A snapshot and a branch cannot share a name. Wherever a reference is named without saying which kind it
 # is - a diff, a pick, a restore, and a merge's own image clauses - a bare name is looked up in the

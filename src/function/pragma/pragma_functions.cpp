@@ -158,7 +158,13 @@ static DuckTransactionManager &GetGit4DataTransactionManager(ClientContext &cont
 	if (!attached) {
 		throw InvalidInputException("Git4Data snapshots require an attached database");
 	}
-	return DuckTransactionManager::Get(*attached);
+	auto &transaction_manager = DuckTransactionManager::Get(*attached);
+	if (transaction_manager.ConsumeRegistryReloadNeeded()) {
+		// a rollback took rows out of the registry tables: the in-memory registries are rebuilt from what is
+		// committed before this operation acts on them
+		Git4DataReloadRegistry(QueryContext(context), *attached);
+	}
+	return transaction_manager;
 }
 
 //! The AT unit a reference has to be read through, throwing when neither registry has the name

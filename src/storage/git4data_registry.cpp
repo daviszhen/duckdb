@@ -148,16 +148,37 @@ static void Git4DataScanRegistryTable(ClientContext &context, TableCatalogEntry 
 	}
 }
 
+void Git4DataReloadRegistry(QueryContext context, AttachedDatabase &db) {
+	auto &transaction_manager = DuckTransactionManager::Get(db);
+	if (Git4DataRegistryTablesExist(context, db)) {
+		Git4DataLoadRegistry(context, db);
+		return;
+	}
+	if (!transaction_manager.RegistryFromBlock()) {
+		// the rollback took the tables as well, so nothing is committed and nothing may stay in memory
+		transaction_manager.snapshots.Clear();
+		transaction_manager.branches.Clear();
+	}
+}
+
 void Git4DataLoadRegistry(QueryContext context, AttachedDatabase &db) {
 	auto client = context.GetClientContext();
 	if (!client || !Git4DataRegistryTablesExist(context, db)) {
 		// an older file, whose records are in the checkpoint's metadata block and are already loaded
+		DuckTransactionManager::Get(db).SetRegistryFromBlock(true);
 		return;
 	}
 	auto &transaction_manager = DuckTransactionManager::Get(db);
 	// The tables are the whole truth for every record now, so both registries are rebuilt from them: the block
 	// may hold a state from before changes the log replayed, and a branch made since the last checkpoint is
 	// one of those changes.
+	//
+	// The oids a rebuild cannot bring back are kept from what is already in memory: they are not persisted (the
+	// catalog's oids do not survive a reopen), and the feature uses them to follow a source table that was
+	// renamed and to refuse a table that took the name of one it was given - measured, a rebuild that dropped
+	// them made `git4data_apply('g2', ...)` report no delta for a renamed source and let a swapped storage table
+	// be read. A rebuild happens while the process lives, so the ids it already has are still meaningful.
+	auto old_branches = transaction_manager.branches.List();
 	transaction_manager.snapshots.Clear();
 	transaction_manager.branches.Clear();
 
@@ -214,6 +235,32 @@ void Git4DataLoadRegistry(QueryContext context, AttachedDatabase &db) {
 		                          auto removed = chunk.GetValue(3, row).GetValue<string>();
 		                          transaction_manager.branches.SetDeltaTable(branch, source, added, removed);
 	                          });
+	}
+	// put the oids the records had back: the tables do not carry them, and they are what follows a renamed
+	// table or refuses one that took a name
+	for (auto &old_branch : old_branches) {
+		Git4DataBranch loaded;
+		if (!transaction_manager.branches.Get(old_branch.name, loaded)) {
+			continue;
+		}
+		for (auto &old_storage : old_branch.storage_tables) {
+			for (auto &storage : loaded.storage_tables) {
+				if (StringUtil::CIEquals(storage.source, old_storage.source)) {
+					transaction_manager.branches.SetStorageTable(old_branch.name, storage.source, storage.storage,
+					                                             old_storage.oid, old_storage.source_oid,
+					                                             storage.owned);
+				}
+			}
+		}
+		for (auto &old_delta : old_branch.deltas) {
+			for (auto &delta : loaded.deltas) {
+				if (StringUtil::CIEquals(delta.source, old_delta.source)) {
+					transaction_manager.branches.SetDeltaTable(old_branch.name, delta.source, delta.added,
+					                                           delta.removed, old_delta.added_oid,
+					                                           old_delta.removed_oid, old_delta.source_oid);
+				}
+			}
+		}
 	}
 	// what is in the tables is on disk, so a checkpoint does not have to force itself for the registries
 	transaction_manager.snapshots.MarkClean();

@@ -1,4 +1,5 @@
 #include "duckdb/function/table/system_functions.hpp"
+#include "duckdb/storage/git4data_registry.hpp"
 
 #include "duckdb/catalog/catalog.hpp"
 #include "duckdb/catalog/catalog_entry/table_catalog_entry.hpp"
@@ -595,6 +596,10 @@ unique_ptr<FunctionData> Git4DataSnapshotScanFun::CreateBindData(ClientContext &
 	auto &db_manager = DatabaseManager::Get(context);
 	auto attached = db_manager.GetDatabase(context, DatabaseManager::GetDefaultDatabase(context));
 	auto &transaction_manager = DuckTransactionManager::Get(*attached);
+	if (transaction_manager.ConsumeRegistryReloadNeeded()) {
+		// a rollback may have removed a reference this read is about to resolve
+		Git4DataReloadRegistry(QueryContext(context), *attached);
+	}
 	Git4DataReadPlan plan;
 	ResolveGit4DataRead(context, transaction_manager, table_name, reference_name, kind, plan);
 	result->table_name = plan.table_name;
@@ -1004,6 +1009,10 @@ unique_ptr<FunctionData> Git4DataDiffFun::CreateBindData(ClientContext &context,
 	auto &db_manager = DatabaseManager::Get(context);
 	auto attached = db_manager.GetDatabase(context, DatabaseManager::GetDefaultDatabase(context));
 	auto &transaction_manager = DuckTransactionManager::Get(*attached);
+	if (transaction_manager.ConsumeRegistryReloadNeeded()) {
+		// a rollback may have removed a reference this read is about to resolve
+		Git4DataReloadRegistry(QueryContext(context), *attached);
+	}
 	auto left_plan = ResolveGit4DataReferencePlan(context, transaction_manager, table_name, left_name);
 	auto right_plan = ResolveGit4DataReferencePlan(context, transaction_manager, table_name, right_name);
 	result->left_table = left_plan.table_name;

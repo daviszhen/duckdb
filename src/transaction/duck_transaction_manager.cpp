@@ -925,6 +925,11 @@ void DuckTransactionManager::RollbackTransaction(Transaction &transaction_p) {
 
 	DUCKDB_LOG(db.GetDatabase(), TransactionLogType, db, "Rollback", transaction.GetTransactionId());
 
+	// A reference is a row in the registry tables, so this rollback may have taken one away - and the
+	// in-memory copy still has it. Conservative on purpose: the rebuild is a four-table read, and it only
+	// happens when something asks the feature for something.
+	MarkRegistryReloadNeeded();
+
 	ErrorData error;
 	{
 		// Obtain the transaction lock and roll back.
