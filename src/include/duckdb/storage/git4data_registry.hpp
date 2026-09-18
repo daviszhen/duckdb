@@ -25,9 +25,9 @@ struct QueryContext;
 //! see Git4DataIsRegistryTable and Git4DataCheckRegistryTarget.
 #define GIT4DATA_REGISTRY_SCHEMA "git4data"
 #define GIT4DATA_SNAPSHOTS_TABLE "snapshots"
-#define GIT4DATA_BRANCHES_TABLE "branches"
-#define GIT4DATA_STORAGE_TABLE "storage"
-#define GIT4DATA_DELTAS_TABLE "deltas"
+#define GIT4DATA_BRANCHES_TABLE  "branches"
+#define GIT4DATA_STORAGE_TABLE   "storage"
+#define GIT4DATA_DELTAS_TABLE    "deltas"
 
 //! Create the schema and the four tables the references are kept in, if they are not there yet, and return
 //! the statements that migrate what a file written before them already holds into them. The tables become
@@ -63,6 +63,22 @@ void Git4DataReloadRegistry(AttachedDatabase &db);
 //! one of them rolling back a real transaction under the other's feet.
 //! `added` holds the records this transaction added, as "<kind>\t<key>" strings.
 void Git4DataReconcileRegistry(AttachedDatabase &db, const vector<string> &added);
+//! Resolve a table by a name a record holds, which is written one of two ways. A name a caller wrote may be
+//! qualified, and then a dot separates a schema from a table (which `QualifiedName(Identifier("s2.t"))` does
+//! not do: it looks for a table whose *name* is "s2.t"). A name taken from the catalog is one identifier, so
+//! a table called `a.b` is found by that name and not as a table `b` in a schema `a`. The literal name is
+//! tried first, so a table carrying that name exactly is the one reached, and the qualified reading answers
+//! the rest.
+TableCatalogEntry &Git4DataResolveTable(ClientContext &context, const string &name);
+//! The same, or nothing when it does not resolve
+optional_ptr<TableCatalogEntry> Git4DataResolveTableOrNull(ClientContext &context, const string &name);
+//! The name a table is held under in the registry, which resolves back to it: the schema it is in, unless
+//! that is the default one. Records name tables as strings and every lookup resolves that string again, so a
+//! bare name for a table outside the default schema would reach another table or none.
+string Git4DataTableName(const TableCatalogEntry &table);
+//! A possibly-qualified name as SQL, with every component quoted as its own identifier
+string Git4DataTableSQLName(const string &name);
+
 //! Whether a schema name is the one the registry keeps its references in
 bool Git4DataIsRegistrySchema(const string &schema);
 //! Whether a table is one the registry keeps its references in

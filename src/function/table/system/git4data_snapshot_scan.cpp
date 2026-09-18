@@ -113,7 +113,7 @@ static void Git4DataCollectRemovedKeys(ClientContext &context, const string &rem
 	if (removed_table.empty()) {
 		return;
 	}
-	auto &table = Catalog::GetEntry<TableCatalogEntry>(context, QualifiedName(Identifier(removed_table)));
+	auto &table = Git4DataResolveTable(context, removed_table);
 	auto &groups = *table.GetStorage().GetRowGroupCollection();
 	// the removed table holds exactly the source's key columns, so they are its first columns
 	vector<StorageIndex> removed_ids;
@@ -252,8 +252,7 @@ static optional_ptr<TableCatalogEntry> Git4DataTableByOid(ClientContext &context
 }
 
 string Git4DataResolveTableName(ClientContext &context, const string &name, idx_t oid) {
-	auto named =
-	    Catalog::GetEntry<TableCatalogEntry>(context, QualifiedName(Identifier(name)), OnEntryNotFound::RETURN_NULL);
+	auto named = Git4DataResolveTableOrNull(context, name);
 	if (named) {
 		return name;
 	}
@@ -261,7 +260,7 @@ string Git4DataResolveTableName(ClientContext &context, const string &name, idx_
 	if (!by_oid) {
 		return string();
 	}
-	return by_oid->name.GetIdentifierName();
+	return Git4DataTableName(*by_oid);
 }
 
 //! A reference is keyed by the name a table resolves to, and every lookup behind a read resolves that
@@ -314,8 +313,7 @@ static string Git4DataBranchStorageTable(ClientContext &context, const Git4DataB
 				continue;
 			}
 		}
-		auto storage = Catalog::GetEntry<TableCatalogEntry>(context, QualifiedName(Identifier(entry.storage)),
-		                                                    OnEntryNotFound::RETURN_NULL);
+		auto storage = Git4DataResolveTableOrNull(context, entry.storage);
 		if (!storage) {
 			// the name it was given no longer resolves, which is what a rename looks like: the oid is
 			// what tells the table it was given from any other
@@ -325,7 +323,7 @@ static string Git4DataBranchStorageTable(ClientContext &context, const Git4DataB
 			continue;
 		}
 		// the name it has now, not the one the mapping was written with
-		auto resolved = storage->name.GetIdentifierName();
+		auto resolved = Git4DataTableName(*storage);
 		if (entry.oid != 0 && entry.oid != storage->oid) {
 			throw InvalidInputException(
 			    "Branch \"%s\" was given table \"%s\" for \"%s\", and the table carrying that name now is not it - "
@@ -431,7 +429,7 @@ static Git4DataLineState ResolveGit4DataLineState(ClientContext &context, DuckTr
 		// as k = 777 and v = 1 from a row that held k = 1 and v = 777.
 		{
 			auto &source_entry = Catalog::GetEntry<TableCatalogEntry>(context, QualifiedName(Identifier(table_name)));
-			auto &storage_entry = Catalog::GetEntry<TableCatalogEntry>(context, QualifiedName(Identifier(storage)));
+			auto &storage_entry = Git4DataResolveTable(context, storage);
 			if (storage_entry.GetColumns().GetColumnNames() != source_entry.GetColumns().GetColumnNames() ||
 			    storage_entry.GetColumns().GetColumnTypes() != source_entry.GetColumns().GetColumnTypes()) {
 				throw InvalidInputException(
@@ -476,13 +474,11 @@ static Git4DataLineState ResolveGit4DataLineState(ClientContext &context, DuckTr
 		}
 		// the delta's tables are the caller's: one that has since been dropped falls back to the base, and
 		// one that was *renamed* is found by oid, because the caller meant that table
-		auto added_table = Catalog::GetEntry<TableCatalogEntry>(context, QualifiedName(Identifier(delta.added)),
-		                                                        OnEntryNotFound::RETURN_NULL);
+		auto added_table = Git4DataResolveTableOrNull(context, delta.added);
 		if (!added_table) {
 			added_table = Git4DataTableByOid(context, delta.added_oid);
 		}
-		auto removed_table = Catalog::GetEntry<TableCatalogEntry>(context, QualifiedName(Identifier(delta.removed)),
-		                                                          OnEntryNotFound::RETURN_NULL);
+		auto removed_table = Git4DataResolveTableOrNull(context, delta.removed);
 		if (!removed_table) {
 			removed_table = Git4DataTableByOid(context, delta.removed_oid);
 		}
@@ -499,8 +495,8 @@ static Git4DataLineState ResolveGit4DataLineState(ClientContext &context, DuckTr
 			}
 			auto &source = Catalog::GetEntry<TableCatalogEntry>(context, QualifiedName(Identifier(table_name)));
 			Git4DataCheckDeltaColumns(source, *added_table, *removed_table);
-			added = added_table->name.GetIdentifierName();
-			removed = removed_table->name.GetIdentifierName();
+			added = Git4DataTableName(*added_table);
+			removed = Git4DataTableName(*removed_table);
 		}
 	}
 	if (!added.empty() || !removed.empty()) {
@@ -620,7 +616,7 @@ static unique_ptr<FunctionData> Git4DataSnapshotScanBind(ClientContext &context,
 	    context, input.inputs[0].GetValue<string>(), input.inputs[1].GetValue<string>(), Git4DataRefKind::SNAPSHOT);
 
 	auto &bind_data = result->Cast<Git4DataSnapshotScanBindData>();
-	auto &table = Catalog::GetEntry<TableCatalogEntry>(context, QualifiedName(Identifier(bind_data.table_name)));
+	auto &table = Git4DataResolveTable(context, bind_data.table_name);
 	for (auto &column : table.GetColumns().Logical()) {
 		names.emplace_back(column.Name());
 		return_types.emplace_back(column.Type());
@@ -635,7 +631,7 @@ static unique_ptr<GlobalTableFunctionState> Git4DataSnapshotScanInit(ClientConte
 	result->bound = bind_data.bound;
 	result->delta_bound = bind_data.delta_bound;
 
-	auto &table = Catalog::GetEntry<TableCatalogEntry>(context, QualifiedName(Identifier(bind_data.table_name)));
+	auto &table = Git4DataResolveTable(context, bind_data.table_name);
 	auto &storage = table.GetStorage();
 	auto &row_groups = *storage.GetRowGroupCollection();
 	result->own_storage = bind_data.own_storage;
@@ -682,8 +678,7 @@ static unique_ptr<GlobalTableFunctionState> Git4DataSnapshotScanInit(ClientConte
 		}
 	}
 	if (!bind_data.delta_added.empty()) {
-		auto &added_table =
-		    Catalog::GetEntry<TableCatalogEntry>(context, QualifiedName(Identifier(bind_data.delta_added)));
+		auto &added_table = Git4DataResolveTable(context, bind_data.delta_added);
 		result->added_chunk.Initialize(Allocator::Get(context), scan_types);
 		result->added_scan.Initialize(result->column_ids, nullptr);
 		added_table.GetStorage().GetRowGroupCollection()->InitializeScan(query_context, result->added_scan.table_state,
@@ -695,12 +690,10 @@ static unique_ptr<GlobalTableFunctionState> Git4DataSnapshotScanInit(ClientConte
 	                           result->hashes_usable);
 	// the delta's own tables are read as the caller has them, so their database is remembered here
 	if (!bind_data.delta_removed.empty()) {
-		auto &removed_entry =
-		    Catalog::GetEntry<TableCatalogEntry>(context, QualifiedName(Identifier(bind_data.delta_removed)));
+		auto &removed_entry = Git4DataResolveTable(context, bind_data.delta_removed);
 		result->delta_database = removed_entry.GetStorage().GetAttached();
 	} else if (!bind_data.delta_added.empty()) {
-		auto &added_entry =
-		    Catalog::GetEntry<TableCatalogEntry>(context, QualifiedName(Identifier(bind_data.delta_added)));
+		auto &added_entry = Git4DataResolveTable(context, bind_data.delta_added);
 		result->delta_database = added_entry.GetStorage().GetAttached();
 	}
 	// one hash column per key column, filled per chunk so the filter below needs no allocation per row
@@ -1194,16 +1187,14 @@ static unique_ptr<GlobalTableFunctionState> Git4DataDiffInit(ClientContext &cont
 		                   : !bind_data.right_delta_removed.empty() ? bind_data.right_delta_removed
 		                                                            : bind_data.right_delta_added;
 		if (!delta_table.empty()) {
-			auto &delta_entry = Catalog::GetEntry<TableCatalogEntry>(context, QualifiedName(Identifier(delta_table)));
+			auto &delta_entry = Git4DataResolveTable(context, delta_table);
 			result->delta_database = delta_entry.GetStorage().GetAttached();
 		}
 	}
 	result->left_own_storage = bind_data.left_own_storage;
 	result->right_own_storage = bind_data.right_own_storage;
-	result->left_storage =
-	    &Catalog::GetEntry<TableCatalogEntry>(context, QualifiedName(Identifier(bind_data.left_table))).GetStorage();
-	result->right_storage =
-	    &Catalog::GetEntry<TableCatalogEntry>(context, QualifiedName(Identifier(bind_data.right_table))).GetStorage();
+	result->left_storage = &Git4DataResolveTable(context, bind_data.left_table).GetStorage();
+	result->right_storage = &Git4DataResolveTable(context, bind_data.right_table).GetStorage();
 	result->left_added_table = bind_data.left_delta_added;
 	result->right_added_table = bind_data.right_delta_added;
 	result->left_delta_bound = bind_data.left_delta_bound;
@@ -1212,11 +1203,11 @@ static unique_ptr<GlobalTableFunctionState> Git4DataDiffInit(ClientContext &cont
 	// each side is read from its own table, which is the same table unless a side is a branch with a
 	// line of its own
 	QueryContext query_context;
-	auto &left_table = Catalog::GetEntry<TableCatalogEntry>(context, QualifiedName(Identifier(bind_data.left_table)));
+	auto &left_table = Git4DataResolveTable(context, bind_data.left_table);
 	auto &left_groups = *left_table.GetStorage().GetRowGroupCollection();
 	result->left_scan.Initialize(result->column_ids, nullptr);
 	left_groups.InitializeScan(query_context, result->left_scan.table_state, result->column_ids, nullptr);
-	auto &right_table = Catalog::GetEntry<TableCatalogEntry>(context, QualifiedName(Identifier(bind_data.right_table)));
+	auto &right_table = Git4DataResolveTable(context, bind_data.right_table);
 	auto &right_groups = *right_table.GetStorage().GetRowGroupCollection();
 	result->right_scan.Initialize(result->column_ids, nullptr);
 	right_groups.InitializeScan(query_context, result->right_scan.table_state, result->column_ids, nullptr);
@@ -1301,7 +1292,7 @@ static void Git4DataDiffCollect(ClientContext &context, Git4DataDiffState &state
 	// a diff of a reference against itself did, reporting its own added row as a removed one. Measured:
 	// `git4data_pick(t, b, b)` - a no-op - deleted that row from the live table.
 	if (!side_added_open || state.open_added_table != added_table) {
-		auto &table = Catalog::GetEntry<TableCatalogEntry>(context, QualifiedName(Identifier(added_table)));
+		auto &table = Git4DataResolveTable(context, added_table);
 		if (state.added_chunk.ColumnCount() == 0) {
 			state.added_chunk.Initialize(Allocator::Get(context), state.scan_types);
 		}

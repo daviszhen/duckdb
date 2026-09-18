@@ -186,7 +186,7 @@ static const char *ResolveGit4DataReference(DuckTransactionManager &transaction_
 //! A table read as of a reference, spelled the way the binder accepts it. The unit has to match
 //! the registry the name lives in, or the read is looked up in the wrong one.
 static string FormatGit4DataAtClause(const string &table_name, const string &reference, const char *unit) {
-	return StringUtil::Format("%s AT (%s => '%s')", KeywordHelper::WriteOptionallyQuoted(table_name), unit,
+	return StringUtil::Format("%s AT (%s => '%s')", Git4DataTableSQLName(table_name), unit,
 	                          StringUtil::Replace(reference, "'", "''"));
 }
 
@@ -219,7 +219,7 @@ static string BuildGit4DataRestore(ClientContext &context, const string &table_n
 	// A restore does not need a key: every row goes and the reference's own image comes back, so there is
 	// nothing to match row by row. It used to insist on one, which refused tables it could have served.
 	Catalog::GetEntry<TableCatalogEntry>(context, QualifiedName(Identifier(table_name)));
-	auto quoted_table = KeywordHelper::WriteOptionallyQuoted(table_name);
+	auto quoted_table = Git4DataTableSQLName(table_name);
 	auto at_clause = FormatGit4DataAtClause(table_name, reference, unit);
 
 	// Every row goes, including the ones the reference never had: a restore rewinds the table, so a row
@@ -316,8 +316,7 @@ static string BuildGit4DataRowComparison(TableCatalogEntry &table, const string 
 
 //! The column names of a table, if it is there. Used to keep generated names clear of them.
 static void Git4DataAddColumnNames(ClientContext &context, const string &table_name, case_insensitive_set_t &names) {
-	auto entry = Catalog::GetEntry<TableCatalogEntry>(context, QualifiedName(Identifier(table_name)),
-	                                                  OnEntryNotFound::RETURN_NULL);
+	auto entry = Git4DataResolveTableOrNull(context, table_name);
 	if (!entry) {
 		return;
 	}
@@ -410,7 +409,7 @@ static string PragmaGit4DataPick(ClientContext &context, const FunctionParameter
 		}
 		key_list += KeywordHelper::WriteOptionallyQuoted(key_columns[i]);
 	}
-	auto quoted_table = KeywordHelper::WriteOptionallyQuoted(table_name);
+	auto quoted_table = Git4DataTableSQLName(table_name);
 	auto escape = [](const string &value) {
 		return StringUtil::Replace(value, "'", "''");
 	};
@@ -524,8 +523,8 @@ static string PragmaGit4DataMaterialize(ClientContext &context, const FunctionPa
 	// the source has to be there, and the target must not be
 	auto &table = Catalog::GetEntry<TableCatalogEntry>(context, QualifiedName(Identifier(source_table)));
 	auto key_columns = Git4DataPrimaryKeyColumnNames(table);
-	if (Catalog::GetEntry<TableCatalogEntry>(context, QualifiedName(Identifier(storage_table)),
-	                                         OnEntryNotFound::RETURN_NULL)) {
+	// the name a caller writes may be qualified, so it is parsed rather than taken as one identifier
+	if (Git4DataResolveTableOrNull(context, storage_table)) {
 		throw InvalidInputException("Table \"%s\" already exists", storage_table);
 	}
 	// The mapping is registered by the last statement rather than here: the copy below reads the
@@ -550,7 +549,7 @@ static string PragmaGit4DataMaterialize(ClientContext &context, const FunctionPa
 			columns += ")";
 		}
 	}
-	auto quoted_storage = KeywordHelper::WriteOptionallyQuoted(storage_table);
+	auto quoted_storage = Git4DataTableSQLName(storage_table);
 	auto escaped_source = StringUtil::Replace(source_table, "'", "''");
 	auto escaped_branch = StringUtil::Replace(branch_name, "'", "''");
 	auto escaped_storage = StringUtil::Replace(storage_table, "'", "''");
@@ -570,7 +569,7 @@ static string PragmaGit4DataMaterialize(ClientContext &context, const FunctionPa
 		// second materialize dropped the source table of a branch materialized from the first copy
 		if (!resolved.empty() &&
 		    !transaction_manager.branches.OtherBranchUsesTable(branch_name, resolved, existing.oid)) {
-			replaced = StringUtil::Format("\nDROP TABLE IF EXISTS %s;", KeywordHelper::WriteOptionallyQuoted(resolved));
+			replaced = StringUtil::Format("\nDROP TABLE IF EXISTS %s;", Git4DataTableSQLName(resolved));
 		}
 	}
 	// The binding is written out rather than called through git4data_bind_branch_table: that one returns the
@@ -580,11 +579,10 @@ static string PragmaGit4DataMaterialize(ClientContext &context, const FunctionPa
 	                          "PRAGMA git4data_bind_internal('%s', '%s', '%s', 'true');\n"
 	                          "DELETE FROM %s.%s WHERE branch = '%s' AND source = '%s';\n"
 	                          "INSERT INTO %s.%s VALUES ('%s', '%s', '%s', true);%s",
-	                          quoted_storage, columns, quoted_storage,
-	                          KeywordHelper::WriteOptionallyQuoted(source_table), escaped_branch, escaped_source,
-	                          escaped_branch, escaped_storage, GIT4DATA_REGISTRY_SCHEMA, GIT4DATA_STORAGE_TABLE,
-	                          escaped_branch, escaped_source, GIT4DATA_REGISTRY_SCHEMA, GIT4DATA_STORAGE_TABLE,
-	                          escaped_branch, escaped_source, escaped_storage, replaced);
+	                          quoted_storage, columns, quoted_storage, Git4DataTableSQLName(source_table),
+	                          escaped_branch, escaped_source, escaped_branch, escaped_storage, GIT4DATA_REGISTRY_SCHEMA,
+	                          GIT4DATA_STORAGE_TABLE, escaped_branch, escaped_source, GIT4DATA_REGISTRY_SCHEMA,
+	                          GIT4DATA_STORAGE_TABLE, escaped_branch, escaped_source, escaped_storage, replaced);
 }
 
 //! Take back what a branch was given for a source table: its table of its own, or the delta it differs
@@ -673,7 +671,7 @@ static void Git4DataBindBranchTableImpl(ClientContext &context, const FunctionPa
 	}
 	// both tables have to be there, or the mapping would be a promise the reads then have to break
 	auto &source_entry = Catalog::GetEntry<TableCatalogEntry>(context, QualifiedName(Identifier(source_table)));
-	auto &storage_entry = Catalog::GetEntry<TableCatalogEntry>(context, QualifiedName(Identifier(storage_table)));
+	auto &storage_entry = Git4DataResolveTable(context, storage_table);
 	// The read maps a branch's own table onto the source's columns *by position*, so the table has to have
 	// the source's columns in the source's order. Measured: a table holding (v, k) where the source holds
 	// (k, v) read back as k = 777 and v = 1 from a row that held k = 1 and v = 777. The delta path has
@@ -729,12 +727,10 @@ static string PragmaGit4DataBindBranchTable(ClientContext &context, const Functi
 	auto escape = [](const string &value) {
 		return StringUtil::Replace(value, "'", "''");
 	};
-	result += StringUtil::Format("DELETE FROM %s.%s WHERE branch = '%s' AND source = '%s';",
-	                             GIT4DATA_REGISTRY_SCHEMA, GIT4DATA_STORAGE_TABLE, escape(branch_name),
-	                             escape(source_table));
-	result += StringUtil::Format("DELETE FROM %s.%s WHERE branch = '%s' AND source = '%s';",
-	                             GIT4DATA_REGISTRY_SCHEMA, GIT4DATA_DELTAS_TABLE, escape(branch_name),
-	                             escape(source_table));
+	result += StringUtil::Format("DELETE FROM %s.%s WHERE branch = '%s' AND source = '%s';", GIT4DATA_REGISTRY_SCHEMA,
+	                             GIT4DATA_STORAGE_TABLE, escape(branch_name), escape(source_table));
+	result += StringUtil::Format("DELETE FROM %s.%s WHERE branch = '%s' AND source = '%s';", GIT4DATA_REGISTRY_SCHEMA,
+	                             GIT4DATA_DELTAS_TABLE, escape(branch_name), escape(source_table));
 	context.client_data->git4data_added_records.push_back("storage\t" + branch_name + "\t" + source_table);
 	result += StringUtil::Format("INSERT INTO %s.%s VALUES ('%s', '%s', '%s', %s);", GIT4DATA_REGISTRY_SCHEMA,
 	                             GIT4DATA_STORAGE_TABLE, escape(branch_name), escape(source_table),
@@ -764,8 +760,8 @@ static string PragmaGit4DataBindBranchDelta(ClientContext &context, const Functi
 		throw InvalidInputException("Branch \"%s\" does not exist", branch_name);
 	}
 	auto &source = Catalog::GetEntry<TableCatalogEntry>(context, QualifiedName(Identifier(source_table)));
-	auto &added = Catalog::GetEntry<TableCatalogEntry>(context, QualifiedName(Identifier(added_table)));
-	auto &removed = Catalog::GetEntry<TableCatalogEntry>(context, QualifiedName(Identifier(removed_table)));
+	auto &added = Git4DataResolveTable(context, added_table);
+	auto &removed = Git4DataResolveTable(context, removed_table);
 	// the added rows are read as rows of the source table, so the two have to be interchangeable
 	auto &source_columns = source.GetColumns();
 	// the added rows are read as rows of the source table, so the two have to be interchangeable
@@ -857,15 +853,14 @@ static string PragmaGit4DataBindBranchDelta(ClientContext &context, const Functi
 	                                           removed.oid, source.oid);
 	// the delta is a row too, and it replaces whatever that branch had for this source: one line, one source
 	string result = Git4DataEnsureRegistryTables(context);
-	result += StringUtil::Format("DELETE FROM %s.%s WHERE branch = '%s' AND source = '%s';",
-	                             GIT4DATA_REGISTRY_SCHEMA, GIT4DATA_DELTAS_TABLE,
-	                             StringUtil::Replace(branch_name, "'", "''"), StringUtil::Replace(source_table, "'", "''"));
-	context.client_data->git4data_added_records.push_back("delta\t" + branch_name + "\t" + source_table);
-	result += StringUtil::Format("INSERT INTO %s.%s VALUES ('%s', '%s', '%s', '%s');", GIT4DATA_REGISTRY_SCHEMA,
+	result += StringUtil::Format("DELETE FROM %s.%s WHERE branch = '%s' AND source = '%s';", GIT4DATA_REGISTRY_SCHEMA,
 	                             GIT4DATA_DELTAS_TABLE, StringUtil::Replace(branch_name, "'", "''"),
-	                             StringUtil::Replace(source_table, "'", "''"),
-	                             StringUtil::Replace(added_table, "'", "''"),
-	                             StringUtil::Replace(removed_table, "'", "''"));
+	                             StringUtil::Replace(source_table, "'", "''"));
+	context.client_data->git4data_added_records.push_back("delta\t" + branch_name + "\t" + source_table);
+	result += StringUtil::Format(
+	    "INSERT INTO %s.%s VALUES ('%s', '%s', '%s', '%s');", GIT4DATA_REGISTRY_SCHEMA, GIT4DATA_DELTAS_TABLE,
+	    StringUtil::Replace(branch_name, "'", "''"), StringUtil::Replace(source_table, "'", "''"),
+	    StringUtil::Replace(added_table, "'", "''"), StringUtil::Replace(removed_table, "'", "''"));
 	return result;
 }
 
@@ -1080,9 +1075,9 @@ static string PragmaGit4DataApply(ClientContext &context, const FunctionParamete
 	auto escape = [](const string &value) {
 		return StringUtil::Replace(value, "'", "''");
 	};
-	auto quoted_source = KeywordHelper::WriteOptionallyQuoted(table_name);
-	auto quoted_added = KeywordHelper::WriteOptionallyQuoted(added_table);
-	auto quoted_removed = KeywordHelper::WriteOptionallyQuoted(removed_table);
+	auto quoted_source = Git4DataTableSQLName(table_name);
+	auto quoted_added = Git4DataTableSQLName(added_table);
+	auto quoted_removed = Git4DataTableSQLName(removed_table);
 	auto at_clause = FormatGit4DataAtClause(table_name, branch_name, "BRANCH");
 	// the statement reads the source table, the branch's image of it and the two delta tables, so no
 	// alias may be a column of any of them
@@ -1392,8 +1387,7 @@ static string PragmaGit4DataMerge(ClientContext &context, const FunctionParamete
 			if (!StringUtil::CIEquals(storage_entry.source, table_name)) {
 				continue;
 			}
-			auto &storage_table =
-			    Catalog::GetEntry<TableCatalogEntry>(context, QualifiedName(Identifier(storage_entry.storage)));
+			auto &storage_table = Git4DataResolveTable(context, storage_entry.storage);
 			auto &storage_groups = *storage_table.GetStorage().GetRowGroupCollection();
 			transaction_t copy_commit = 0;
 			bool unwritten = true;
@@ -1505,8 +1499,8 @@ static string PragmaGit4DataMerge(ClientContext &context, const FunctionParamete
 		key_match_xy += alias_x + "." + quoted + " = " + alias_y + "." + quoted;
 		key_match_by += alias_y + "." + quoted + " = " + alias_both_rows + "." + quoted;
 	}
-	auto quoted_table = KeywordHelper::WriteOptionallyQuoted(table_name);
-	auto quoted_into = KeywordHelper::WriteOptionallyQuoted(merge_into);
+	auto quoted_table = Git4DataTableSQLName(table_name);
+	auto quoted_into = Git4DataTableSQLName(merge_into);
 	auto diff_left = StringUtil::Format("git4data_diff('%s', '%s', '%s')", escape(table_name), escape(base_reference),
 	                                    escape(left_name));
 	auto diff_right = StringUtil::Format("git4data_diff('%s', '%s', '%s')", escape(table_name), escape(base_reference),
@@ -1698,8 +1692,8 @@ static string PragmaGit4DataCreateBranch(ClientContext &context, const FunctionP
 	};
 	context.client_data->git4data_added_records.push_back("branch\t" + name);
 	result += StringUtil::Format("INSERT INTO %s.%s VALUES ('%s', %llu, '%s', TIMESTAMP '%s', '%s');",
-	                             GIT4DATA_REGISTRY_SCHEMA, GIT4DATA_BRANCHES_TABLE, escape(name), pin,
-	                             escape(parent), Timestamp::ToString(created), escape(base_line));
+	                             GIT4DATA_REGISTRY_SCHEMA, GIT4DATA_BRANCHES_TABLE, escape(name), pin, escape(parent),
+	                             Timestamp::ToString(created), escape(base_line));
 	return result;
 }
 
@@ -1749,7 +1743,7 @@ static string PragmaGit4DataDropBranch(ClientContext &context, const FunctionPar
 		if (transaction_manager.branches.OtherBranchUsesTable(name, resolved, entry.oid)) {
 			continue;
 		}
-		result += StringUtil::Format("DROP TABLE IF EXISTS %s;\n", KeywordHelper::WriteOptionallyQuoted(resolved));
+		result += StringUtil::Format("DROP TABLE IF EXISTS %s;\n", Git4DataTableSQLName(resolved));
 	}
 	transaction_manager.branches.Drop(name);
 	// and its rows, or the next open would read the branch back out of the tables: the branch, the table it
@@ -1919,9 +1913,9 @@ static string PragmaGit4DataCreateSnapshot(ClientContext &context, const Functio
 		return StringUtil::Replace(value, "'", "''");
 	};
 	context.client_data->git4data_added_records.push_back("snapshot\t" + name);
-	result += StringUtil::Format("INSERT INTO %s.%s VALUES ('%s', %llu, TIMESTAMP '%s', '%s');",
-	                             GIT4DATA_REGISTRY_SCHEMA, GIT4DATA_SNAPSHOTS_TABLE, escape(name), pin,
-	                             Timestamp::ToString(created), escape(line));
+	result +=
+	    StringUtil::Format("INSERT INTO %s.%s VALUES ('%s', %llu, TIMESTAMP '%s', '%s');", GIT4DATA_REGISTRY_SCHEMA,
+	                       GIT4DATA_SNAPSHOTS_TABLE, escape(name), pin, Timestamp::ToString(created), escape(line));
 	return result;
 }
 
@@ -2167,8 +2161,8 @@ void PragmaFunctions::RegisterFunction(BuiltinFunctions &set) {
 	set.AddFunction(
 	    PragmaFunction::PragmaCall("git4data_drop_snapshot", PragmaGit4DataDropSnapshot, {LogicalType::VARCHAR}));
 	// internal: what a statement the feature generates for itself calls to drop one of its own references
-	set.AddFunction(PragmaFunction::PragmaCall("git4data_forget_internal", PragmaGit4DataForgetInternal,
-	                                           {LogicalType::VARCHAR}));
+	set.AddFunction(
+	    PragmaFunction::PragmaCall("git4data_forget_internal", PragmaGit4DataForgetInternal, {LogicalType::VARCHAR}));
 	set.AddFunction(PragmaFunction::PragmaStatement("git4data_snapshots", PragmaGit4DataSnapshots));
 	set.AddFunction(PragmaFunction::PragmaCall("git4data_create_branch", PragmaGit4DataCreateBranch,
 	                                           {LogicalType::VARCHAR, LogicalType::VARCHAR}));

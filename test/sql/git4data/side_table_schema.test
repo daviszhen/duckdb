@@ -1,0 +1,217 @@
+# name: test/sql/git4data/side_table_schema.test
+# description: A delta's tables and a branch's copy are named by the caller, so they can live outside the schema a bare name resolves in
+# group: [git4data]
+
+# A delta and a copy are the caller's own tables, and the caller names them - possibly through a schema.
+# The name is recorded as written and every lookup behind a read resolves it again, so a helper that took
+# the name apart as one identifier, or turned a resolved table back into its bare name, reached a table of
+# that name in the default schema or none at all. Measured before the fix: binding a delta to s2.plus and
+# s2.minus threw "Table with name plus does not exist" on the first read of the branch, and materializing
+# into s2.copy created a table literally called "s2.copy" in the default schema.
+
+load {TEST_DIR}/side_table_schema.db
+
+statement ok
+CREATE TABLE t (k INTEGER PRIMARY KEY, v INTEGER)
+
+statement ok
+INSERT INTO t SELECT range, range FROM range(6)
+
+statement ok
+CHECKPOINT
+
+statement ok
+CREATE SCHEMA s2
+
+statement ok
+CREATE TABLE s2.plus (k INTEGER PRIMARY KEY, v INTEGER)
+
+statement ok
+CREATE TABLE s2.minus (k INTEGER PRIMARY KEY)
+
+statement ok
+INSERT INTO s2.plus VALUES (100, 100)
+
+statement ok
+INSERT INTO s2.minus VALUES (3)
+
+statement ok
+PRAGMA git4data_create_branch('d', '')
+
+statement ok
+PRAGMA git4data_bind_branch_delta('t', 'd', 's2.plus', 's2.minus')
+
+# the branch reads the base minus the removed key plus the added row, both of them through their schema
+query II
+SELECT k, v FROM t AT (BRANCH => 'd') ORDER BY k
+----
+0	0
+1	1
+2	2
+4	4
+5	5
+100	100
+
+# a table of the added one's *name* in the default schema is a different table, and the delta reads the
+# one it was given: the bare name is what the schema qualification exists to keep apart
+statement ok
+CREATE TABLE plus (k INTEGER PRIMARY KEY, v INTEGER)
+
+statement ok
+INSERT INTO plus VALUES (999, 999)
+
+statement ok
+CREATE TABLE minus (k INTEGER PRIMARY KEY)
+
+statement ok
+INSERT INTO minus VALUES (4)
+
+query II
+SELECT k, v FROM t AT (BRANCH => 'd') ORDER BY k
+----
+0	0
+1	1
+2	2
+4	4
+5	5
+100	100
+
+# writes through the delta land in the caller's tables, wherever they live
+statement ok
+PRAGMA git4data_apply('t', 'd', 'UPDATE t SET v = v + 10 WHERE k = 0')
+
+query I
+SELECT v FROM t AT (BRANCH => 'd') WHERE k = 0
+----
+10
+
+# the update is a key removed from the base and a row added in its place, and both landed in s2
+query II
+SELECT k, v FROM s2.plus ORDER BY k
+----
+0	10
+100	100
+
+query I
+SELECT k FROM s2.minus ORDER BY k
+----
+0
+3
+
+# and the live table is untouched by any of it
+query I
+SELECT v FROM t WHERE k = 0
+----
+0
+
+# the copy a materialize makes is named by the caller too, and it is created where it was asked for
+statement ok
+PRAGMA git4data_create_branch('b', '')
+
+statement ok
+PRAGMA git4data_materialize('t', 'b', 's2.copy')
+
+# one identifier holding a dot is not the table that was asked for, and no such table is left behind
+query I
+SELECT count(*) FROM information_schema.tables WHERE table_name = 's2.copy'
+----
+0
+
+query I
+SELECT count(*) FROM information_schema.tables WHERE table_schema = 's2' AND table_name = 'copy'
+----
+1
+
+statement ok
+UPDATE s2.copy SET v = 777 WHERE k = 1
+
+query I
+SELECT v FROM t AT (BRANCH => 'b') WHERE k = 1
+----
+777
+
+query I
+SELECT v FROM t WHERE k = 1
+----
+1
+
+# a branch reading a copy is served by that copy, so a restore from it rewinds the live table to it
+statement ok
+PRAGMA git4data_restore('t', 'b')
+
+query I
+SELECT v FROM t WHERE k = 1
+----
+777
+
+# a diff names the two sides' tables itself: one side here is a copy in another schema
+query II
+SELECT g4d_change, count(*) FROM git4data_diff('t', 'b', 'd') GROUP BY g4d_change ORDER BY g4d_change
+----
+added	1
+changed	2
+removed	1
+
+# the mapping is a row in the registry tables, so the qualified name comes back with the file
+statement ok
+CHECKPOINT
+
+restart
+
+query I
+SELECT v FROM t AT (BRANCH => 'b') WHERE k = 1
+----
+777
+
+query II
+SELECT k, v FROM t AT (BRANCH => 'd') WHERE k >= 100
+----
+100	100
+
+# dropping the branch takes the copy with it, which means dropping it by the name it resolves to rather
+# than by the name it was written under
+statement ok
+PRAGMA git4data_drop_branch('b')
+
+query I
+SELECT count(*) FROM information_schema.tables WHERE table_schema = 's2' AND table_name = 'copy'
+----
+0
+
+# the delta's tables are the caller's, so they stay when the mapping goes
+statement ok
+PRAGMA git4data_unbind('t', 'd')
+
+statement ok
+PRAGMA git4data_drop_branch('d')
+
+query II
+SELECT k, v FROM s2.plus WHERE k IN (0, 100) ORDER BY k
+----
+0	10
+100	100
+
+# A name holding a dot is read both ways: a table carrying that name exactly is the one reached, and only
+# where there is no such table does the dot separate a schema from a table. A delta can therefore name a
+# table called "d.a" - which is what a caller writes, quoting the name.
+statement ok
+CREATE TABLE "d.a" (k INTEGER PRIMARY KEY, v INTEGER)
+
+statement ok
+INSERT INTO "d.a" VALUES (500, 500)
+
+statement ok
+PRAGMA git4data_create_branch('dd', '')
+
+statement ok
+PRAGMA git4data_bind_branch_delta('t', 'dd', '"d.a"', 's2.minus')
+
+query II
+SELECT k, v FROM t AT (BRANCH => 'dd') WHERE k >= 100 ORDER BY k
+----
+500	500
+
+query II
+SELECT k, v FROM "d.a"
+----
+500	500

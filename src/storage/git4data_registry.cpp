@@ -6,11 +6,13 @@
 #include "duckdb/catalog/catalog_entry/table_catalog_entry.hpp"
 #include "duckdb/common/exception.hpp"
 #include "duckdb/common/types/data_chunk.hpp"
+#include "duckdb/parser/keyword_helper.hpp"
 #include "duckdb/common/types/timestamp.hpp"
 #include "duckdb/main/client_context.hpp"
 #include "duckdb/main/attached_database.hpp"
 #include "duckdb/main/database_manager.hpp"
 #include "duckdb/parser/column_definition.hpp"
+#include "duckdb/parser/qualified_name.hpp"
 #include "duckdb/parser/parsed_data/create_schema_info.hpp"
 #include "duckdb/parser/parsed_data/create_table_info.hpp"
 #include "duckdb/storage/table/row_group_collection.hpp"
@@ -80,8 +82,8 @@ static bool Git4DataRegistrySchema(ClientContext &context, optional_ptr<SchemaCa
 
 bool Git4DataRegistryTablesThere(ClientContext &context) {
 	auto entry = Catalog::GetEntry<TableCatalogEntry>(
-	    context, QualifiedName(vector<Identifier> {Identifier(GIT4DATA_REGISTRY_SCHEMA)},
-	                           Identifier(GIT4DATA_SNAPSHOTS_TABLE)),
+	    context,
+	    QualifiedName(vector<Identifier> {Identifier(GIT4DATA_REGISTRY_SCHEMA)}, Identifier(GIT4DATA_SNAPSHOTS_TABLE)),
 	    OnEntryNotFound::RETURN_NULL);
 	return entry != nullptr;
 }
@@ -115,8 +117,7 @@ bool Git4DataRegistryTablesExist(AttachedDatabase &db) {
 //! Call the callback once per row of a registry table, as of everything committed. The tables are read with
 //! a synthetic all-committed transaction: what they hold has been committed by the time the database serves
 //! anything, and the read is not the caller's own view of them.
-static void Git4DataScanRegistryTable(AttachedDatabase &db, TableCatalogEntry &table,
-                                      const vector<LogicalType> &types,
+static void Git4DataScanRegistryTable(AttachedDatabase &db, TableCatalogEntry &table, const vector<LogicalType> &types,
                                       const std::function<void(DataChunk &, idx_t)> &callback) {
 	vector<StorageIndex> column_ids;
 	for (idx_t i = 0; i < types.size(); i++) {
@@ -264,8 +265,7 @@ void Git4DataLoadRegistry(AttachedDatabase &db) {
 		return;
 	}
 	Git4DataScanRegistryTable(
-	    db, *snapshots,
-	    {LogicalType::VARCHAR, LogicalType::UBIGINT, LogicalType::TIMESTAMP, LogicalType::VARCHAR},
+	    db, *snapshots, {LogicalType::VARCHAR, LogicalType::UBIGINT, LogicalType::TIMESTAMP, LogicalType::VARCHAR},
 	    [&](DataChunk &chunk, idx_t row) {
 		    auto name = chunk.GetValue(0, row).GetValue<string>();
 		    auto pin = chunk.GetValue(1, row).GetValue<uint64_t>();
@@ -276,39 +276,39 @@ void Git4DataLoadRegistry(AttachedDatabase &db) {
 	// branches first: the two mappings are recorded against a branch, and their setters do nothing for a
 	// branch that is not there yet
 	if (branches) {
-	Git4DataScanRegistryTable(db, *branches,
-	                          {LogicalType::VARCHAR, LogicalType::UBIGINT, LogicalType::VARCHAR, LogicalType::TIMESTAMP,
-	                           LogicalType::VARCHAR},
-	                          [&](DataChunk &chunk, idx_t row) {
-		                          auto name = chunk.GetValue(0, row).GetValue<string>();
-		                          auto pin = chunk.GetValue(1, row).GetValue<uint64_t>();
-		                          auto parent = chunk.GetValue(2, row).GetValue<string>();
-		                          auto created = chunk.GetValue(3, row).GetValue<timestamp_t>();
-		                          auto base_line = chunk.GetValue(4, row).GetValue<string>();
-		                          transaction_manager.branches.Restore(name, pin, parent, created, base_line);
-	                          });
+		Git4DataScanRegistryTable(db, *branches,
+		                          {LogicalType::VARCHAR, LogicalType::UBIGINT, LogicalType::VARCHAR,
+		                           LogicalType::TIMESTAMP, LogicalType::VARCHAR},
+		                          [&](DataChunk &chunk, idx_t row) {
+			                          auto name = chunk.GetValue(0, row).GetValue<string>();
+			                          auto pin = chunk.GetValue(1, row).GetValue<uint64_t>();
+			                          auto parent = chunk.GetValue(2, row).GetValue<string>();
+			                          auto created = chunk.GetValue(3, row).GetValue<timestamp_t>();
+			                          auto base_line = chunk.GetValue(4, row).GetValue<string>();
+			                          transaction_manager.branches.Restore(name, pin, parent, created, base_line);
+		                          });
 	}
 	if (storage) {
-	Git4DataScanRegistryTable(db, *storage,
-	                          {LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::BOOLEAN},
-	                          [&](DataChunk &chunk, idx_t row) {
-		                          auto branch = chunk.GetValue(0, row).GetValue<string>();
-		                          auto source = chunk.GetValue(1, row).GetValue<string>();
-		                          auto storage = chunk.GetValue(2, row).GetValue<string>();
-		                          auto owned = chunk.GetValue(3, row).GetValue<bool>();
-		                          transaction_manager.branches.SetStorageTable(branch, source, storage, 0, 0, owned);
-	                          });
+		Git4DataScanRegistryTable(
+		    db, *storage, {LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::BOOLEAN},
+		    [&](DataChunk &chunk, idx_t row) {
+			    auto branch = chunk.GetValue(0, row).GetValue<string>();
+			    auto source = chunk.GetValue(1, row).GetValue<string>();
+			    auto storage = chunk.GetValue(2, row).GetValue<string>();
+			    auto owned = chunk.GetValue(3, row).GetValue<bool>();
+			    transaction_manager.branches.SetStorageTable(branch, source, storage, 0, 0, owned);
+		    });
 	}
 	if (deltas) {
-	Git4DataScanRegistryTable(db, *deltas,
-	                          {LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR},
-	                          [&](DataChunk &chunk, idx_t row) {
-		                          auto branch = chunk.GetValue(0, row).GetValue<string>();
-		                          auto source = chunk.GetValue(1, row).GetValue<string>();
-		                          auto added = chunk.GetValue(2, row).GetValue<string>();
-		                          auto removed = chunk.GetValue(3, row).GetValue<string>();
-		                          transaction_manager.branches.SetDeltaTable(branch, source, added, removed);
-	                          });
+		Git4DataScanRegistryTable(
+		    db, *deltas, {LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR},
+		    [&](DataChunk &chunk, idx_t row) {
+			    auto branch = chunk.GetValue(0, row).GetValue<string>();
+			    auto source = chunk.GetValue(1, row).GetValue<string>();
+			    auto added = chunk.GetValue(2, row).GetValue<string>();
+			    auto removed = chunk.GetValue(3, row).GetValue<string>();
+			    transaction_manager.branches.SetDeltaTable(branch, source, added, removed);
+		    });
 	}
 	// put the oids the records had back: the tables do not carry them, and they are what follows a renamed
 	// table or refuses one that took a name
@@ -344,6 +344,44 @@ void Git4DataLoadRegistry(AttachedDatabase &db) {
 //===----------------------------------------------------------------------===//
 // The guard
 //===----------------------------------------------------------------------===//
+optional_ptr<TableCatalogEntry> Git4DataResolveTableOrNull(ClientContext &context, const string &name) {
+	// a name taken from the catalog is one identifier, and a dot in it is part of the name - measured:
+	// reading a table named "a.b" at a branch looked it up as a table "b" in a schema "a" and found nothing
+	auto exact =
+	    Catalog::GetEntry<TableCatalogEntry>(context, QualifiedName(Identifier(name)), OnEntryNotFound::RETURN_NULL);
+	if (exact) {
+		return exact;
+	}
+	// a name a caller wrote may be qualified, which is the other reading of the same string: with no table
+	// of that literal name, the dot separates a schema from a table
+	auto qualified = QualifiedName::Parse(name);
+	return Catalog::GetEntry<TableCatalogEntry>(context, qualified, OnEntryNotFound::RETURN_NULL);
+}
+
+TableCatalogEntry &Git4DataResolveTable(ClientContext &context, const string &name) {
+	auto result = Git4DataResolveTableOrNull(context, name);
+	if (!result) {
+		throw CatalogException("Table with name %s does not exist", name);
+	}
+	return *result;
+}
+
+string Git4DataTableName(const TableCatalogEntry &table) {
+	auto &schema = table.ParentSchema().name.GetIdentifierName();
+	auto name = table.name.GetIdentifierName();
+	if (StringUtil::CIEquals(schema, DEFAULT_SCHEMA)) {
+		return name;
+	}
+	// the bare name would resolve to a table of that name in the default schema, or to none at all. Each
+	// component is quoted as its own identifier, so a name holding a dot is still part of a qualified name.
+	return KeywordHelper::WriteOptionallyQuoted(schema) + "." + KeywordHelper::WriteOptionallyQuoted(name);
+}
+
+string Git4DataTableSQLName(const string &name) {
+	// each component quoted as its own identifier, so a name holding a dot still names one table
+	return QualifiedName::Parse(name).ToString(QualifiedNameToStringMode::HIDE_DEFAULT_SCHEMA);
+}
+
 bool Git4DataIsRegistrySchema(const string &schema) {
 	return StringUtil::CIEquals(schema, GIT4DATA_REGISTRY_SCHEMA);
 }
