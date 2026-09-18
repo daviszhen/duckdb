@@ -1,0 +1,80 @@
+# name: test/sql/git4data/merge_captured_line.test
+# description: Merging a branch that was forked from a captured line, whose base is the snapshot that captured it
+# group: [git4data]
+
+# A child forked from a captured line has a *snapshot* for its parent rather than a branch, because what it
+# parted from is the state that snapshot holds. The branch ancestor walk therefore stops at the child, and a
+# merge that has to find an ancestor between it and the line's branch used to refuse: measured, "Branches
+# \"C\" and \"B\" share no ancestor to merge against". The base it needs is exactly that snapshot - it is the
+# state the two lines parted at - and a snapshot is a reference a diff takes, so the merge uses it.
+
+load {TEST_DIR}/merge_captured_line.db
+
+statement ok
+CREATE TABLE t (k INTEGER PRIMARY KEY, v INTEGER)
+
+statement ok
+INSERT INTO t VALUES (1, 10), (2, 20), (3, 30)
+
+statement ok
+CHECKPOINT
+
+statement ok
+PRAGMA git4data_create_branch('B', '')
+
+statement ok
+PRAGMA git4data_materialize('t', 'B', 'b_copy')
+
+statement ok
+UPDATE b_copy SET v = 111 WHERE k = 1
+
+# the snapshot captures B's own line, and the child is forked from that state
+statement ok
+PRAGMA git4data_create_snapshot('S', 'B')
+
+statement ok
+PRAGMA git4data_create_branch('C', 'S')
+
+query II
+SELECT k, v FROM t AT (BRANCH => 'C') ORDER BY k
+----
+1	111
+2	20
+3	30
+
+statement ok
+PRAGMA git4data_materialize('t', 'C', 'c_copy')
+
+statement ok
+UPDATE c_copy SET v = 222 WHERE k = 2
+
+# B moves on after the fork, which is what the merge has to bring over without touching C's own change
+statement ok
+UPDATE b_copy SET v = 333 WHERE k = 3
+
+# the merge: the base is the snapshot, so C keeps its change and takes B's
+statement ok
+PRAGMA git4data_merge('t', 'C', 'B', 'fail')
+
+query II
+SELECT k, v FROM t AT (BRANCH => 'C') ORDER BY k
+----
+1	111
+2	222
+3	333
+
+# B is untouched by a merge into C
+query II
+SELECT k, v FROM t AT (BRANCH => 'B') ORDER BY k
+----
+1	111
+2	20
+3	333
+
+# and the live table never moved
+query II
+SELECT k, v FROM t ORDER BY k
+----
+1	10
+2	20
+3	30

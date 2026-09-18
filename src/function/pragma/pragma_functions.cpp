@@ -1405,6 +1405,76 @@ static string BuildGit4DataRowComparison(TableCatalogEntry &table, const string 
 	return result;
 }
 
+//! The snapshot a merge between these two lines should use as its base, when one of them was forked from a
+//! *captured line*. Such a branch's parent is a snapshot rather than a branch, so the branch-ancestor walk
+//! stops at it and a merge that has to find an ancestor between it and the line's branch refuses: measured,
+//! `Branches "C" and "B" share no ancestor to merge against`. The state the two parted at is exactly what that
+//! snapshot holds - it captured the line at the commit the fork started from - and a diff takes a snapshot as
+//! readily as a branch, so its name is the base.
+//!
+//! The snapshot is not an *ancestor* of the line's branch: it was taken from it, and the branch has moved on
+//! since. So the question is not what both sides descend from but what they parted at: the snapshot this side
+//! descends from, whose captured line is on the other side's branch chain.
+static string Git4DataSharedSnapshotAncestor(DuckTransactionManager &transaction_manager, const string &a,
+                                             const string &b) {
+	auto all = transaction_manager.branches.List();
+	auto parent_of = [&](const string &name) {
+		for (auto &branch : all) {
+			if (branch.name == name) {
+				return branch.parent;
+			}
+		}
+		return string();
+	};
+	// the branches a line descends from, nearest first: the walk ends where the parent is not a branch
+	auto branch_chain = [&](const string &name) {
+		vector<string> chain;
+		auto current = name;
+		for (idx_t depth = 0; !current.empty() && depth <= all.size(); depth++) {
+			auto parent = parent_of(current);
+			if (parent.empty() && current != name) {
+				break;
+			}
+			chain.push_back(current);
+			Git4DataSnapshot parent_snapshot;
+			if (!parent.empty() && transaction_manager.snapshots.Get(parent, parent_snapshot)) {
+				break;
+			}
+			current = parent;
+		}
+		return chain;
+	};
+	// the nearest snapshot a line descends from, and the line it captured: a fork from a captured line is the
+	// only way a snapshot gets into a parent chain
+	auto captured = [&](const string &name, string &snapshot_name, string &line) {
+		auto current = name;
+		for (idx_t depth = 0; !current.empty() && depth <= all.size(); depth++) {
+			Git4DataSnapshot snapshot;
+			if (transaction_manager.snapshots.Get(current, snapshot)) {
+				snapshot_name = current;
+				line = snapshot.line;
+				return;
+			}
+			current = parent_of(current);
+		}
+	};
+	auto chain_a = branch_chain(a);
+	auto chain_b = branch_chain(b);
+	for (idx_t side = 0; side < 2; side++) {
+		string snapshot_name;
+		string line;
+		captured(side == 0 ? a : b, snapshot_name, line);
+		auto &other = side == 0 ? chain_b : chain_a;
+		if (snapshot_name.empty() || line.empty()) {
+			continue;
+		}
+		if (std::find(other.begin(), other.end(), line) != other.end()) {
+			return snapshot_name;
+		}
+	}
+	return string();
+}
+
 //! Merge one branch into another, three-way, with their least common ancestor as the base. The left
 //! branch is where the result lands, so it has to have storage of its own to be written to.
 //!
@@ -1445,8 +1515,14 @@ static string PragmaGit4DataMerge(ClientContext &context, const FunctionParamete
 	}
 	string ancestor;
 	if (!transaction_manager.branches.FindLCA(left_name, right_name, ancestor)) {
-		throw InvalidInputException("Branches \"%s\" and \"%s\" share no ancestor to merge against", left_name,
-		                            right_name);
+		// A child forked from a captured line has no *branch* ancestor, so what it parted from is the snapshot
+		// it was forked from - and that snapshot is a reference the diffs below take, exactly as an ancestor's
+		// name is. Naming it here is what makes such a line mergeable.
+		ancestor = Git4DataSharedSnapshotAncestor(transaction_manager, left_name, right_name);
+		if (ancestor.empty()) {
+			throw InvalidInputException("Branches \"%s\" and \"%s\" share no ancestor to merge against",
+			                            left_name, right_name);
+		}
 	}
 
 	// The base a three-way merge needs is the state the two lines parted at. An ancestor without a table
@@ -1538,7 +1614,7 @@ static string PragmaGit4DataMerge(ClientContext &context, const FunctionParamete
 		}
 	}
 
-	auto &table = Catalog::GetEntry<TableCatalogEntry>(context, QualifiedName(Identifier(table_name)));
+	auto &table = Git4DataResolveTable(context, table_name);
 	auto key_columns = Git4DataPrimaryKeyColumnNames(table);
 	if (key_columns.empty()) {
 		throw InvalidInputException("Table \"%s\" has no primary key, so a merge cannot tell which rows are "
