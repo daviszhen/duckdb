@@ -1,12 +1,17 @@
 # name: test/sql/git4data/schema_scope.test
-# description: A reference is read by the name a table resolves to, so a table reached through another schema's name is refused
+# description: A reference is keyed by the table, so a branch's line is read for the table a statement named
 # group: [git4data]
 
-# A reference is keyed by the *name* a table resolves to: the branch's own line and a delta are both
-# recorded against a name, and every lookup behind a read resolves that name again. A read that reached
-# one table and resolved the name to another would therefore be answered from that other table, which has
-# a line of its own. Measured before the check: with t holding (1, 10) and s2.t holding (7, 700),
-# `SELECT * FROM s2.t AT (BRANCH => 'b')` returned (1, 10).
+# A reference is keyed by the *table* it is about: what a branch was given, and what a delta differs by, are
+# recorded against a key that carries the schema, and a read derives that key from the table the statement
+# named rather than from the text it was reached through. Two schemas can hold a table of the same name, and
+# a read of one must not be answered by the other's line.
+#
+# The file used to assert the opposite, and the difference is worth stating: the key used to be the *name* a
+# table resolves to, so `SELECT * FROM s2.t AT (BRANCH => 'b')` was refused, because the name the read passed
+# on (`t`) resolved to the default schema's table and would have been answered from that table's line.
+# Measured then: with t holding (1, 10) and s2.t holding (1, 100), a read of s2.t at a branch was refused
+# rather than answered; what follows asserts that it is answered, by s2.t.
 
 statement ok
 CREATE TABLE t (k INTEGER PRIMARY KEY, v INTEGER)
@@ -41,7 +46,6 @@ PRAGMA git4data_create_branch('b', '')
 statement ok
 PRAGMA git4data_create_snapshot('s')
 
-# the table itself reads as its own line, so the refusals below are about the name and not the read
 query II
 SELECT k, v FROM t AT (BRANCH => 'b') ORDER BY k
 ----
@@ -56,17 +60,22 @@ SELECT k, v FROM s2.t ORDER BY k
 2	200
 3	300
 
-# a branch read of the other schema's table: "t" resolves to the default schema's table
-statement error
-SELECT * FROM s2.t AT (BRANCH => 'b')
+# a branch read of the other schema's table is answered by that table: the key carries its schema, so the
+# read reaches s2.t and nothing else. The branch holds no line of its own for it, so what it reads is s2.t at
+# the commit the branch pins - which is the state it was taken at.
+query II
+SELECT k, v FROM s2.t AT (BRANCH => 'b') ORDER BY k
 ----
-<REGEX>:.*Table "s2.t" is reached as "t".*
+1	100
+2	200
+3	300
 
-# and the same for a snapshot
-statement error
-SELECT * FROM s2.t AT (SNAPSHOT => 's')
+query II
+SELECT k, v FROM s2.t AT (SNAPSHOT => 's') ORDER BY k
 ----
-<REGEX>:.*Table "s2.t" is reached as "t".*
+1	100
+2	200
+3	300
 
 # a qualified name that resolves to the table it reaches is the read it says it is
 query II
@@ -76,8 +85,9 @@ SELECT k, v FROM main.t AT (BRANCH => 'b') ORDER BY k
 2	20
 3	30
 
-# the name is resolved the way the read resolves it, so a bare name under another schema is that
-# schema's table - and the default schema's table is then the one reached by another name
+# the name a statement writes is resolved the way SQL resolves it, so a bare name under another schema is
+# that schema's table - and the default schema's table is read by its own name from there, which the key
+# carries so that the read follows the statement rather than the search path
 statement ok
 SET schema='s2'
 
@@ -88,15 +98,18 @@ SELECT k, v FROM t AT (BRANCH => 'b') ORDER BY k
 2	200
 3	300
 
-statement error
-SELECT * FROM main.t AT (BRANCH => 'b')
+query II
+SELECT k, v FROM main.t AT (BRANCH => 'b') ORDER BY k
 ----
-<REGEX>:.*Table "main.t" is reached as "t".*
+1	10
+2	20
+3	30
 
 statement ok
 SET schema='main'
 
-# a branch that holds its own line for the table is refused on the same name
+# a branch that holds its own line for a table is read for *that* table: the copy is a line for t, and a read
+# of s2.t is not answered by it
 statement ok
 PRAGMA git4data_create_branch('bs', '')
 
@@ -109,17 +122,54 @@ INSERT INTO b_store VALUES (1, 111)
 statement ok
 PRAGMA git4data_bind_branch_table('t', 'bs', 'b_store')
 
-statement error
-SELECT * FROM s2.t AT (BRANCH => 'bs')
-----
-<REGEX>:.*Table "s2.t" is reached as "t".*
-
 query II
 SELECT k, v FROM t AT (BRANCH => 'bs')
 ----
 1	111
 
-# a branch that differs by a delta is refused on the same name too
+query II
+SELECT k, v FROM s2.t AT (BRANCH => 'bs') ORDER BY k
+----
+1	100
+2	200
+3	300
+
+# and two tables of the same name in two schemas keep two lines: a branch with a copy of s2.t reads that
+# copy, while the default schema's table reads its own state at the same branch
+statement ok
+PRAGMA git4data_create_branch('bs2', '')
+
+statement ok
+CREATE TABLE s2_copy (k INTEGER PRIMARY KEY, v INTEGER)
+
+statement ok
+INSERT INTO s2_copy VALUES (1, 222)
+
+statement ok
+PRAGMA git4data_bind_branch_table('s2.t', 'bs2', 's2_copy')
+
+query II
+SELECT k, v FROM s2.t AT (BRANCH => 'bs2')
+----
+1	222
+
+query II
+SELECT k, v FROM main.t AT (BRANCH => 'bs2') ORDER BY k
+----
+1	10
+2	20
+3	30
+
+# the mappings are recorded against the table, one row each, and the row keeps the name the table is called
+# by rather than the key the read matches it with
+query III
+SELECT branch, source, storage FROM git4data.storage ORDER BY branch
+----
+bs	t	b_store
+bs2	s2.t	s2_copy
+
+# a branch that differs by a delta is read for the table the delta is for: the delta on t does not answer a
+# read of s2.t
 statement ok
 CREATE TABLE t_add (k INTEGER PRIMARY KEY, v INTEGER)
 
@@ -135,17 +185,19 @@ INSERT INTO t_del VALUES (1)
 statement ok
 PRAGMA git4data_bind_branch_delta('t', 'b', 't_add', 't_del')
 
-statement error
-SELECT * FROM s2.t AT (BRANCH => 'b')
-----
-<REGEX>:.*Table "s2.t" is reached as "t".*
-
 query II
 SELECT k, v FROM t AT (BRANCH => 'b') ORDER BY k
 ----
 2	20
 3	30
 5	50
+
+query II
+SELECT k, v FROM s2.t AT (BRANCH => 'b') ORDER BY k
+----
+1	100
+2	200
+3	300
 
 # A write is translated rather than executed, so the name a statement writes is read once and never
 # again: the table the rows are for has to be the table the delta is for, not a table of that name in
@@ -166,40 +218,33 @@ PRAGMA git4data_apply('t', 'b', 'UPDATE s2.t SET v = 1')
 ----
 <REGEX>:.*statement writes "s2.t".*
 
-# a statement that *reads* the other schema's table would have that read answered by the branch's
-# line for "t", so it is refused where the read is
-statement error
-PRAGMA git4data_apply('t', 'b', 'INSERT INTO t SELECT * FROM s2.t')
-----
-<REGEX>:.*Table "s2.t" is reached as "t".*
+# a statement that *reads* the other schema's table is answered by that table, which is what the key is for:
+# the rows it brings in carry s2.t's values, not the branch's line for t
+statement ok
+PRAGMA git4data_apply('t', 'b', 'INSERT INTO t SELECT k + 100, v FROM s2.t')
 
-# none of the four recorded anything
 query II
-SELECT k, v FROM t AT (BRANCH => 'b') ORDER BY k
+SELECT k, v FROM t AT (BRANCH => 'b') WHERE k > 100 ORDER BY k
 ----
-2	20
-3	30
-5	50
-
-query I
-SELECT count(*) FROM t_add
-----
-1
+101	100
+102	200
+103	300
 
 # the write the caller meant still lands, and only it
 statement ok
 PRAGMA git4data_apply('t', 'b', 'INSERT INTO t VALUES (9, 900)')
 
 query II
-SELECT k, v FROM t AT (BRANCH => 'b') ORDER BY k
+SELECT k, v FROM t AT (BRANCH => 'b') WHERE k >= 9 ORDER BY k
 ----
-2	20
-3	30
-5	50
 9	900
+101	100
+102	200
+103	300
 
-# The check compares the name with what that name resolves to, so a table whose *name* contains a dot is
-# still the table the name resolves to - it is not read as a schema qualification and must not be refused.
+# A table whose *name* contains a dot is still the table a name resolves to - the name is tried as one
+# identifier before its dot is read as a schema qualification, so a key for `a.b` in the default schema
+# reaches it and not a table `b` in a schema `a`.
 query II
 SELECT k, v FROM "a.b" AT (BRANCH => 'b')
 ----
@@ -209,3 +254,26 @@ query II
 SELECT k, v FROM "a.b"
 ----
 1	10
+
+# A reference is kept in the database it belongs to, and the key carries a schema and a name but no catalog.
+# A read of a table in another attached database is therefore keyed by exactly what names the default
+# database's table of that name, and it is refused rather than answered from that table's line.
+statement ok
+ATTACH '{TEST_DIR}/schema_scope_other.db' AS other_db
+
+statement ok
+CREATE TABLE other_db.main.t (k INTEGER PRIMARY KEY, v INTEGER)
+
+statement ok
+INSERT INTO other_db.main.t VALUES (1, 999)
+
+statement error
+SELECT * FROM other_db.main.t AT (BRANCH => 'b')
+----
+<REGEX>:.*is keyed by the table a read names.*
+
+# the other database's table is read by name as it is
+query II
+SELECT k, v FROM other_db.main.t
+----
+1	999

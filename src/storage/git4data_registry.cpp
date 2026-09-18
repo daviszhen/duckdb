@@ -404,6 +404,74 @@ string Git4DataTableSQLName(const string &name) {
 	return QualifiedName::Parse(name).ToString(QualifiedNameToStringMode::HIDE_DEFAULT_SCHEMA);
 }
 
+string Git4DataSourceKey(const TableCatalogEntry &table) {
+	auto &schema = table.ParentSchema().name.GetIdentifierName();
+	auto name = table.name.GetIdentifierName();
+	// qualified even when the table is in the default schema, unlike the name a mapping's *tables* are held
+	// under: a reference is keyed by the table it is about, two schemas can hold a table of the same name, and
+	// a bare key would resolve through the search path rather than to the table the statement named - which is
+	// the ambiguity a reference read used to refuse.
+	return KeywordHelper::WriteOptionallyQuoted(schema) + "." + KeywordHelper::WriteOptionallyQuoted(name);
+}
+
+string Git4DataSourceKey(ClientContext &context, const string &written) {
+	// a name may be written any way a table can be named - bare, qualified, quoted - so the key comes from the
+	// table it reaches rather than from the text. A name that resolves to nothing is returned as written, and
+	// the caller's own error is the one that surfaces.
+	auto entry = Git4DataResolveTableOrNull(context, written);
+	if (!entry) {
+		return written;
+	}
+	return Git4DataSourceKey(*entry);
+}
+
+bool Git4DataSourceKeyMatches(ClientContext &context, const string &stored, const string &key) {
+	if (StringUtil::CIEquals(stored, key)) {
+		return true;
+	}
+	// A record written before keys carried a schema holds the name the caller wrote, which the search path
+	// resolved when it was written, so the stored name is matched by the table it resolves to as well - and
+	// both sides are resolved rather than compared as text, since `t` and `main.t` are one table while `t`
+	// under a search path that answers `other.t` is not.
+	auto stored_entry = Git4DataResolveTableOrNull(context, stored);
+	auto key_entry = Git4DataResolveTableOrNull(context, key);
+	if (stored_entry && key_entry) {
+		return stored_entry->oid == key_entry->oid;
+	}
+	// neither name resolves - the table is gone, which is what an apply after a drop looks like - so the two
+	// are compared as names: a stored name without a schema is the default schema's, exactly as it was written
+	auto stored_name = QualifiedName::Parse(stored);
+	auto key_name = QualifiedName::Parse(key);
+	auto stored_schema = stored_name.Schema().empty() ? string(DEFAULT_SCHEMA) : stored_name.Schema().GetIdentifierName();
+	auto key_schema = key_name.Schema().empty() ? string(DEFAULT_SCHEMA) : key_name.Schema().GetIdentifierName();
+	return StringUtil::CIEquals(stored_schema, key_schema) &&
+	       StringUtil::CIEquals(stored_name.Name().GetIdentifierName(), key_name.Name().GetIdentifierName());
+}
+
+optional_ptr<const Git4DataStorageTable> Git4DataFindStorageTable(ClientContext &context,
+                                                                const Git4DataBranch &branch,
+                                                            const string &key, idx_t source_oid) {
+	for (auto &entry : branch.storage_tables) {
+		if (Git4DataSourceKeyMatches(context, entry.source, key) ||
+		    (source_oid != 0 && entry.source_oid == source_oid)) {
+			return &entry;
+		}
+	}
+	return nullptr;
+}
+
+optional_ptr<const Git4DataBranchDelta> Git4DataFindDeltaTable(ClientContext &context,
+                                                             const Git4DataBranch &branch,
+                                                         const string &key, idx_t source_oid) {
+	for (auto &entry : branch.deltas) {
+		if (Git4DataSourceKeyMatches(context, entry.source, key) ||
+		    (source_oid != 0 && entry.source_oid == source_oid)) {
+			return &entry;
+		}
+	}
+	return nullptr;
+}
+
 bool Git4DataIsRegistrySchema(const string &schema) {
 	return StringUtil::CIEquals(schema, GIT4DATA_REGISTRY_SCHEMA);
 }

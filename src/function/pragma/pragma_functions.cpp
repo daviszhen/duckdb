@@ -325,6 +325,46 @@ static void Git4DataAddColumnNames(ClientContext &context, const string &table_n
 	}
 }
 
+//! The names a branch's mappings for one source are held under: the key, and whatever a record written before
+//! keys carried a schema holds. The statements that replace a mapping have to take every one of them, or a
+//! legacy row stays beside the new one and a read takes whichever it sees first.
+static vector<string> Git4DataStoredSourceNames(ClientContext &context, const Git4DataBranch &branch,
+                                                const string &key, idx_t source_oid, const string &record_name) {
+	vector<string> result;
+	result.push_back(key);
+	result.push_back(record_name);
+	auto remember = [&](const string &stored, idx_t stored_oid) {
+		if (stored_oid != 0 && source_oid != 0 && stored_oid != source_oid) {
+			return;
+		}
+		if (!Git4DataSourceKeyMatches(context, stored, key)) {
+			return;
+		}
+		if (std::find(result.begin(), result.end(), stored) == result.end()) {
+			result.push_back(stored);
+		}
+	};
+	for (auto &entry : branch.storage_tables) {
+		remember(entry.source, entry.source_oid);
+	}
+	for (auto &entry : branch.deltas) {
+		remember(entry.source, entry.source_oid);
+	}
+	return result;
+}
+
+//! Those names as an SQL list, escaped
+static string Git4DataEscapedList(const vector<string> &names) {
+	string result;
+	for (auto &name : names) {
+		if (!result.empty()) {
+			result += ", ";
+		}
+		result += "'" + StringUtil::Replace(name, "'", "''") + "'";
+	}
+	return result;
+}
+
 //! The columns every table a generated statement reads brings into scope: the source table, and for
 //! each named reference the table that reference reads its rows from - a branch with a line of its own
 //! reads that table rather than the source's columns.
@@ -333,12 +373,18 @@ static case_insensitive_set_t Git4DataScopeColumnNames(ClientContext &context,
                                                        const string &table_name, const vector<string> &references) {
 	case_insensitive_set_t names;
 	Git4DataAddColumnNames(context, table_name, names);
+	auto entry = Git4DataResolveTableOrNull(context, table_name);
+	auto key = entry ? Git4DataSourceKey(*entry) : table_name;
 	for (auto &reference : references) {
-		Git4DataStorageTable storage;
-		if (!transaction_manager.branches.GetStorageTable(reference, table_name, storage)) {
+		Git4DataBranch branch;
+		if (!transaction_manager.branches.Get(reference, branch)) {
 			continue;
 		}
-		auto resolved = Git4DataResolveTableName(context, storage.storage, storage.oid);
+		auto storage = Git4DataFindStorageTable(context, branch, key, entry ? entry->oid : 0);
+		if (!storage) {
+			continue;
+		}
+		auto resolved = Git4DataResolveTableName(context, storage->storage, storage->oid);
 		if (!resolved.empty()) {
 			Git4DataAddColumnNames(context, resolved, names);
 		}
@@ -520,8 +566,14 @@ static string PragmaGit4DataMaterialize(ClientContext &context, const FunctionPa
 	if (!transaction_manager.branches.Get(branch_name, branch)) {
 		throw InvalidInputException("Branch \"%s\" does not exist", branch_name);
 	}
-	// the source has to be there, and the target must not be
-	auto &table = Catalog::GetEntry<TableCatalogEntry>(context, QualifiedName(Identifier(source_table)));
+	// the source has to be there, and the target must not be. The name may be written any way a table can be
+	// named, and what a mapping is recorded against is the *table*: the key carries its schema, so a branch's
+	// line for one of two same-named tables is never read for the other.
+	auto &table = Git4DataResolveTable(context, source_table);
+	auto source_key = Git4DataSourceKey(table);
+	// what the row is written under keeps the name the table is usually called by, so a mapping for `t` stays
+	// readable as `t`; what it is *matched* by is the key, which carries the schema
+	auto record_name = Git4DataTableName(table);
 	auto key_columns = Git4DataPrimaryKeyColumnNames(table);
 	// the name a caller writes may be qualified, so it is parsed rather than taken as one identifier
 	if (Git4DataResolveTableOrNull(context, storage_table)) {
@@ -550,7 +602,8 @@ static string PragmaGit4DataMaterialize(ClientContext &context, const FunctionPa
 		}
 	}
 	auto quoted_storage = Git4DataTableSQLName(storage_table);
-	auto escaped_source = StringUtil::Replace(source_table, "'", "''");
+	auto escaped_source = StringUtil::Replace(record_name, "'", "''");
+	auto stored_source = Git4DataEscapedList(Git4DataStoredSourceNames(context, branch, source_key, table.oid, record_name));
 	auto escaped_branch = StringUtil::Replace(branch_name, "'", "''");
 	auto escaped_storage = StringUtil::Replace(storage_table, "'", "''");
 	// A second materialize of one source replaces the mapping, and the copy the first one made is then a
@@ -560,15 +613,14 @@ static string PragmaGit4DataMaterialize(ClientContext &context, const FunctionPa
 	// The caller's own table is left alone, and the drop comes last so the copy above still reads the
 	// branch as it was - the branch reads the table of its own that is about to go.
 	string replaced;
-	Git4DataStorageTable existing;
-	if (transaction_manager.branches.GetStorageTable(branch_name, source_table, existing) && existing.owned &&
-	    existing.storage != storage_table) {
-		auto resolved = Git4DataResolveTableName(context, existing.storage, existing.oid);
+	auto existing = Git4DataFindStorageTable(context, branch, source_key, table.oid);
+	if (existing && existing->owned && existing->storage != storage_table) {
+		auto resolved = Git4DataResolveTableName(context, existing->storage, existing->oid);
 		// it is not this branch's alone to take either: another branch can have been given it, or be *about*
 		// it, and taking it would leave that one reading its pin or with nothing to read - measured, a
 		// second materialize dropped the source table of a branch materialized from the first copy
 		if (!resolved.empty() &&
-		    !transaction_manager.branches.OtherBranchUsesTable(branch_name, resolved, existing.oid)) {
+		    !transaction_manager.branches.OtherBranchUsesTable(branch_name, resolved, existing->oid)) {
 			replaced = StringUtil::Format("\nDROP TABLE IF EXISTS %s;", Git4DataTableSQLName(resolved));
 		}
 	}
@@ -577,11 +629,11 @@ static string PragmaGit4DataMaterialize(ClientContext &context, const FunctionPa
 	// merge's cleanup hit. So the memory half is the internal pragma and the row is plain DML here.
 	return StringUtil::Format("CREATE TABLE %s (%s);\nINSERT INTO %s SELECT * FROM %s AT (BRANCH => '%s');\n"
 	                          "PRAGMA git4data_bind_internal('%s', '%s', '%s', 'true');\n"
-	                          "DELETE FROM %s.%s WHERE branch = '%s' AND source = '%s';\n"
+	                          "DELETE FROM %s.%s WHERE branch = '%s' AND source IN (%s);\n"
 	                          "INSERT INTO %s.%s VALUES ('%s', '%s', '%s', true);%s",
-	                          quoted_storage, columns, quoted_storage, Git4DataTableSQLName(source_table),
+	                          quoted_storage, columns, quoted_storage, Git4DataTableSQLName(source_key),
 	                          escaped_branch, escaped_source, escaped_branch, escaped_storage, GIT4DATA_REGISTRY_SCHEMA,
-	                          GIT4DATA_STORAGE_TABLE, escaped_branch, escaped_source, GIT4DATA_REGISTRY_SCHEMA,
+	                          GIT4DATA_STORAGE_TABLE, escaped_branch, stored_source, GIT4DATA_REGISTRY_SCHEMA,
 	                          GIT4DATA_STORAGE_TABLE, escaped_branch, escaped_source, escaped_storage, replaced);
 }
 
@@ -603,9 +655,11 @@ static string PragmaGit4DataUnbind(ClientContext &context, const FunctionParamet
 	};
 	// a source table can be renamed under the mapping, and a read follows it by oid; the mapping is taken
 	// back the same way, so the table's new name reaches what its old one recorded
-	auto named = Catalog::GetEntry<TableCatalogEntry>(context, QualifiedName(Identifier(table_name)),
-	                                                  OnEntryNotFound::RETURN_NULL);
+	auto named = Git4DataResolveTableOrNull(context, table_name);
 	auto source_oid = named ? named->oid : 0;
+	// what a mapping is recorded against is the table, so the key is what finds it - and the key of a name
+	// that resolves to nothing is the name itself, which is what a mapping for a dropped source is held under
+	auto source_key = named ? Git4DataSourceKey(*named) : table_name;
 	// what it unbinds is a row in the registry tables as well, so the statement it returns drops it: a
 	// mapping left behind would be read back at the next open
 	auto drop_row = [&](const char *table, const string &cleared) {
@@ -615,31 +669,31 @@ static string PragmaGit4DataUnbind(ClientContext &context, const FunctionParamet
 		return StringUtil::Format("DELETE FROM %s.%s WHERE branch = '%s' AND source = '%s';", GIT4DATA_REGISTRY_SCHEMA,
 		                          table, escape(branch_name), escape(cleared));
 	};
-	Git4DataStorageTable storage;
-	if (transaction_manager.branches.GetStorageTable(branch_name, table_name, storage, source_oid)) {
+	auto storage = Git4DataFindStorageTable(context, branch, source_key, source_oid);
+	if (storage) {
 		// the mapping is found and cleared by the same comparison, so a name that differs only in case
 		// cannot be reported as unbound while the mapping stays - measured, that is exactly what happened
 		// before the clearing comparison was made case-insensitive with the finding one. The name cleared
 		// by is the one the mapping was written with, which is also the one an oid match found.
-		if (!transaction_manager.branches.ClearStorageTable(branch_name, storage.source)) {
+		if (!transaction_manager.branches.ClearStorageTable(branch_name, storage->source)) {
 			throw InternalException("Could not unbind branch \"%s\" from \"%s\"", branch_name, table_name);
 		}
 		// the table itself is the caller's: it was created for the branch by materialize, and a caller
 		// who gave one by hand would not expect this call to drop it either
-		return drop_row(GIT4DATA_STORAGE_TABLE, storage.source) +
+		return drop_row(GIT4DATA_STORAGE_TABLE, storage->source) +
 		       StringUtil::Format("SELECT '%s'::VARCHAR AS branch, '%s'::VARCHAR AS table_name, 'storage' AS "
 		                          "unbound, '%s'::VARCHAR AS was",
-		                          escape(branch_name), escape(table_name), escape(storage.storage));
+		                          escape(branch_name), escape(table_name), escape(storage->storage));
 	}
-	Git4DataBranchDelta delta;
-	if (transaction_manager.branches.GetDeltaTable(branch_name, table_name, delta, source_oid)) {
-		if (!transaction_manager.branches.ClearDeltaTable(branch_name, delta.source)) {
+	auto delta = Git4DataFindDeltaTable(context, branch, source_key, source_oid);
+	if (delta) {
+		if (!transaction_manager.branches.ClearDeltaTable(branch_name, delta->source)) {
 			throw InternalException("Could not unbind branch \"%s\" from \"%s\"", branch_name, table_name);
 		}
-		return drop_row(GIT4DATA_DELTAS_TABLE, delta.source) +
+		return drop_row(GIT4DATA_DELTAS_TABLE, delta->source) +
 		       StringUtil::Format("SELECT '%s'::VARCHAR AS branch, '%s'::VARCHAR AS table_name, 'delta' AS "
 		                          "unbound, '%s'::VARCHAR AS was",
-		                          escape(branch_name), escape(table_name), escape(delta.added));
+		                          escape(branch_name), escape(table_name), escape(delta->added));
 	}
 	throw InvalidInputException("Branch \"%s\" has neither a table of its own nor a delta for \"%s\", so "
 	                            "there is nothing to unbind",
@@ -670,7 +724,11 @@ static void Git4DataBindBranchTableImpl(ClientContext &context, const FunctionPa
 		throw InvalidInputException("Branch \"%s\" does not exist", branch_name);
 	}
 	// both tables have to be there, or the mapping would be a promise the reads then have to break
-	auto &source_entry = Catalog::GetEntry<TableCatalogEntry>(context, QualifiedName(Identifier(source_table)));
+	auto &source_entry = Git4DataResolveTable(context, source_table);
+	// a mapping is recorded against the *table*: the key carries its schema, so a branch's line for one of two
+	// same-named tables is not read for the other
+	auto source_key = Git4DataSourceKey(source_entry);
+	auto record_name = Git4DataTableName(source_entry);
 	auto &storage_entry = Git4DataResolveTable(context, storage_table);
 	// The read maps a branch's own table onto the source's columns *by position*, so the table has to have
 	// the source's columns in the source's order. Measured: a table holding (v, k) where the source holds
@@ -694,11 +752,13 @@ static void Git4DataBindBranchTableImpl(ClientContext &context, const FunctionPa
 	// both oids go with the mapping: the storage table's so a read can tell it from another table that
 	// takes its name after it is dropped, and the source's so the mapping follows the source if it is
 	// renamed
-	transaction_manager.branches.SetStorageTable(branch_name, source_table, storage_table, storage_entry.oid,
+	transaction_manager.branches.SetStorageTable(branch_name, record_name, storage_table, storage_entry.oid,
 	                                             source_entry.oid, owned);
 	// the copy is the branch's line from here on, so a delta beside it would be a second one that nothing
-	// reads - the branch reads its own table the moment it has one
-	transaction_manager.branches.ClearDeltaTable(branch_name, source_table);
+	// reads - the branch reads its own table the moment it has one. A delta recorded before keys carried a
+	// schema is held under the name it was written with, so it is cleared by that name.
+	auto existing_delta = Git4DataFindDeltaTable(context, branch, source_key, source_entry.oid);
+	transaction_manager.branches.ClearDeltaTable(branch_name, existing_delta ? existing_delta->source : source_key);
 }
 
 //! The caller's form of the same thing: it also returns the row that records the mapping, so the branch
@@ -722,18 +782,28 @@ static string PragmaGit4DataBindBranchTable(ClientContext &context, const Functi
 		}
 		owned = flag == "true";
 	}
+	// the branch is read before the binding, because what the mapping replaces is what it held *before* - a row
+	// written by a build that named the source differently is one this statement has to take with it
+	auto &transaction_manager = GetGit4DataTransactionManager(context);
+	Git4DataBranch before;
+	transaction_manager.branches.Get(branch_name, before);
+	auto &bound_source = Git4DataResolveTable(context, source_table);
+	auto source_key = Git4DataSourceKey(bound_source);
+	auto record_name = Git4DataTableName(bound_source);
+	auto stored =
+	    Git4DataEscapedList(Git4DataStoredSourceNames(context, before, source_key, bound_source.oid, record_name));
 	Git4DataBindBranchTableImpl(context, parameters);
 	string result = Git4DataEnsureRegistryTables(context);
 	auto escape = [](const string &value) {
 		return StringUtil::Replace(value, "'", "''");
 	};
-	result += StringUtil::Format("DELETE FROM %s.%s WHERE branch = '%s' AND source = '%s';", GIT4DATA_REGISTRY_SCHEMA,
-	                             GIT4DATA_STORAGE_TABLE, escape(branch_name), escape(source_table));
-	result += StringUtil::Format("DELETE FROM %s.%s WHERE branch = '%s' AND source = '%s';", GIT4DATA_REGISTRY_SCHEMA,
-	                             GIT4DATA_DELTAS_TABLE, escape(branch_name), escape(source_table));
-	context.client_data->git4data_added_records.push_back("storage\t" + branch_name + "\t" + source_table);
+	result += StringUtil::Format("DELETE FROM %s.%s WHERE branch = '%s' AND source IN (%s);", GIT4DATA_REGISTRY_SCHEMA,
+	                             GIT4DATA_STORAGE_TABLE, escape(branch_name), stored);
+	result += StringUtil::Format("DELETE FROM %s.%s WHERE branch = '%s' AND source IN (%s);", GIT4DATA_REGISTRY_SCHEMA,
+	                             GIT4DATA_DELTAS_TABLE, escape(branch_name), stored);
+	context.client_data->git4data_added_records.push_back("storage\t" + branch_name + "\t" + record_name);
 	result += StringUtil::Format("INSERT INTO %s.%s VALUES ('%s', '%s', '%s', %s);", GIT4DATA_REGISTRY_SCHEMA,
-	                             GIT4DATA_STORAGE_TABLE, escape(branch_name), escape(source_table),
+	                             GIT4DATA_STORAGE_TABLE, escape(branch_name), escape(record_name),
 	                             escape(storage_table), owned ? "true" : "false");
 	return result;
 }
@@ -759,7 +829,11 @@ static string PragmaGit4DataBindBranchDelta(ClientContext &context, const Functi
 	if (!transaction_manager.branches.Get(branch_name, branch)) {
 		throw InvalidInputException("Branch \"%s\" does not exist", branch_name);
 	}
-	auto &source = Catalog::GetEntry<TableCatalogEntry>(context, QualifiedName(Identifier(source_table)));
+	auto &source = Git4DataResolveTable(context, source_table);
+	// a delta is recorded against the *table*, so its key carries the schema: two same-named tables in two
+	// schemas have two lines, and neither is read for the other
+	auto source_key = Git4DataSourceKey(source);
+	auto record_name = Git4DataTableName(source);
 	auto &added = Git4DataResolveTable(context, added_table);
 	auto &removed = Git4DataResolveTable(context, removed_table);
 	// the added rows are read as rows of the source table, so the two have to be interchangeable
@@ -828,7 +902,7 @@ static string PragmaGit4DataBindBranchDelta(ClientContext &context, const Functi
 		Git4DataBranch line_branch;
 		if (transaction_manager.branches.Get(branch.base_line, line_branch)) {
 			for (auto &line_delta : line_branch.deltas) {
-				if (!StringUtil::CIEquals(line_delta.source, source_table)) {
+				if (!Git4DataSourceKeyMatches(context, line_delta.source, source_key)) {
 					continue;
 				}
 				throw InvalidInputException(
@@ -840,7 +914,7 @@ static string PragmaGit4DataBindBranchDelta(ClientContext &context, const Functi
 		}
 	}
 	for (auto &storage_entry : branch.storage_tables) {
-		if (!StringUtil::CIEquals(storage_entry.source, source_table)) {
+		if (!Git4DataSourceKeyMatches(context, storage_entry.source, source_key)) {
 			continue;
 		}
 		// one line, one source: a branch that already reads a table of its own reads that, and a delta
@@ -849,17 +923,18 @@ static string PragmaGit4DataBindBranchDelta(ClientContext &context, const Functi
 		                            "rather than a delta. A delta is for a branch that has no copy.",
 		                            branch_name, source_table);
 	}
-	transaction_manager.branches.SetDeltaTable(branch_name, source_table, added_table, removed_table, added.oid,
+	transaction_manager.branches.SetDeltaTable(branch_name, record_name, added_table, removed_table, added.oid,
 	                                           removed.oid, source.oid);
-	// the delta is a row too, and it replaces whatever that branch had for this source: one line, one source
+	// the delta is a row too, and it replaces whatever that branch had for this source: one line, one source,
+	// under every name a record for that table could have been written with
+	auto stored = Git4DataEscapedList(Git4DataStoredSourceNames(context, branch, source_key, source.oid, record_name));
 	string result = Git4DataEnsureRegistryTables(context);
-	result += StringUtil::Format("DELETE FROM %s.%s WHERE branch = '%s' AND source = '%s';", GIT4DATA_REGISTRY_SCHEMA,
-	                             GIT4DATA_DELTAS_TABLE, StringUtil::Replace(branch_name, "'", "''"),
-	                             StringUtil::Replace(source_table, "'", "''"));
-	context.client_data->git4data_added_records.push_back("delta\t" + branch_name + "\t" + source_table);
+	result += StringUtil::Format("DELETE FROM %s.%s WHERE branch = '%s' AND source IN (%s);", GIT4DATA_REGISTRY_SCHEMA,
+	                             GIT4DATA_DELTAS_TABLE, StringUtil::Replace(branch_name, "'", "''"), stored);
+	context.client_data->git4data_added_records.push_back("delta\t" + branch_name + "\t" + record_name);
 	result += StringUtil::Format(
 	    "INSERT INTO %s.%s VALUES ('%s', '%s', '%s', '%s');", GIT4DATA_REGISTRY_SCHEMA, GIT4DATA_DELTAS_TABLE,
-	    StringUtil::Replace(branch_name, "'", "''"), StringUtil::Replace(source_table, "'", "''"),
+	    StringUtil::Replace(branch_name, "'", "''"), StringUtil::Replace(record_name, "'", "''"),
 	    StringUtil::Replace(added_table, "'", "''"), StringUtil::Replace(removed_table, "'", "''"));
 	return result;
 }
@@ -1041,17 +1116,18 @@ static string PragmaGit4DataApply(ClientContext &context, const FunctionParamete
 	}
 	// the source table can be renamed under the mapping, and the mapping follows the table it was bound to:
 	// the oid finds the delta a name no longer does, exactly as it does on a read
-	auto already = Catalog::GetEntry<TableCatalogEntry>(context, QualifiedName(Identifier(table_name)),
-	                                                    OnEntryNotFound::RETURN_NULL);
-	Git4DataBranchDelta delta;
-	if (!transaction_manager.branches.GetDeltaTable(branch_name, table_name, delta, already ? already->oid : 0)) {
+	auto already = Git4DataResolveTableOrNull(context, table_name);
+	auto write_key = already ? Git4DataSourceKey(*already) : table_name;
+	auto found_delta = Git4DataFindDeltaTable(context, branch, write_key, already ? already->oid : 0);
+	if (!found_delta) {
 		throw InvalidInputException(
 		    "Branch \"%s\" does not differ from its base by a delta for \"%s\", so a write has nowhere to be "
 		    "recorded. Give the branch a delta for that table first, or materialize the branch and write to the "
 		    "table it then has of its own.",
 		    branch_name, table_name);
 	}
-	auto &table = Catalog::GetEntry<TableCatalogEntry>(context, QualifiedName(Identifier(table_name)));
+	auto delta = *found_delta;
+	auto &table = Git4DataResolveTable(context, table_name);
 	auto key_columns = Git4DataPrimaryKeyColumnNames(table);
 	if (key_columns.empty()) {
 		throw InvalidInputException("Table \"%s\" has no primary key, so a delta cannot say which rows a write "
@@ -1354,8 +1430,10 @@ static string PragmaGit4DataMerge(ClientContext &context, const FunctionParamete
 		throw InvalidInputException("Branch \"%s\" does not exist", right_name);
 	}
 	string merge_into;
+	auto &merge_source = Git4DataResolveTable(context, table_name);
+	auto merge_key = Git4DataSourceKey(merge_source);
 	for (auto &entry : left.storage_tables) {
-		if (StringUtil::CIEquals(entry.source, table_name)) {
+		if (Git4DataSourceKeyMatches(context, entry.source, merge_key)) {
 			// the table the branch was given can have been renamed, and the merge writes into it
 			merge_into = Git4DataResolveTableName(context, entry.storage, entry.oid);
 		}
@@ -1384,7 +1462,7 @@ static string PragmaGit4DataMerge(ClientContext &context, const FunctionParamete
 	bool drop_merge_base = false;
 	if (transaction_manager.branches.Get(ancestor, ancestor_branch)) {
 		for (auto &storage_entry : ancestor_branch.storage_tables) {
-			if (!StringUtil::CIEquals(storage_entry.source, table_name)) {
+			if (!Git4DataSourceKeyMatches(context, storage_entry.source, merge_key)) {
 				continue;
 			}
 			auto &storage_table = Git4DataResolveTable(context, storage_entry.storage);
@@ -1424,8 +1502,7 @@ static string PragmaGit4DataMerge(ClientContext &context, const FunctionParamete
 				// either - and a table that holds rows now has been written to.
 				idx_t rows_at_copy = 0;
 				if (storage_groups.GetTotalRows() > 0 || storage_groups.GetRowGroupCount() > 0) {
-					auto &source_table =
-					    Catalog::GetEntry<TableCatalogEntry>(context, QualifiedName(Identifier(table_name)));
+					auto &source_table = Git4DataResolveTable(context, table_name);
 					auto &source_groups = *source_table.GetStorage().GetRowGroupCollection();
 					ScanOptions pinned(
 					    TransactionData(MAX_TRANSACTION_ID, VisibilityBound::Through(ancestor_branch.pin)));
@@ -2002,7 +2079,7 @@ static string PragmaGit4DataState(ClientContext &context, const FunctionParamete
 //! pinned it reports the pre-image row count, so retention across a checkpoint can
 //! be observed directly.
 static string Git4DataProbe(ClientContext &context, const string &table_name, TableScanType scan_type) {
-	auto &table = Catalog::GetEntry<TableCatalogEntry>(context, QualifiedName(Identifier(table_name)));
+	auto &table = Git4DataResolveTable(context, table_name);
 	auto &storage = table.GetStorage();
 	auto &row_groups = *storage.GetRowGroupCollection();
 	auto &types = row_groups.GetTypes();
@@ -2086,7 +2163,7 @@ static string PragmaGit4DataProbeAt(ClientContext &context, const FunctionParame
 	auto table_name = parameters.values[0].ToString();
 	auto bound_value = parameters.values[1].GetValue<int64_t>();
 
-	auto &table = Catalog::GetEntry<TableCatalogEntry>(context, QualifiedName(Identifier(table_name)));
+	auto &table = Git4DataResolveTable(context, table_name);
 	auto &storage = table.GetStorage();
 	auto &row_groups = *storage.GetRowGroupCollection();
 

@@ -16,6 +16,7 @@
 #include "duckdb/catalog/catalog_search_path.hpp"
 #include "duckdb/planner/tableref/bound_at_clause.hpp"
 #include "duckdb/function/table/system_functions.hpp"
+#include "duckdb/storage/git4data_registry.hpp"
 #include "duckdb/execution/expression_executor.hpp"
 #include "duckdb/parser/query_node/cte_node.hpp"
 #include "duckdb/planner/operator/logical_dummy_scan.hpp"
@@ -305,12 +306,16 @@ BoundStatement Binder::Bind(BaseTableRef &ref) {
 		    make_uniq<LogicalGet>(table_index, scan_function, std::move(bind_data), std::move(return_types),
 		                          std::move(return_names), std::move(virtual_columns));
 		if (is_reference_at) {
-			// the read itself carries a name and resolves it again, so a table reached by a name that
-			// resolves to a different table is caught here, where both are still known
-			Git4DataSnapshotScanFun::CheckReferenceSource(context, table, ref.GetQualifiedName().ToString());
+			// the read is keyed by the table the statement named, not by the name it was reached through: a
+			// reference is about a table, and two schemas can hold a table of the same name. The key carries
+			// its schema, so resolving it again behind the read reaches the same table - and where it does
+			// not, which is what a table of another database looks like, the read is refused rather than
+			// answered from the table the key does reach
+			auto key = Git4DataSourceKey(table);
+			Git4DataSnapshotScanFun::CheckReferenceSource(context, table, key);
 			logical_get->function = Git4DataSnapshotScanFun::GetFunction();
 			logical_get->bind_data = Git4DataSnapshotScanFun::CreateBindData(
-			    context, ref.Table().GetIdentifierName(), at_clause->GetValue().ToString(), reference_kind);
+			    context, key, at_clause->GetValue().ToString(), reference_kind);
 			// the underlying table declared virtual columns for the base scan; the reference
 			// scan has none, and keeping them would demand projection pushdown it does not do
 			logical_get->virtual_columns.clear();

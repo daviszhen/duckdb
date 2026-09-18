@@ -8,6 +8,7 @@
 
 #pragma once
 
+#include "duckdb/transaction/duck_transaction_manager.hpp"
 #include "duckdb/common/string.hpp"
 
 namespace duckdb {
@@ -78,6 +79,27 @@ optional_ptr<TableCatalogEntry> Git4DataResolveTableOrNull(ClientContext &contex
 string Git4DataTableName(const TableCatalogEntry &table);
 //! A possibly-qualified name as SQL, with every component quoted as its own identifier
 string Git4DataTableSQLName(const string &name);
+//! The key a reference is held under for a table: its schema and its name, always qualified, because two
+//! schemas can hold a table of the same name and a bare key would also resolve through the search path rather
+//! than to the table the statement named.
+string Git4DataSourceKey(const TableCatalogEntry &table);
+//! The same key for the table a caller named, however it was written; a name that resolves to nothing is
+//! returned as written, so the caller's own error is the one that surfaces.
+string Git4DataSourceKey(ClientContext &context, const string &written);
+//! Whether a record's stored source name is about the table a key names. A record written before keys carried
+//! a schema holds the name the caller wrote, so the stored name is matched as text first and then by the table
+//! it resolves to.
+bool Git4DataSourceKeyMatches(ClientContext &context, const string &stored, const string &key);
+//! The table a branch was given for a source, or the delta it differs by, matched by key and then by the table
+//! a stored name resolves to and by the source's oid. A record written before keys carried a schema holds the
+//! name the caller wrote, and a source that has been renamed matches by neither name - the oid is what follows
+//! it, exactly as on a read.
+optional_ptr<const Git4DataStorageTable> Git4DataFindStorageTable(ClientContext &context,
+                                                                const Git4DataBranch &branch,
+                                                            const string &key, idx_t source_oid = 0);
+optional_ptr<const Git4DataBranchDelta> Git4DataFindDeltaTable(ClientContext &context,
+                                                             const Git4DataBranch &branch,
+                                                         const string &key, idx_t source_oid = 0);
 
 //! Whether a schema name is the one the registry keeps its references in
 bool Git4DataIsRegistrySchema(const string &schema);

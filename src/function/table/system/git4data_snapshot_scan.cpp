@@ -263,32 +263,26 @@ string Git4DataResolveTableName(ClientContext &context, const string &name, idx_
 	return Git4DataTableName(*by_oid);
 }
 
-//! A reference is keyed by the name a table resolves to, and every lookup behind a read resolves that
-//! name again. The binder is the last place where the table the caller named is still known, so a name
-//! that reaches one table and resolves to another is refused here rather than answered from that other
-//! table, which has a line of its own.
+//! A reference is keyed by the table a statement named, and the key is resolved again behind the read. The
+//! binder is the last place where that table is still known, so a key that does not resolve back to it is
+//! refused here rather than answered from whatever it does reach: the key carries a schema and a name and no
+//! catalog, so a read of a table in another attached database is keyed by what names the default database's
+//! table - measured, the read would be answered with that table's line.
 void Git4DataSnapshotScanFun::CheckReferenceSource(ClientContext &context, TableCatalogEntry &table,
-                                                   const string &written_name) {
-	auto name = table.name.GetIdentifierName();
-	auto by_name =
-	    Catalog::GetEntry<TableCatalogEntry>(context, QualifiedName(Identifier(name)), OnEntryNotFound::RETURN_NULL);
-	if (by_name && by_name->oid == table.oid) {
+                                                   const string &key) {
+	auto by_key = Git4DataResolveTableOrNull(context, key);
+	if (by_key && by_key->oid == table.oid) {
 		return;
 	}
-	if (!by_name) {
-		throw InvalidInputException(
-		    "Table \"%s\" is reached as \"%s\", and a reference read is answered by name: \"%s\" resolves to no "
-		    "table here, so a read of \"%s\" at a reference would be answered from whichever table that name does "
-		    "resolve to. Read the table the reference is about, or read this one without a reference.",
-		    written_name, name, name, written_name);
-	}
 	throw InvalidInputException(
-	    "Table \"%s\" is reached as \"%s\", and a reference read is answered by name: \"%s\" resolves to \"%s\" "
-	    "in schema \"%s\", which is a different table with a line of its own, so a read of \"%s\" at a reference "
-	    "would answer with that table's line. Read the table the reference is about, or read this one without a "
-	    "reference.",
-	    written_name, name, name, by_name->name.GetIdentifierName(), by_name->ParentSchema().name.GetIdentifierName(),
-	    written_name);
+	    "Table \"%s\" is reached as \"%s\" in catalog %s, and a reference is keyed by the table a read names: "
+	    "the key \"%s\" reaches %s, so the read would be answered from that table's line. A reference is kept "
+	    "in the database it belongs to, and a table of another database cannot be its source.",
+	    table.name.GetIdentifierName(), table.ParentSchema().name.GetIdentifierName(),
+	    table.ParentCatalog().GetName(), key,
+	    by_key ? "\"" + by_key->name.GetIdentifierName() + "\" in schema \"" +
+	                 by_key->ParentSchema().name.GetIdentifierName() + "\""
+	           : "no table here");
 }
 
 //! The table backing a branch for a source table, or empty when the branch has no line of its own
@@ -301,14 +295,14 @@ void Git4DataSnapshotScanFun::CheckReferenceSource(ClientContext &context, Table
 //! catalog's oids do not survive a reopen.
 static string Git4DataBranchStorageTable(ClientContext &context, const Git4DataBranch &branch,
                                          const string &table_name) {
-	// The mapping is keyed by the source table's *name*, and a source table can be renamed. The name it
-	// was given under then matches nothing, and the branch would silently read its pinned image instead of
-	// the line it holds - measured. The source's oid survives a rename, so a name that matches nothing is
-	// looked up by oid as well, and the mapping follows the table it was made against.
-	auto requested = Catalog::GetEntry<TableCatalogEntry>(context, QualifiedName(Identifier(table_name)),
-	                                                      OnEntryNotFound::RETURN_NULL);
+	// The mapping is keyed by the source table, and a source table can be renamed. The name it was given
+	// under then matches nothing, and the branch would silently read its pinned image instead of the line it
+	// holds - measured. The source's oid survives a rename, so a name that matches nothing is looked up by
+	// oid as well, and the mapping follows the table it was made against. A mapping written before the key
+	// carried a schema is matched by the table its stored name resolves to, which is what its name meant.
+	auto requested = Git4DataResolveTableOrNull(context, table_name);
 	for (auto &entry : branch.storage_tables) {
-		if (!StringUtil::CIEquals(entry.source, table_name)) {
+		if (!Git4DataSourceKeyMatches(context, entry.source, table_name)) {
 			if (!requested || entry.source_oid == 0 || entry.source_oid != requested->oid) {
 				continue;
 			}
@@ -428,7 +422,7 @@ static Git4DataLineState ResolveGit4DataLineState(ClientContext &context, DuckTr
 		// would otherwise swap or rename what a caller sees - measured, a table holding (v, k) read back
 		// as k = 777 and v = 1 from a row that held k = 1 and v = 777.
 		{
-			auto &source_entry = Catalog::GetEntry<TableCatalogEntry>(context, QualifiedName(Identifier(table_name)));
+			auto &source_entry = Git4DataResolveTable(context, table_name);
 			auto &storage_entry = Git4DataResolveTable(context, storage);
 			if (storage_entry.GetColumns().GetColumnNames() != source_entry.GetColumns().GetColumnNames() ||
 			    storage_entry.GetColumns().GetColumnTypes() != source_entry.GetColumns().GetColumnTypes()) {
@@ -467,8 +461,8 @@ static Git4DataLineState ResolveGit4DataLineState(ClientContext &context, DuckTr
 	string removed;
 	for (auto &delta : branch.deltas) {
 		// the source's name can change under the mapping, and its oid is what survives that
-		auto &requested = Catalog::GetEntry<TableCatalogEntry>(context, QualifiedName(Identifier(table_name)));
-		if (!StringUtil::CIEquals(delta.source, table_name) &&
+		auto &requested = Git4DataResolveTable(context, table_name);
+		if (!Git4DataSourceKeyMatches(context, delta.source, table_name) &&
 		    (delta.source_oid == 0 || delta.source_oid != requested.oid)) {
 			continue;
 		}
@@ -493,7 +487,7 @@ static Git4DataLineState ResolveGit4DataLineState(ClientContext &context, DuckTr
 				    "again with git4data_bind_branch_delta.",
 				    branch.name, delta.added, delta.removed, table_name);
 			}
-			auto &source = Catalog::GetEntry<TableCatalogEntry>(context, QualifiedName(Identifier(table_name)));
+			auto &source = Git4DataResolveTable(context, table_name);
 			Git4DataCheckDeltaColumns(source, *added_table, *removed_table);
 			added = Git4DataTableName(*added_table);
 			removed = Git4DataTableName(*removed_table);
@@ -1000,7 +994,9 @@ static void Git4DataDiffPrimaryKey(TableCatalogEntry &table, vector<StorageIndex
 unique_ptr<FunctionData> Git4DataDiffFun::CreateBindData(ClientContext &context, const string &table_name,
                                                          const string &left_name, const string &right_name) {
 	auto result = make_uniq<Git4DataDiffBindData>();
-	result->table_name = table_name;
+	// keyed by the table the caller named rather than by the text, so the two sides' mappings are looked up for
+	// that table and the base is read as it - see the reference read's own key
+	result->table_name = Git4DataSourceKey(context, table_name);
 
 	auto &db_manager = DatabaseManager::Get(context);
 	auto attached = db_manager.GetDatabase(context, DatabaseManager::GetDefaultDatabase(context));
@@ -1026,7 +1022,7 @@ unique_ptr<FunctionData> Git4DataDiffFun::CreateBindData(ClientContext &context,
 	result->right_delta_removed = right_plan.delta_removed;
 	result->right_delta_bound = right_plan.delta_bound;
 
-	auto &table = Catalog::GetEntry<TableCatalogEntry>(context, QualifiedName(Identifier(table_name)));
+	auto &table = Git4DataResolveTable(context, table_name);
 	Git4DataDiffPrimaryKey(table, result->key_columns, result->key_types, result->key_names);
 	// A branch with a table of its own is read as that table, and its row ids are its own. Comparing
 	// those against another table's row ids would compare numbers that mean different rows, so the
@@ -1133,7 +1129,7 @@ static unique_ptr<GlobalTableFunctionState> Git4DataDiffInit(ClientContext &cont
 	result->right_bound = bind_data.right_bound;
 	result->key_count = bind_data.key_columns.size();
 
-	auto &table = Catalog::GetEntry<TableCatalogEntry>(context, QualifiedName(Identifier(bind_data.table_name)));
+	auto &table = Git4DataResolveTable(context, bind_data.table_name);
 
 	result->compare_by_key = bind_data.compare_by_key;
 	// the key columns first, then the row id, so a chunk carries everything the diff compares. When
