@@ -1,4 +1,5 @@
 #include "duckdb/storage/storage_manager.hpp"
+#include "duckdb/storage/git4data_registry.hpp"
 
 #include "duckdb/catalog/catalog.hpp"
 #include "duckdb/common/file_system.hpp"
@@ -583,6 +584,11 @@ void SingleFileStorageManager::LoadDatabase(QueryContext context) {
 		// Replay the WAL.
 		wal_path = GetWALPath();
 		wal = WriteAheadLog::Replay(context, *this, wal_path);
+
+		// The reference registry is kept in tables, and a change to a reference is an ordinary change to
+		// them now, so the replay above is what brings the last of them back: the registries are rebuilt
+		// from those tables here, after the replay and before anything is served.
+		Git4DataLoadRegistry(context, db);
 
 		// Timer will go out of scope here, if set.
 	}

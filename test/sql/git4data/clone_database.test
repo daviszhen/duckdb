@@ -85,22 +85,16 @@ PRAGMA git4data_materialize('r', 'rb', 'r_b')
 statement ok
 PRAGMA git4data_create_snapshot('rs', 'rb')
 
-statement error
-PRAGMA git4data_clone_database('{TEST_DIR}/clone_dirty.db')
-----
-<REGEX>:.*Run CHECKPOINT first.*
-
-# and with a checkpoint it is a clone of the whole database again
-statement ok
-CHECKPOINT
-
+# A clone is the file plus its log, and a reference is a row in the registry tables now, so a clone taken
+# without a checkpoint carries it: what used to be refused here ("Run CHECKPOINT first") is the behaviour
+# those tables were introduced to remove.
 statement ok
 PRAGMA git4data_clone_database('{TEST_DIR}/clone_dirty.db')
 
 statement ok
 ATTACH '{TEST_DIR}/clone_dirty.db' AS cloned_dirty
 
-query I
-SELECT count(*) FROM cloned_dirty.r
+query II
+SELECT (SELECT count(*) FROM cloned_dirty.r), (SELECT count(*) FROM cloned_dirty.git4data.snapshots WHERE name = 'rs')
 ----
-4
+4	1

@@ -37,6 +37,13 @@ bool SnapshotRegistry::Create(const string &name, transaction_t pin, timestamp_t
 	return true;
 }
 
+void SnapshotRegistry::Clear() {
+	lock_guard<mutex> guard(lock);
+	snapshots.clear();
+	RecomputeLowest();
+	dirty.store(true);
+}
+
 bool SnapshotRegistry::Drop(const string &name) {
 	lock_guard<mutex> guard(lock);
 	auto entry = snapshots.find(name);
@@ -210,6 +217,13 @@ void BranchRegistry::SetDeltaTable(const string &branch, const string &source_ta
 	}
 	entry->second.deltas.push_back(
 	    Git4DataBranchDelta {source_table, added, removed, added_oid, removed_oid, source_oid});
+	dirty.store(true);
+}
+
+void BranchRegistry::Clear() {
+	lock_guard<mutex> guard(lock);
+	branches.clear();
+	RecomputeLowest();
 	dirty.store(true);
 }
 

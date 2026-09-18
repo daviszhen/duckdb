@@ -1,0 +1,77 @@
+# name: test/sql/git4data/registry_tables.test
+# description: The reference registry kept in tables, which is what carries a reference through a restart
+# group: [git4data]
+
+load {TEST_DIR}/registry_tables.db
+
+statement ok
+CREATE TABLE rt (k INTEGER PRIMARY KEY, v INTEGER)
+
+statement ok
+INSERT INTO rt SELECT range, range FROM range(4)
+
+statement ok
+CHECKPOINT
+
+# A reference is a row in these tables, so it reaches the log like any other change and comes back whether
+# or not a checkpoint happened to run: before them a session whose only change was a reference left no log
+# at all, the close-time checkpoint skipped its body for an empty log, and the reference was gone.
+statement ok
+PRAGMA git4data_create_snapshot('rt_only')
+
+statement ok
+PRAGMA git4data_create_branch('rt_b', '')
+
+statement ok
+PRAGMA git4data_materialize('rt', 'rt_b', 'rt_b_copy')
+
+statement ok
+PRAGMA git4data_create_snapshot('rt_line', 'rt_b')
+
+# the row is written exactly once, by the statement the pragma returns: the tables are made and the file's
+# own references migrated into them before the new one joins the registry in memory, which is what keeps the
+# first reference from being written twice (measured: a clone of a one-snapshot database had two rows)
+query II
+SELECT (SELECT count(*) FROM git4data.snapshots WHERE name = 'rt_only'),
+       (SELECT count(*) FROM git4data.snapshots WHERE name = 'rt_line')
+----
+1	1
+
+restart
+
+# the rows survived, and so did what they name
+query II
+SELECT (SELECT count(*) FROM git4data.snapshots WHERE name = 'rt_only'),
+       (SELECT count(*) FROM git4data.snapshots WHERE name = 'rt_line')
+----
+1	1
+
+query II
+SELECT (SELECT count(*) FROM rt AT (SNAPSHOT => 'rt_only')),
+       (SELECT v FROM rt AT (SNAPSHOT => 'rt_line') WHERE k = 1)
+----
+4	1
+
+# a snapshot dropped after a restart takes its row with it, or the next open would bring it back
+statement ok
+PRAGMA git4data_drop_snapshot('rt_only')
+
+query I
+SELECT count(*) FROM git4data.snapshots
+----
+1
+
+restart
+
+query I
+SELECT count(*) FROM git4data.snapshots
+----
+1
+
+# git4data_forget_internal is what the merge's generated SQL calls to drop the reference it made for itself.
+# It forgets an internal reference in memory only, so it refuses a name the feature does not reserve: a real
+# snapshot forgotten this way would read again the moment its row was loaded.
+statement error
+PRAGMA git4data_forget_internal('rt_only')
+----
+<REGEX>:.*is not one of the references this feature manages for itself.*

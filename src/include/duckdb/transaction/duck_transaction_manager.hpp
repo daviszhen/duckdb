@@ -58,6 +58,9 @@ public:
 	bool Create(const string &name, transaction_t pin, timestamp_t created, const string &line = string());
 	//! Release a pinned snapshot. Returns false if the name is unknown.
 	bool Drop(const string &name);
+	//! Forget every snapshot. Used when the registry is rebuilt from the tables it is kept in, which are
+	//! read after the log has been replayed and are then the whole truth.
+	void Clear();
 	vector<Git4DataSnapshot> List() const;
 	idx_t Count() const;
 	//! Look a snapshot up by name. Returns false when there is none.
@@ -230,6 +233,8 @@ public:
 	//! Restore a branch read from disk without the checks Create performs
 	void Restore(const string &name, transaction_t pin, const string &parent, timestamp_t created,
 	             const string &base_line = string());
+	//! Forget every branch. Used when the registry is rebuilt from the tables it is kept in.
+	void Clear();
 
 private:
 	//! Recompute the cached minimum pin. Caller must hold the lock.

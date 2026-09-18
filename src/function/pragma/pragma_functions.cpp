@@ -28,6 +28,7 @@
 #include "duckdb/parallel/task_scheduler.hpp"
 #include "duckdb/planner/expression_binder.hpp"
 #include "duckdb/storage/buffer_manager.hpp"
+#include "duckdb/storage/git4data_registry.hpp"
 #include "duckdb/storage/storage_manager.hpp"
 #include "duckdb/main/settings.hpp"
 #include "duckdb/common/encryption_functions.hpp"
@@ -832,18 +833,9 @@ static string PragmaGit4DataCloneDatabase(ClientContext &context, const Function
 	if (fs.FileExists(target)) {
 		throw InvalidInputException("\"%s\" already exists - a clone does not overwrite", target);
 	}
-	// The registry reaches the database file at a checkpoint, so a clone taken with references made since
-	// the last one would be missing them while its tables are complete through the cloned log - measured,
-	// the clone reported "Branch \"b\" does not exist" for a branch made after the checkpoint, and the same
-	// clone taken after one read the branch and its capture. The file the caller has is what is cloned, so
-	// the state it is in is what has to be the state they asked for.
-	auto &transaction_manager = GetGit4DataTransactionManager(context);
-	if (transaction_manager.branches.IsDirty() || transaction_manager.snapshots.IsDirty()) {
-		throw InvalidInputException("A reference was created or dropped since the last checkpoint, and the "
-		                            "reference registry reaches the database file at a checkpoint rather than "
-		                            "through the log: a clone now would be missing it while its tables are "
-		                            "complete. Run CHECKPOINT first.");
-	}
+	// No refusal for references made since the last checkpoint any more: the registry is kept in tables, so a
+	// reference is an ordinary change in the log and the clone, which takes the log with it, carries it. The
+	// refusal this replaces was for a registry that only a checkpoint could write.
 	Git4DataCloneFile(source, target);
 	// the log is part of the database until the next checkpoint merges it, so the clone needs it too or
 	// it would be missing whatever the log holds
@@ -1469,9 +1461,18 @@ static string PragmaGit4DataMerge(ClientContext &context, const FunctionParamete
 	result += StringUtil::Format("DROP TABLE %s;", conflict_name);
 
 	if (drop_merge_base) {
-		// the reference was only there for the two diffs above, which have run by now
-		result +=
-		    StringUtil::Format("\nPRAGMA git4data_drop_snapshot('%s');", DuckTransactionManager::MERGE_BASE_REFERENCE);
+		// The reference was only there for the two diffs above, which have run by now, so it goes. Its row
+		// goes with plain DML and the in-memory entry with the pragma below rather than through
+		// git4data_drop_snapshot: that one *returns* the row's DELETE now, and SQL a pragma returns is
+		// executed as statements, where a statement-returning pragma cannot be called - measured, and the
+		// merge refused with "PRAGMA function does not have a function specified" until this was written
+		// this way.
+		if (Git4DataRegistryTablesThere(context)) {
+			result += StringUtil::Format("\nDELETE FROM %s.%s WHERE name = '%s';", GIT4DATA_REGISTRY_SCHEMA,
+			                             GIT4DATA_SNAPSHOTS_TABLE, DuckTransactionManager::MERGE_BASE_REFERENCE);
+		}
+		result += StringUtil::Format("\nPRAGMA git4data_forget_internal('%s');",
+		                             DuckTransactionManager::MERGE_BASE_REFERENCE);
 	}
 	return result;
 }
@@ -1756,10 +1757,14 @@ static string PragmaGit4DataLCA(ClientContext &context, const FunctionParameters
 	return StringUtil::Format("SELECT '%s'::VARCHAR AS lca", lca);
 }
 
-static void PragmaGit4DataCreateSnapshot(ClientContext &context, const FunctionParameters &parameters) {
+static string PragmaGit4DataCreateSnapshot(ClientContext &context, const FunctionParameters &parameters) {
 	auto name = parameters.values[0].ToString();
 	CheckGit4DataReferenceName(name);
 	auto &transaction_manager = GetGit4DataTransactionManager(context);
+	// The tables are created, and what the file already holds migrated into them, *before* the new reference
+	// joins the in-memory registry: the migration reads that registry, so doing it after would write the row
+	// this call is about twice - measured, a clone of a database with one snapshot had two rows for it.
+	string result = Git4DataEnsureRegistryTables(context);
 	// A snapshot and a branch with one name would be indistinguishable wherever a reference is named
 	// without saying which kind it is - a diff, a pick, a restore, and a merge's own image clauses all
 	// resolve a bare name, and they look in the snapshot registry first. Measured: with a branch and a
@@ -1790,18 +1795,51 @@ static void PragmaGit4DataCreateSnapshot(ClientContext &context, const FunctionP
 		}
 	}
 	// Pin at the newest commit, keep everything committed so far readable
-	if (!transaction_manager.snapshots.Create(name, transaction_manager.GetLastCommit(),
-	                                          Timestamp::GetCurrentTimestamp(), line)) {
+	auto pin = transaction_manager.GetLastCommit();
+	auto created = Timestamp::GetCurrentTimestamp();
+	if (!transaction_manager.snapshots.Create(name, pin, created, line)) {
 		throw InvalidInputException("Snapshot \"%s\" already exists", name);
 	}
+	// The reference is a row in the registry tables from here on: it is written with ordinary DML, in the
+	// caller's transaction, so it reaches the log like any other change and the next open brings it back.
+	// A checkpoint is no longer what decides whether a reference survives.
+	auto escape = [](const string &value) {
+		return StringUtil::Replace(value, "'", "''");
+	};
+	result += StringUtil::Format("INSERT INTO %s.%s VALUES ('%s', %llu, TIMESTAMP '%s', '%s');",
+	                             GIT4DATA_REGISTRY_SCHEMA, GIT4DATA_SNAPSHOTS_TABLE, escape(name), pin,
+	                             Timestamp::ToString(created), escape(line));
+	return result;
 }
 
-static void PragmaGit4DataDropSnapshot(ClientContext &context, const FunctionParameters &parameters) {
+//! Drop an internal reference from the in-memory registry and leave its row to the caller, which is what a
+//! statement the feature generates for itself needs: a pragma that returns a statement cannot be called from
+//! one. It is limited to the names the feature reserves, so a caller cannot forget a reference this way - a
+//! forgotten snapshot would read again the moment its row was loaded.
+static void PragmaGit4DataForgetInternal(ClientContext &context, const FunctionParameters &parameters) {
+	auto name = parameters.values[0].ToString();
+	if (!StringUtil::StartsWith(name, "__")) {
+		throw InvalidInputException(
+		    "\"%s\" is not one of the references this feature manages for itself, and this only forgets one of "
+		    "those from memory. Use git4data_drop_snapshot, which takes its row with it.",
+		    name);
+	}
+	GetGit4DataTransactionManager(context).snapshots.Drop(name);
+}
+
+static string PragmaGit4DataDropSnapshot(ClientContext &context, const FunctionParameters &parameters) {
 	auto name = parameters.values[0].ToString();
 	auto &transaction_manager = GetGit4DataTransactionManager(context);
 	if (!transaction_manager.snapshots.Drop(name)) {
 		throw InvalidInputException("Snapshot \"%s\" does not exist", name);
 	}
+	// and the row goes with it, or the next open would bring the reference back out of the table
+	if (!Git4DataRegistryTablesThere(context)) {
+		return string();
+	}
+	auto escaped = StringUtil::Replace(name, "'", "''");
+	return StringUtil::Format("DELETE FROM %s.%s WHERE name = '%s';", GIT4DATA_REGISTRY_SCHEMA,
+	                          GIT4DATA_SNAPSHOTS_TABLE, escaped);
 }
 
 static string PragmaGit4DataSnapshots(ClientContext &context, const FunctionParameters &parameters) {
@@ -2015,6 +2053,9 @@ void PragmaFunctions::RegisterFunction(BuiltinFunctions &set) {
 	                                           {LogicalType::VARCHAR}, LogicalType::VARCHAR));
 	set.AddFunction(
 	    PragmaFunction::PragmaCall("git4data_drop_snapshot", PragmaGit4DataDropSnapshot, {LogicalType::VARCHAR}));
+	// internal: what a statement the feature generates for itself calls to drop one of its own references
+	set.AddFunction(PragmaFunction::PragmaCall("git4data_forget_internal", PragmaGit4DataForgetInternal,
+	                                           {LogicalType::VARCHAR}));
 	set.AddFunction(PragmaFunction::PragmaStatement("git4data_snapshots", PragmaGit4DataSnapshots));
 	set.AddFunction(PragmaFunction::PragmaCall("git4data_create_branch", PragmaGit4DataCreateBranch,
 	                                           {LogicalType::VARCHAR, LogicalType::VARCHAR}));
