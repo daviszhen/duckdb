@@ -1662,7 +1662,8 @@ static string PragmaGit4DataBranches(ClientContext &context, const FunctionParam
 	if (entries.empty()) {
 		return "SELECT NULL::VARCHAR AS branch_name, NULL::UBIGINT AS pinned_commit_id, "
 		       "NULL::VARCHAR AS parent, NULL::TIMESTAMP AS created, NULL::BOOLEAN AS has_storage, "
-		       "NULL::BOOLEAN AS has_delta, NULL::BOOLEAN AS storage_missing, NULL::BOOLEAN AS delta_missing "
+		       "NULL::BOOLEAN AS has_delta, NULL::BOOLEAN AS storage_missing, NULL::BOOLEAN AS delta_missing, "
+		       "NULL::VARCHAR AS storage_table, NULL::VARCHAR AS delta_added, NULL::VARCHAR AS delta_removed "
 		       "WHERE false";
 	}
 	string query = "SELECT * FROM (VALUES ";
@@ -1691,6 +1692,29 @@ static string PragmaGit4DataBranches(ClientContext &context, const FunctionParam
 				break;
 			}
 		}
+		// The tables, not only whether there are any: two branches can be given the same delta tables -
+		// the delta's tables are the caller's - and then a write through one is visible in the other.
+		// Measured: binding one pair to two branches is accepted, and an insert through the first is read
+		// by the second. A listing that says has_delta and not *which* leaves that sharing invisible in the
+		// one place that exists to say what a branch is reading.
+		string storage_table;
+		for (auto &storage_entry : entries[i].storage_tables) {
+			if (!storage_table.empty()) {
+				storage_table += ", ";
+			}
+			auto resolved = Git4DataResolveTableName(context, storage_entry.storage, storage_entry.oid);
+			storage_table += StringUtil::Replace(resolved.empty() ? storage_entry.storage : resolved, "'", "''");
+		}
+		string delta_added;
+		string delta_removed;
+		for (auto &delta_entry : entries[i].deltas) {
+			if (!delta_added.empty()) {
+				delta_added += ", ";
+				delta_removed += ", ";
+			}
+			delta_added += StringUtil::Replace(delta_entry.added, "'", "''");
+			delta_removed += StringUtil::Replace(delta_entry.removed, "'", "''");
+		}
 		auto delta_missing = false;
 		for (auto &delta_entry : entries[i].deltas) {
 			if (Git4DataResolveTableName(context, delta_entry.added, delta_entry.added_oid).empty() ||
@@ -1701,13 +1725,14 @@ static string PragmaGit4DataBranches(ClientContext &context, const FunctionParam
 		}
 		query += StringUtil::Format(
 		    "('%s'::VARCHAR, %llu::UBIGINT, '%s'::VARCHAR, '%s'::TIMESTAMP, %s::BOOLEAN, %s::BOOLEAN, %s::BOOLEAN, "
-		    "%s::BOOLEAN)",
+		    "%s::BOOLEAN, '%s'::VARCHAR, '%s'::VARCHAR, '%s'::VARCHAR)",
 		    name, entries[i].pin, parent, Timestamp::ToString(entries[i].created),
 		    entries[i].storage_tables.empty() ? "false" : "true", entries[i].deltas.empty() ? "false" : "true",
-		    storage_missing ? "true" : "false", delta_missing ? "true" : "false");
+		    storage_missing ? "true" : "false", delta_missing ? "true" : "false", storage_table, delta_added,
+		    delta_removed);
 	}
 	query += ") t(branch_name, pinned_commit_id, parent, created, has_storage, has_delta, storage_missing, "
-	         "delta_missing) ORDER BY pinned_commit_id, branch_name";
+	         "delta_missing, storage_table, delta_added, delta_removed) ORDER BY pinned_commit_id, branch_name";
 	return query;
 }
 
