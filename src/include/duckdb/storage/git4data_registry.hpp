@@ -37,13 +37,13 @@ struct QueryContext;
 string Git4DataEnsureRegistryTables(ClientContext &context);
 //! Whether those tables are there. This is what tells a file written before them from one written after:
 //! the older form carries the same records in the checkpoint's metadata block instead.
-bool Git4DataRegistryTablesExist(QueryContext context, AttachedDatabase &db);
+bool Git4DataRegistryTablesExist(AttachedDatabase &db);
 //! The same question from a statement, which has a client context of its own
 bool Git4DataRegistryTablesThere(ClientContext &context);
 //! Read the tables back into the in-memory registries, replacing what the metadata block loaded. Called
 //! once the log has been replayed and before the database serves anything: a change to a reference is an
 //! ordinary change to those tables, so the replay is what brings the last of them back.
-void Git4DataLoadRegistry(QueryContext context, AttachedDatabase &db);
+void Git4DataLoadRegistry(AttachedDatabase &db);
 //! Throw when a statement writes one of the registry's tables, or drops or alters it. They are ordinary
 //! tables to the engine, so this is the only thing between a caller and a state the feature depends on: a
 //! deleted snapshot row takes its pin with it, and the history that pin holds down is then reclaimed under a
@@ -56,7 +56,7 @@ void Git4DataCheckRegistrySchema(const string &schema);
 //! they are not and the file's records never came from them, the rollback took the tables with it - the very
 //! first reference of a database creates them in the same transaction - so the registries are emptied rather
 //! than left holding references that are no longer anywhere on disk.
-void Git4DataReloadRegistry(QueryContext context, AttachedDatabase &db);
+void Git4DataReloadRegistry(AttachedDatabase &db);
 //! Whether a schema name is the one the registry keeps its references in
 bool Git4DataIsRegistrySchema(const string &schema);
 //! Whether a table is one the registry keeps its references in

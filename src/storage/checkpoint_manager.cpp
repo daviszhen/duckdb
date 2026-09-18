@@ -300,11 +300,19 @@ void SingleFileCheckpointWriter::CreateCheckpoint() {
 	// against the timeline that produced them: the counter starts from a fixed point in every
 	// process, so without restoring it a counter that restarts below an id already in the file
 	// makes that deletion compare as not yet committed, and the deleted rows come back.
+	// What is written here is what the block is still for: the commit-id counter, the point-in-time window and
+	// the two quotas. The references themselves are rows in the registry tables now, so they are not written
+	// into this block any more - the lists below are what an older file carries, and the reader still accepts
+	// them so such a file opens and is migrated into the tables on its first change. Dropping the block
+	// altogether is not an option: the counter has to be restored before any transaction exists, and a table
+	// row cannot be read without one.
 	idx_t registry_block = 0;
 	idx_t registry_offset = 0;
 	auto start_timestamp = transaction_manager.GetStartTimestampCounter();
 	auto pinned_snapshots = transaction_manager.snapshots.List();
 	auto data_branches = transaction_manager.branches.List();
+	(void)pinned_snapshots;
+	(void)data_branches;
 	{
 		auto registry_writer = make_uniq<MetadataWriter>(metadata_manager);
 		auto registry_pointer = registry_writer->GetMetaBlockPointer();
@@ -317,43 +325,28 @@ void SingleFileCheckpointWriter::CreateCheckpoint() {
 		registry_serializer.WriteProperty<int64_t>(104, "pitr_window", transaction_manager.PitrWindow().value);
 		registry_serializer.WriteProperty<int64_t>(105, "snapshot_limit", transaction_manager.snapshot_limit);
 		registry_serializer.WriteProperty<int64_t>(106, "branch_limit", transaction_manager.branch_limit);
-		registry_serializer.WriteList(100, "snapshots", pinned_snapshots.size(), [&](Serializer::List &list, idx_t i) {
-			list.WriteObject([&](Serializer &obj) {
-				obj.WriteProperty<string>(100, "name", pinned_snapshots[i].name);
-				obj.WriteProperty<uint64_t>(101, "pin", pinned_snapshots[i].pin);
-				obj.WriteProperty<int64_t>(102, "created", pinned_snapshots[i].created.value);
-				obj.WriteProperty<string>(103, "line", pinned_snapshots[i].line);
-			});
-		});
-		// branches go beside the snapshots because they are references in the same sense: each
-		// one pins the timeline, and each one has to come back with the file
-		registry_serializer.WriteList(101, "branches", data_branches.size(), [&](Serializer::List &list, idx_t i) {
-			list.WriteObject([&](Serializer &obj) {
-				obj.WriteProperty<string>(100, "name", data_branches[i].name);
-				obj.WriteProperty<uint64_t>(101, "pin", data_branches[i].pin);
-				obj.WriteProperty<string>(102, "parent", data_branches[i].parent);
-				obj.WriteProperty<int64_t>(103, "created", data_branches[i].created.value);
-				obj.WriteProperty<string>(105, "line", data_branches[i].base_line);
-				obj.WriteList(
-				    106, "deltas", data_branches[i].deltas.size(), [&](Serializer::List &delta_list, idx_t d) {
-					    delta_list.WriteObject([&](Serializer &delta_obj) {
-						    delta_obj.WriteProperty<string>(100, "source", data_branches[i].deltas[d].source);
-						    delta_obj.WriteProperty<string>(101, "added", data_branches[i].deltas[d].added);
-						    delta_obj.WriteProperty<string>(102, "removed", data_branches[i].deltas[d].removed);
-					    });
-				    });
-				obj.WriteList(
-				    104, "storage_tables", data_branches[i].storage_tables.size(),
-				    [&](Serializer::List &storage_list, idx_t s) {
-					    storage_list.WriteObject([&](Serializer &storage_obj) {
-						    storage_obj.WriteProperty<string>(100, "source", data_branches[i].storage_tables[s].source);
-						    storage_obj.WriteProperty<string>(101, "storage",
-						                                      data_branches[i].storage_tables[s].storage);
-						    storage_obj.WriteProperty<bool>(102, "owned", data_branches[i].storage_tables[s].owned);
-					    });
-				    });
-			});
-		});
+		// The snapshots a caller made are rows in git4data.snapshots and are not written here. The ones the
+		// feature manages for itself are, because the engine moves them on its own rather than through a
+		// statement: the point-in-time window's reference is created and moved from C++ (measured - leaving it
+		// out lost the window across a restart, and pitr.test read reference_held = false).
+		vector<Git4DataSnapshot> internal_snapshots;
+		for (auto &snapshot : pinned_snapshots) {
+			if (StringUtil::StartsWith(snapshot.name, "__")) {
+				internal_snapshots.push_back(snapshot);
+			}
+		}
+		registry_serializer.WriteList(100, "snapshots", internal_snapshots.size(),
+		                              [&](Serializer::List &list, idx_t i) {
+			                              list.WriteObject([&](Serializer &obj) {
+				                              obj.WriteProperty<string>(100, "name", internal_snapshots[i].name);
+				                              obj.WriteProperty<uint64_t>(101, "pin", internal_snapshots[i].pin);
+				                              obj.WriteProperty<int64_t>(102, "created",
+				                                                         internal_snapshots[i].created.value);
+				                              obj.WriteProperty<string>(103, "line", internal_snapshots[i].line);
+			                              });
+		                              });
+		// The branches are not written at all: every one of them is made by a statement, so every one has a
+		// row.
 		registry_serializer.End();
 		registry_writer->Flush();
 		registry_block = registry_pointer.block_pointer;
@@ -510,7 +503,9 @@ void SingleFileCheckpointReader::LoadFromStorage() {
 		    registry_deserializer.ReadPropertyWithExplicitDefault<int64_t>(105, "snapshot_limit", -1);
 		transaction_manager.branch_limit =
 		    registry_deserializer.ReadPropertyWithExplicitDefault<int64_t>(106, "branch_limit", -1);
-		registry_deserializer.ReadList(100, "snapshots", [&](Deserializer::List &list, idx_t i) {
+		// optional as well: a file written since the references moved into their own tables carries no record
+		// list here, only the counter, the window and the quotas
+		registry_deserializer.ReadOptionalList(100, "snapshots", [&](Deserializer::List &list, idx_t i) {
 			return list.ReadObject([&](Deserializer &obj) {
 				auto name = obj.ReadProperty<string>(100, "name");
 				auto pin = obj.ReadProperty<uint64_t>(101, "pin");

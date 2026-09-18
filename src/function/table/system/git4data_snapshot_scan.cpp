@@ -598,7 +598,7 @@ unique_ptr<FunctionData> Git4DataSnapshotScanFun::CreateBindData(ClientContext &
 	auto &transaction_manager = DuckTransactionManager::Get(*attached);
 	if (transaction_manager.ConsumeRegistryReloadNeeded()) {
 		// a rollback may have removed a reference this read is about to resolve
-		Git4DataReloadRegistry(QueryContext(context), *attached);
+		Git4DataReloadRegistry(*attached);
 	}
 	Git4DataReadPlan plan;
 	ResolveGit4DataRead(context, transaction_manager, table_name, reference_name, kind, plan);
@@ -1011,7 +1011,7 @@ unique_ptr<FunctionData> Git4DataDiffFun::CreateBindData(ClientContext &context,
 	auto &transaction_manager = DuckTransactionManager::Get(*attached);
 	if (transaction_manager.ConsumeRegistryReloadNeeded()) {
 		// a rollback may have removed a reference this read is about to resolve
-		Git4DataReloadRegistry(QueryContext(context), *attached);
+		Git4DataReloadRegistry(*attached);
 	}
 	auto left_plan = ResolveGit4DataReferencePlan(context, transaction_manager, table_name, left_name);
 	auto right_plan = ResolveGit4DataReferencePlan(context, transaction_manager, table_name, right_name);

@@ -162,7 +162,7 @@ static DuckTransactionManager &GetGit4DataTransactionManager(ClientContext &cont
 	if (transaction_manager.ConsumeRegistryReloadNeeded()) {
 		// a rollback took rows out of the registry tables: the in-memory registries are rebuilt from what is
 		// committed before this operation acts on them
-		Git4DataReloadRegistry(QueryContext(context), *attached);
+		Git4DataReloadRegistry(*attached);
 	}
 	return transaction_manager;
 }

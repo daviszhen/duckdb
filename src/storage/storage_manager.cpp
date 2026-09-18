@@ -588,7 +588,7 @@ void SingleFileStorageManager::LoadDatabase(QueryContext context) {
 		// The reference registry is kept in tables, and a change to a reference is an ordinary change to
 		// them now, so the replay above is what brings the last of them back: the registries are rebuilt
 		// from those tables here, after the replay and before anything is served.
-		Git4DataLoadRegistry(context, db);
+		Git4DataLoadRegistry(db);
 
 		// Timer will go out of scope here, if set.
 	}

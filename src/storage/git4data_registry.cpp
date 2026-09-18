@@ -90,12 +90,12 @@ bool Git4DataRegistryTablesThere(ClientContext &context) {
 //! being attached, so the catalog is asked for directly rather than through the client's default database -
 //! measured: going through the default one there reports "Calling DatabaseManager::GetDefaultDatabase with
 //! no database attached".
-static optional_ptr<TableCatalogEntry> Git4DataRegistryTable(ClientContext &client, AttachedDatabase &db,
-                                                             const string &name) {
+static optional_ptr<TableCatalogEntry> Git4DataRegistryTable(AttachedDatabase &db, const string &name) {
 	auto &catalog = db.GetCatalog();
-	// The system transaction, not the attaching client's: the load runs while the database is being attached,
-	// and a catalog transaction taken from that client stays on its meta transaction - measured, a later
-	// DETACH on the same connection then refused with "the current transaction has outstanding work on it".
+	// The system transaction, and no client context: the load runs while the database is being attached, and a
+	// catalog transaction taken from that client stays on its meta transaction - measured, a later DETACH on
+	// the same connection then refused with "the current transaction has outstanding work on it". A load that
+	// needed a client would do nothing at all on the path where there is none.
 	auto transaction = CatalogTransaction::GetSystemTransaction(db.GetDatabase());
 	auto schema = catalog.GetSchema(transaction, Identifier(GIT4DATA_REGISTRY_SCHEMA), OnEntryNotFound::RETURN_NULL);
 	if (!schema) {
@@ -108,20 +108,14 @@ static optional_ptr<TableCatalogEntry> Git4DataRegistryTable(ClientContext &clie
 	return &entry->Cast<TableCatalogEntry>();
 }
 
-bool Git4DataRegistryTablesExist(QueryContext context, AttachedDatabase &db) {
-	auto client = context.GetClientContext();
-	if (!client) {
-		// no client context to look through: nothing can be read, and the metadata block is what the load
-		// already did
-		return false;
-	}
-	return Git4DataRegistryTable(*client, db, GIT4DATA_SNAPSHOTS_TABLE) != nullptr;
+bool Git4DataRegistryTablesExist(AttachedDatabase &db) {
+	return Git4DataRegistryTable(db, GIT4DATA_SNAPSHOTS_TABLE) != nullptr;
 }
 
 //! Call the callback once per row of a registry table, as of everything committed. The tables are read with
 //! a synthetic all-committed transaction: what they hold has been committed by the time the database serves
 //! anything, and the read is not the caller's own view of them.
-static void Git4DataScanRegistryTable(ClientContext &context, TableCatalogEntry &table,
+static void Git4DataScanRegistryTable(AttachedDatabase &db, TableCatalogEntry &table,
                                       const vector<LogicalType> &types,
                                       const std::function<void(DataChunk &, idx_t)> &callback) {
 	vector<StorageIndex> column_ids;
@@ -131,10 +125,10 @@ static void Git4DataScanRegistryTable(ClientContext &context, TableCatalogEntry 
 	TableScanState scan;
 	scan.Initialize(column_ids, nullptr);
 	auto &groups = *table.GetStorage().GetRowGroupCollection();
-	QueryContext query_context(context);
+	QueryContext query_context;
 	groups.InitializeScan(query_context, scan.table_state, column_ids, nullptr);
 	DataChunk chunk;
-	chunk.Initialize(Allocator::Get(context), types);
+	chunk.Initialize(Allocator::Get(db), types);
 	while (true) {
 		chunk.Reset();
 		scan.table_state.Scan(ScanOptions(TransactionData(MAX_TRANSACTION_ID, VisibilityBound::AllCommitted())), chunk);
@@ -148,10 +142,10 @@ static void Git4DataScanRegistryTable(ClientContext &context, TableCatalogEntry 
 	}
 }
 
-void Git4DataReloadRegistry(QueryContext context, AttachedDatabase &db) {
+void Git4DataReloadRegistry(AttachedDatabase &db) {
 	auto &transaction_manager = DuckTransactionManager::Get(db);
-	if (Git4DataRegistryTablesExist(context, db)) {
-		Git4DataLoadRegistry(context, db);
+	if (Git4DataRegistryTablesExist(db)) {
+		Git4DataLoadRegistry(db);
 		return;
 	}
 	if (!transaction_manager.RegistryFromBlock()) {
@@ -161,9 +155,8 @@ void Git4DataReloadRegistry(QueryContext context, AttachedDatabase &db) {
 	}
 }
 
-void Git4DataLoadRegistry(QueryContext context, AttachedDatabase &db) {
-	auto client = context.GetClientContext();
-	if (!client || !Git4DataRegistryTablesExist(context, db)) {
+void Git4DataLoadRegistry(AttachedDatabase &db) {
+	if (!Git4DataRegistryTablesExist(db)) {
 		// an older file, whose records are in the checkpoint's metadata block and are already loaded
 		DuckTransactionManager::Get(db).SetRegistryFromBlock(true);
 		return;
@@ -182,15 +175,15 @@ void Git4DataLoadRegistry(QueryContext context, AttachedDatabase &db) {
 	transaction_manager.snapshots.Clear();
 	transaction_manager.branches.Clear();
 
-	auto snapshots = Git4DataRegistryTable(*client, db, GIT4DATA_SNAPSHOTS_TABLE);
-	auto branches = Git4DataRegistryTable(*client, db, GIT4DATA_BRANCHES_TABLE);
-	auto storage = Git4DataRegistryTable(*client, db, GIT4DATA_STORAGE_TABLE);
-	auto deltas = Git4DataRegistryTable(*client, db, GIT4DATA_DELTAS_TABLE);
+	auto snapshots = Git4DataRegistryTable(db, GIT4DATA_SNAPSHOTS_TABLE);
+	auto branches = Git4DataRegistryTable(db, GIT4DATA_BRANCHES_TABLE);
+	auto storage = Git4DataRegistryTable(db, GIT4DATA_STORAGE_TABLE);
+	auto deltas = Git4DataRegistryTable(db, GIT4DATA_DELTAS_TABLE);
 	if (!snapshots) {
 		return;
 	}
 	Git4DataScanRegistryTable(
-	    *client, *snapshots,
+	    db, *snapshots,
 	    {LogicalType::VARCHAR, LogicalType::UBIGINT, LogicalType::TIMESTAMP, LogicalType::VARCHAR},
 	    [&](DataChunk &chunk, idx_t row) {
 		    auto name = chunk.GetValue(0, row).GetValue<string>();
@@ -202,7 +195,7 @@ void Git4DataLoadRegistry(QueryContext context, AttachedDatabase &db) {
 	// branches first: the two mappings are recorded against a branch, and their setters do nothing for a
 	// branch that is not there yet
 	if (branches) {
-	Git4DataScanRegistryTable(*client, *branches,
+	Git4DataScanRegistryTable(db, *branches,
 	                          {LogicalType::VARCHAR, LogicalType::UBIGINT, LogicalType::VARCHAR, LogicalType::TIMESTAMP,
 	                           LogicalType::VARCHAR},
 	                          [&](DataChunk &chunk, idx_t row) {
@@ -215,7 +208,7 @@ void Git4DataLoadRegistry(QueryContext context, AttachedDatabase &db) {
 	                          });
 	}
 	if (storage) {
-	Git4DataScanRegistryTable(*client, *storage,
+	Git4DataScanRegistryTable(db, *storage,
 	                          {LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::BOOLEAN},
 	                          [&](DataChunk &chunk, idx_t row) {
 		                          auto branch = chunk.GetValue(0, row).GetValue<string>();
@@ -226,7 +219,7 @@ void Git4DataLoadRegistry(QueryContext context, AttachedDatabase &db) {
 	                          });
 	}
 	if (deltas) {
-	Git4DataScanRegistryTable(*client, *deltas,
+	Git4DataScanRegistryTable(db, *deltas,
 	                          {LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR},
 	                          [&](DataChunk &chunk, idx_t row) {
 		                          auto branch = chunk.GetValue(0, row).GetValue<string>();
