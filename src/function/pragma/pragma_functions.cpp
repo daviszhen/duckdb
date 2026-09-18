@@ -758,7 +758,7 @@ static void PragmaGit4DataBindBranchDelta(ClientContext &context, const Function
 		Git4DataBranch line_branch;
 		if (transaction_manager.branches.Get(branch.base_line, line_branch)) {
 			for (auto &line_delta : line_branch.deltas) {
-				if (line_delta.source != source_table) {
+				if (!StringUtil::CIEquals(line_delta.source, source_table)) {
 					continue;
 				}
 				throw InvalidInputException(
@@ -770,7 +770,7 @@ static void PragmaGit4DataBindBranchDelta(ClientContext &context, const Function
 		}
 	}
 	for (auto &storage_entry : branch.storage_tables) {
-		if (storage_entry.source != source_table) {
+		if (!StringUtil::CIEquals(storage_entry.source, source_table)) {
 			continue;
 		}
 		// one line, one source: a branch that already reads a table of its own reads that, and a delta
@@ -1283,7 +1283,7 @@ static string PragmaGit4DataMerge(ClientContext &context, const FunctionParamete
 	}
 	string merge_into;
 	for (auto &entry : left.storage_tables) {
-		if (entry.source == table_name) {
+		if (StringUtil::CIEquals(entry.source, table_name)) {
 			// the table the branch was given can have been renamed, and the merge writes into it
 			merge_into = Git4DataResolveTableName(context, entry.storage, entry.oid);
 		}

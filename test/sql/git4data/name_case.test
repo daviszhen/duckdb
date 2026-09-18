@@ -108,3 +108,115 @@ query I
 SELECT v FROM src_store AT (BRANCH => 'case_branch') WHERE k = 3
 ----
 3
+
+
+# A source table's name is not case-sensitive anywhere in this feature - the read path, git4data_apply, the
+# registry and git4data_unbind all compare it that way - but three comparisons in the pragma layer were
+# exact, so the refusal that keeps "one line, one source" could be walked around by spelling the table
+# differently. Measured: with the branch holding a copy for "zc", binding a delta for "ZC" was accepted, and
+# the branch then reported has_storage = true *and* has_delta = true while reading the delta's edit.
+statement ok
+CREATE TABLE zc (k INTEGER PRIMARY KEY, v INTEGER)
+
+statement ok
+INSERT INTO zc SELECT range, range FROM range(4)
+
+statement ok
+CHECKPOINT
+
+statement ok
+PRAGMA git4data_create_branch('zcb', '')
+
+statement ok
+PRAGMA git4data_materialize('zc', 'zcb', 'zc_copy')
+
+statement ok
+UPDATE zc_copy SET v = 111 WHERE k = 1
+
+statement ok
+CREATE TABLE ZC_add (k INTEGER PRIMARY KEY, v INTEGER)
+
+statement ok
+CREATE TABLE ZC_del (k INTEGER PRIMARY KEY)
+
+statement error
+PRAGMA git4data_bind_branch_delta('ZC', 'zcb', 'ZC_add', 'ZC_del')
+----
+<REGEX>:.*already has a table of its own for "ZC".*
+
+query II
+SELECT (SELECT v FROM zc AT (BRANCH => 'zcb') WHERE k = 1), (SELECT count(*) FROM zc AT (BRANCH => 'zcb'))
+----
+111	4
+
+# and a delta over the source an inherited line already differs by is refused under either spelling
+statement ok
+CREATE TABLE zd (k INTEGER PRIMARY KEY, v INTEGER)
+
+statement ok
+INSERT INTO zd SELECT range, range FROM range(4)
+
+statement ok
+CHECKPOINT
+
+statement ok
+PRAGMA git4data_create_branch('zdb', '')
+
+statement ok
+CREATE TABLE zd_add (k INTEGER PRIMARY KEY, v INTEGER)
+
+statement ok
+CREATE TABLE zd_del (k INTEGER PRIMARY KEY)
+
+statement ok
+PRAGMA git4data_bind_branch_delta('zd', 'zdb', 'zd_add', 'zd_del')
+
+statement ok
+PRAGMA git4data_create_branch('zdb_child', 'zdb')
+
+statement ok
+CREATE TABLE zdc_add (k INTEGER PRIMARY KEY, v INTEGER)
+
+statement ok
+CREATE TABLE zdc_del (k INTEGER PRIMARY KEY)
+
+statement error
+PRAGMA git4data_bind_branch_delta('ZD', 'zdb_child', 'zdc_add', 'zdc_del')
+----
+<REGEX>:.*inherits a line that differs by a delta.*
+
+# a merge lands in the branch's own table, and finds it under any spelling of the source's name
+statement ok
+CREATE TABLE ze (k INTEGER PRIMARY KEY, v INTEGER)
+
+statement ok
+INSERT INTO ze SELECT range, range FROM range(4)
+
+statement ok
+CHECKPOINT
+
+statement ok
+PRAGMA git4data_create_branch('zebase', '')
+
+statement ok
+PRAGMA git4data_create_branch('zeleft', 'zebase')
+
+statement ok
+PRAGMA git4data_create_branch('zeright', 'zebase')
+
+statement ok
+PRAGMA git4data_materialize('ze', 'zeleft', 'ze_left')
+
+statement ok
+PRAGMA git4data_materialize('ze', 'zeright', 'ze_right')
+
+statement ok
+UPDATE ze_right SET v = 111 WHERE k = 2
+
+statement ok
+PRAGMA git4data_merge('ZE', 'zeleft', 'zeright', 'fail')
+
+query I
+SELECT v FROM ze AT (BRANCH => 'zeleft') WHERE k = 2
+----
+111
