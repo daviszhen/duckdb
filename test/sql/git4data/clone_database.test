@@ -61,3 +61,46 @@ statement error
 PRAGMA git4data_clone_database('')
 ----
 <REGEX>:.*A clone needs a path to write to.*
+
+# A clone is the file, and the reference registry is written to the file at a checkpoint rather than through
+# the log, so a clone taken with references made since the last checkpoint would have the tables and none of
+# the references. Measured: the clone reported "Branch \"b\" does not exist", and the same clone taken after
+# a checkpoint read the branch's v = 111 and its capture's v = 111. It is refused now, with the statement
+# that resolves it in the message.
+statement ok
+CREATE TABLE r (k INTEGER PRIMARY KEY, v INTEGER)
+
+statement ok
+INSERT INTO r SELECT range, range FROM range(4)
+
+statement ok
+CHECKPOINT
+
+statement ok
+PRAGMA git4data_create_branch('rb', '')
+
+statement ok
+PRAGMA git4data_materialize('r', 'rb', 'r_b')
+
+statement ok
+PRAGMA git4data_create_snapshot('rs', 'rb')
+
+statement error
+PRAGMA git4data_clone_database('{TEST_DIR}/clone_dirty.db')
+----
+<REGEX>:.*Run CHECKPOINT first.*
+
+# and with a checkpoint it is a clone of the whole database again
+statement ok
+CHECKPOINT
+
+statement ok
+PRAGMA git4data_clone_database('{TEST_DIR}/clone_dirty.db')
+
+statement ok
+ATTACH '{TEST_DIR}/clone_dirty.db' AS cloned_dirty
+
+query I
+SELECT count(*) FROM cloned_dirty.r
+----
+4

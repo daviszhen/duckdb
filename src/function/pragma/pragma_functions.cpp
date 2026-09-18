@@ -832,6 +832,18 @@ static string PragmaGit4DataCloneDatabase(ClientContext &context, const Function
 	if (fs.FileExists(target)) {
 		throw InvalidInputException("\"%s\" already exists - a clone does not overwrite", target);
 	}
+	// The registry reaches the database file at a checkpoint, so a clone taken with references made since
+	// the last one would be missing them while its tables are complete through the cloned log - measured,
+	// the clone reported "Branch \"b\" does not exist" for a branch made after the checkpoint, and the same
+	// clone taken after one read the branch and its capture. The file the caller has is what is cloned, so
+	// the state it is in is what has to be the state they asked for.
+	auto &transaction_manager = GetGit4DataTransactionManager(context);
+	if (transaction_manager.branches.IsDirty() || transaction_manager.snapshots.IsDirty()) {
+		throw InvalidInputException("A reference was created or dropped since the last checkpoint, and the "
+		                            "reference registry reaches the database file at a checkpoint rather than "
+		                            "through the log: a clone now would be missing it while its tables are "
+		                            "complete. Run CHECKPOINT first.");
+	}
 	Git4DataCloneFile(source, target);
 	// the log is part of the database until the next checkpoint merges it, so the clone needs it too or
 	// it would be missing whatever the log holds
