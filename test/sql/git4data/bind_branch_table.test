@@ -277,3 +277,32 @@ query I
 SELECT count(*) FROM t AT (BRANCH => 'ddl_branch')
 ----
 10
+
+# git4data_bind_internal is the generated form: the SQL materialize returns binds the branch in memory with
+# it and writes the row itself, because a statement a pragma returns cannot call a pragma that returns one.
+# It does the same binding as the caller's form, so calling it directly shows the same read.
+statement ok
+CREATE TABLE bi_src (k INTEGER PRIMARY KEY, v INTEGER)
+
+statement ok
+INSERT INTO bi_src SELECT range, range FROM range(4)
+
+statement ok
+CHECKPOINT
+
+statement ok
+PRAGMA git4data_create_branch('bi', '')
+
+statement ok
+CREATE TABLE bi_copy (k INTEGER PRIMARY KEY, v INTEGER)
+
+statement ok
+INSERT INTO bi_copy VALUES (1, 777)
+
+statement ok
+PRAGMA git4data_bind_internal('bi_src', 'bi', 'bi_copy', 'true')
+
+query I
+SELECT v FROM bi_src AT (BRANCH => 'bi') WHERE k = 1
+----
+777
