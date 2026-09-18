@@ -84,3 +84,48 @@ query II
 SELECT (SELECT v FROM t_c WHERE k = 1), (SELECT count(*) FROM t_c)
 ----
 7	10
+
+
+# Reference names that are awkward survive creation, the listing and a read: a quote, another script, and spaces around the name, which are trimmed before the uniqueness check - so ' b ' and b are one
+# branch rather than a duplicate. The empty name is allowed too: it lists as a row with an empty name and
+# reads, which is odd but usable rather than a hole. Only the reserved __ prefix is refused.
+statement ok
+CREATE TABLE nf (k INTEGER PRIMARY KEY, v INTEGER)
+
+statement ok
+INSERT INTO nf SELECT range, range FROM range(10)
+
+statement ok
+CHECKPOINT
+
+statement ok
+PRAGMA git4data_create_branch('a''b', '')
+
+statement ok
+PRAGMA git4data_create_branch('分支-1', '')
+
+# a padded name is a name of its own: it is not trimmed, so ' b ' and b are two branches, and both read
+statement ok
+PRAGMA git4data_create_branch(' b ', '')
+
+statement ok
+PRAGMA git4data_create_branch('b', '')
+
+query I
+SELECT count(*) FROM nf AT (BRANCH => ' b ')
+----
+10
+
+statement ok
+PRAGMA git4data_create_branch('', '')
+
+query II
+SELECT (SELECT count(*) FROM nf AT (BRANCH => 'a''b')), (SELECT count(*) FROM nf AT (BRANCH => '分支-1'))
+----
+10	10
+
+query I
+SELECT count(*) FROM nf AT (BRANCH => '')
+----
+10
+
