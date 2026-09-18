@@ -68,6 +68,28 @@ string Git4DataEnsureRegistryTables(ClientContext &context) {
 		                             GIT4DATA_REGISTRY_SCHEMA, GIT4DATA_SNAPSHOTS_TABLE, escape(snapshot.name),
 		                             snapshot.pin, Timestamp::ToString(snapshot.created), escape(snapshot.line));
 	}
+	// A branch is three records - the branch, the table it was given for a source, and the delta it differs by
+	// - and every one of them has to come across. The tables are the whole truth for a record the moment they
+	// exist, so a record left in the block is one the next open drops: measured, with only the snapshots
+	// migrated, a file whose records were in the block lost every branch and every mapping as soon as a pragma
+	// created the tables, and the reads then reported "Branch ... does not exist" while the block still held it.
+	for (auto &branch : migrating.branches.List()) {
+		result += StringUtil::Format("INSERT INTO %s.%s VALUES ('%s', %llu, '%s', TIMESTAMP '%s', '%s');\n",
+		                             GIT4DATA_REGISTRY_SCHEMA, GIT4DATA_BRANCHES_TABLE, escape(branch.name),
+		                             branch.pin, escape(branch.parent), Timestamp::ToString(branch.created),
+		                             escape(branch.base_line));
+		for (auto &storage : branch.storage_tables) {
+			result += StringUtil::Format("INSERT INTO %s.%s VALUES ('%s', '%s', '%s', %s);\n",
+			                             GIT4DATA_REGISTRY_SCHEMA, GIT4DATA_STORAGE_TABLE, escape(branch.name),
+			                             escape(storage.source), escape(storage.storage),
+			                             storage.owned ? "true" : "false");
+		}
+		for (auto &delta : branch.deltas) {
+			result += StringUtil::Format("INSERT INTO %s.%s VALUES ('%s', '%s', '%s', '%s');\n",
+			                             GIT4DATA_REGISTRY_SCHEMA, GIT4DATA_DELTAS_TABLE, escape(branch.name),
+			                             escape(delta.source), escape(delta.added), escape(delta.removed));
+		}
+	}
 	return result;
 }
 

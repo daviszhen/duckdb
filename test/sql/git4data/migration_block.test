@@ -1,0 +1,143 @@
+# name: test/sql/git4data/migration_block.test
+# description: A file whose references are in the checkpoint's metadata block, written before the registry tables
+# group: [git4data]
+
+# Before the registry tables the references lived in a block of the checkpoint, and a database written by that
+# build still has to open - and its records have to come across when the tables are created, because the tables
+# are the whole truth for a record the moment they exist. A record left in the block is one the next open
+# drops, since the block reader stands down as soon as the tables are there.
+#
+# The fixture is a database written by the build at `6795df9739`, the tip of `git4data` before this branch: a
+# ten-row table, a snapshot of it, a branch holding a copy of it with one row changed, and a branch differing
+# from it by a delta that adds one row and removes one. It is committed gzipped because the test *writes* to
+# it - the tables are created and the records migrated by the first pragma that runs - and `data/storage` is
+# where this repo keeps the databases older builds wrote. It is opened by ATTACH rather than by `load`,
+# because `load` deletes the file it is given and this file is the thing under test.
+
+unzip data/storage/git4data_registry_block.db.gz {TEST_DIR}/git4data_registry_block.db
+
+statement ok
+ATTACH '{TEST_DIR}/git4data_registry_block.db' AS old
+
+statement ok
+USE old
+
+# The tables do not exist yet, so this is the old format, and the records come from the block. They are all
+# there before anything migrates them: the snapshot, the copy the branch was given, and the delta.
+statement error
+SELECT count(*) FROM git4data.snapshots
+----
+<REGEX>:.*git4data.snapshots.*
+
+query I
+SELECT count(*) FROM t AT (SNAPSHOT => 's')
+----
+10
+
+query I
+SELECT v FROM t AT (BRANCH => 'b') WHERE k = 1
+----
+101
+
+query I
+SELECT count(*) FROM t AT (BRANCH => 'd')
+----
+10
+
+query I
+SELECT v FROM t AT (BRANCH => 'd') WHERE k = 100
+----
+100
+
+query I
+SELECT count(*) FROM t AT (BRANCH => 'd') WHERE k = 3
+----
+0
+
+# the live table is untouched by any of it
+query II
+SELECT (SELECT v FROM t WHERE k = 1), (SELECT count(*) FROM t)
+----
+1	10
+
+# The first pragma creates the tables, and every kind of record has to migrate into them: a branch is three
+# records, and a mapping left behind in the block is a branch that silently reads its pinned image instead of
+# the line it holds.
+statement ok
+PRAGMA git4data_create_branch('after', '')
+
+query IIII
+SELECT (SELECT count(*) FROM git4data.snapshots), (SELECT count(*) FROM git4data.branches),
+       (SELECT count(*) FROM git4data.storage), (SELECT count(*) FROM git4data.deltas)
+----
+1	3	1	1
+
+# and the rows are the records: the two branches from the block, the copy one of them was given, and the delta
+query IIII
+SELECT (SELECT count(*) FROM git4data.branches WHERE name = 'b'),
+       (SELECT count(*) FROM git4data.storage WHERE branch = 'b' AND source = 't' AND storage = 't_copy'),
+       (SELECT count(*) FROM git4data.deltas WHERE branch = 'd' AND source = 't'),
+       (SELECT count(*) FROM git4data.branches WHERE name = 'after')
+----
+1	1	1	1
+
+# A reopen reads the tables and no longer the block, which is where a migration that covered only the
+# snapshots lost every branch: the file is detached - which checkpoints it - and attached again.
+statement ok
+USE memory
+
+statement ok
+DETACH old
+
+statement ok
+ATTACH '{TEST_DIR}/git4data_registry_block.db' AS old
+
+statement ok
+USE old
+
+query I
+SELECT count(*) FROM t AT (SNAPSHOT => 's')
+----
+10
+
+query I
+SELECT v FROM t AT (BRANCH => 'b') WHERE k = 1
+----
+101
+
+query I
+SELECT v FROM t AT (BRANCH => 'd') WHERE k = 100
+----
+100
+
+query I
+SELECT count(*) FROM t AT (BRANCH => 'after')
+----
+10
+
+# the migrated records are ordinary ones: a write through the branch's copy is a write like any other
+statement ok
+UPDATE t_copy SET v = 202 WHERE k = 2
+
+query I
+SELECT v FROM t AT (BRANCH => 'b') WHERE k = 2
+----
+202
+
+# a reference taken on the migrated file is a row beside them
+statement ok
+PRAGMA git4data_create_snapshot('after_migration')
+
+query I
+SELECT count(*) FROM git4data.snapshots
+----
+2
+
+# and the migrated snapshot is still a reference: restoring from it rewinds the live table
+statement ok
+PRAGMA git4data_restore('t', 's')
+
+query I
+SELECT v FROM t WHERE k = 1
+----
+1
