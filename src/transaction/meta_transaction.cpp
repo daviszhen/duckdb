@@ -167,6 +167,11 @@ ErrorData MetaTransaction::Commit() {
 void MetaTransaction::Rollback() {
 	// Rollback all transactions in reverse order.
 	ErrorData error;
+	// A reference is a row in the registry tables, so what this rollback took away has to be taken out of this
+	// connection's in-memory registries before it reads them again. It is on the client rather than on the
+	// transaction manager: another connection rolling back must not rebuild (and so clear) what this one has
+	// not committed yet.
+	context.client_data->git4data_registry_reload_needed = true;
 	for (idx_t i = all_transactions.size(); i > 0; i--) {
 		auto &db = all_transactions[i - 1].get();
 		auto &transaction_manager = db.GetTransactionManager();

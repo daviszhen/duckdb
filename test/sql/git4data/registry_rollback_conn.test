@@ -1,0 +1,48 @@
+# name: test/sql/git4data/registry_rollback_conn.test
+# description: A rollback on one connection must not take another connection's uncommitted references
+# group: [git4data]
+
+load {TEST_DIR}/registry_rollback_conn.db
+
+statement ok
+CREATE TABLE t (k INTEGER PRIMARY KEY, v INTEGER)
+
+statement ok
+INSERT INTO t VALUES (1, 1)
+
+statement ok
+CHECKPOINT
+
+# a committed reference first, so the tables exist and a rebuild has something to read
+statement ok
+PRAGMA git4data_create_snapshot('theirs')
+
+statement ok con1
+BEGIN
+
+statement ok con1
+PRAGMA git4data_create_snapshot('mine')
+
+# the other connection rolls something back, and then touches the feature
+statement ok con2
+BEGIN
+
+statement ok con2
+CREATE TABLE con2_work (k INTEGER PRIMARY KEY)
+
+statement ok con2
+ROLLBACK
+
+statement ok con2
+PRAGMA git4data_snapshots
+
+# the first connection's own uncommitted reference must still be there for it
+query I con1
+SELECT count(*) FROM git4data.snapshots WHERE name = 'mine'
+----
+1
+
+query I con1
+SELECT count(*) FROM t AT (SNAPSHOT => 'mine')
+----
+1

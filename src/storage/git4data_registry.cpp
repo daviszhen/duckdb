@@ -155,6 +155,87 @@ void Git4DataReloadRegistry(AttachedDatabase &db) {
 	}
 }
 
+//! Whether this transaction added the record the key names
+static bool Git4DataAddedByThisTransaction(const vector<string> &added, const string &kind, const string &key) {
+	for (auto &entry : added) {
+		if (entry == kind + "\t" + key) {
+			return true;
+		}
+	}
+	return false;
+}
+
+void Git4DataReconcileRegistry(AttachedDatabase &db, const vector<string> &added) {
+	auto &transaction_manager = DuckTransactionManager::Get(db);
+	auto before_snapshots = transaction_manager.snapshots.List();
+	auto before_branches = transaction_manager.branches.List();
+	// the tables, if they are there, are read again; if they are not, memory is left as it is
+	Git4DataLoadRegistry(db);
+	auto tables_have_snapshots = Git4DataRegistryTablesExist(db);
+
+	// What this transaction added goes: its rows went with the rollback, and a reference no disk holds must not
+	// stay readable. When the tables are there the reload has already dropped them, so this is for the case
+	// where they are not - a database whose first reference was the one rolled back.
+	for (auto &entry : added) {
+		auto kind = entry.substr(0, entry.find('\t'));
+		auto key = entry.substr(entry.find('\t') + 1);
+		if (kind == "snapshot") {
+			Git4DataSnapshot existing;
+			if (transaction_manager.snapshots.Get(key, existing) && !tables_have_snapshots) {
+				transaction_manager.snapshots.Drop(key);
+			}
+		} else if (kind == "branch") {
+			Git4DataBranch existing;
+			if (transaction_manager.branches.Get(key, existing) && !tables_have_snapshots) {
+				transaction_manager.branches.Drop(key);
+			}
+		} else if (kind == "storage" || kind == "delta") {
+			auto branch = key.substr(0, key.find('\t'));
+			auto source = key.substr(key.find('\t') + 1);
+			if (!tables_have_snapshots) {
+				transaction_manager.branches.ClearStorageTable(branch, source);
+				transaction_manager.branches.ClearDeltaTable(branch, source);
+			}
+		}
+	}
+
+	// Everything else memory held is put back unless this transaction added it: those are the records another
+	// connection has not committed yet, and the reload above knows nothing about them.
+	for (auto &snapshot : before_snapshots) {
+		if (Git4DataAddedByThisTransaction(added, "snapshot", snapshot.name)) {
+			continue;
+		}
+		Git4DataSnapshot existing;
+		if (!transaction_manager.snapshots.Get(snapshot.name, existing)) {
+			transaction_manager.snapshots.Create(snapshot.name, snapshot.pin, snapshot.created, snapshot.line);
+		}
+	}
+	for (auto &branch : before_branches) {
+		if (Git4DataAddedByThisTransaction(added, "branch", branch.name)) {
+			continue;
+		}
+		Git4DataBranch existing;
+		if (!transaction_manager.branches.Get(branch.name, existing)) {
+			transaction_manager.branches.Restore(branch.name, branch.pin, branch.parent, branch.created,
+			                                     branch.base_line);
+		}
+		for (auto &storage : branch.storage_tables) {
+			if (Git4DataAddedByThisTransaction(added, "storage", branch.name + "\t" + storage.source)) {
+				continue;
+			}
+			transaction_manager.branches.SetStorageTable(branch.name, storage.source, storage.storage, storage.oid,
+			                                             storage.source_oid, storage.owned);
+		}
+		for (auto &delta : branch.deltas) {
+			if (Git4DataAddedByThisTransaction(added, "delta", branch.name + "\t" + delta.source)) {
+				continue;
+			}
+			transaction_manager.branches.SetDeltaTable(branch.name, delta.source, delta.added, delta.removed,
+			                                           delta.added_oid, delta.removed_oid, delta.source_oid);
+		}
+	}
+}
+
 void Git4DataLoadRegistry(AttachedDatabase &db) {
 	if (!Git4DataRegistryTablesExist(db)) {
 		// an older file, whose records are in the checkpoint's metadata block and are already loaded

@@ -57,6 +57,12 @@ void Git4DataCheckRegistrySchema(const string &schema);
 //! first reference of a database creates them in the same transaction - so the registries are emptied rather
 //! than left holding references that are no longer anywhere on disk.
 void Git4DataReloadRegistry(AttachedDatabase &db);
+//! Rebuild after a rollback on the connection that made it. What that transaction added is dropped, what the
+//! tables hold is put back, and anything else in memory is left alone: another connection's uncommitted
+//! records are not this one's to remove, which a clear-and-reload would do - measured, with two connections,
+//! one of them rolling back a real transaction under the other's feet.
+//! `added` holds the records this transaction added, as "<kind>\t<key>" strings.
+void Git4DataReconcileRegistry(AttachedDatabase &db, const vector<string> &added);
 //! Whether a schema name is the one the registry keeps its references in
 bool Git4DataIsRegistrySchema(const string &schema);
 //! Whether a table is one the registry keeps its references in

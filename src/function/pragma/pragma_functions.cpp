@@ -20,6 +20,7 @@
 #include "duckdb/function/function_set.hpp"
 #include "duckdb/main/client_context.hpp"
 #include "duckdb/main/database.hpp"
+#include "duckdb/main/client_data.hpp"
 #include "duckdb/main/database_manager.hpp"
 #include "duckdb/main/attached_database.hpp"
 #include "duckdb/function/table/system_functions.hpp"
@@ -159,10 +160,13 @@ static DuckTransactionManager &GetGit4DataTransactionManager(ClientContext &cont
 		throw InvalidInputException("Git4Data snapshots require an attached database");
 	}
 	auto &transaction_manager = DuckTransactionManager::Get(*attached);
-	if (transaction_manager.ConsumeRegistryReloadNeeded()) {
-		// a rollback took rows out of the registry tables: the in-memory registries are rebuilt from what is
-		// committed before this operation acts on them
-		Git4DataReloadRegistry(*attached);
+	if (context.client_data->git4data_registry_reload_needed) {
+		context.client_data->git4data_registry_reload_needed = false;
+		// a rollback took this connection's rows out of the registry tables. What it added is dropped from
+		// memory and whatever the tables hold is put back - not a clear-and-reload, which would take another
+		// connection's uncommitted records with it (measured, with two connections).
+		Git4DataReconcileRegistry(*attached, context.client_data->git4data_added_records);
+		context.client_data->git4data_added_records.clear();
 	}
 	return transaction_manager;
 }
@@ -731,6 +735,7 @@ static string PragmaGit4DataBindBranchTable(ClientContext &context, const Functi
 	result += StringUtil::Format("DELETE FROM %s.%s WHERE branch = '%s' AND source = '%s';",
 	                             GIT4DATA_REGISTRY_SCHEMA, GIT4DATA_DELTAS_TABLE, escape(branch_name),
 	                             escape(source_table));
+	context.client_data->git4data_added_records.push_back("storage\t" + branch_name + "\t" + source_table);
 	result += StringUtil::Format("INSERT INTO %s.%s VALUES ('%s', '%s', '%s', %s);", GIT4DATA_REGISTRY_SCHEMA,
 	                             GIT4DATA_STORAGE_TABLE, escape(branch_name), escape(source_table),
 	                             escape(storage_table), owned ? "true" : "false");
@@ -855,6 +860,7 @@ static string PragmaGit4DataBindBranchDelta(ClientContext &context, const Functi
 	result += StringUtil::Format("DELETE FROM %s.%s WHERE branch = '%s' AND source = '%s';",
 	                             GIT4DATA_REGISTRY_SCHEMA, GIT4DATA_DELTAS_TABLE,
 	                             StringUtil::Replace(branch_name, "'", "''"), StringUtil::Replace(source_table, "'", "''"));
+	context.client_data->git4data_added_records.push_back("delta\t" + branch_name + "\t" + source_table);
 	result += StringUtil::Format("INSERT INTO %s.%s VALUES ('%s', '%s', '%s', '%s');", GIT4DATA_REGISTRY_SCHEMA,
 	                             GIT4DATA_DELTAS_TABLE, StringUtil::Replace(branch_name, "'", "''"),
 	                             StringUtil::Replace(source_table, "'", "''"),
@@ -1690,6 +1696,7 @@ static string PragmaGit4DataCreateBranch(ClientContext &context, const FunctionP
 	auto escape = [](const string &value) {
 		return StringUtil::Replace(value, "'", "''");
 	};
+	context.client_data->git4data_added_records.push_back("branch\t" + name);
 	result += StringUtil::Format("INSERT INTO %s.%s VALUES ('%s', %llu, '%s', TIMESTAMP '%s', '%s');",
 	                             GIT4DATA_REGISTRY_SCHEMA, GIT4DATA_BRANCHES_TABLE, escape(name), pin,
 	                             escape(parent), Timestamp::ToString(created), escape(base_line));
@@ -1911,6 +1918,7 @@ static string PragmaGit4DataCreateSnapshot(ClientContext &context, const Functio
 	auto escape = [](const string &value) {
 		return StringUtil::Replace(value, "'", "''");
 	};
+	context.client_data->git4data_added_records.push_back("snapshot\t" + name);
 	result += StringUtil::Format("INSERT INTO %s.%s VALUES ('%s', %llu, TIMESTAMP '%s', '%s');",
 	                             GIT4DATA_REGISTRY_SCHEMA, GIT4DATA_SNAPSHOTS_TABLE, escape(name), pin,
 	                             Timestamp::ToString(created), escape(line));

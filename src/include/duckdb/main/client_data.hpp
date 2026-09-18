@@ -30,6 +30,19 @@ public:
 	~ClientData();
 
 public:
+	//! The registry records this connection's current transaction has added, as "<kind>\t<key>" strings. A
+	//! rollback takes their rows with it, so they are what the in-memory registries have to be rid of - and
+	//! records another connection added while uncommitted are none of this one's business.
+	vector<string> git4data_added_records;
+
+	//! Set when a rollback happened on this connection, and cleared by the first git4data operation after it:
+	//! a reference is a row in the registry tables, so this connection's rollback may have taken one away and
+	//! its in-memory registries are rebuilt from the tables before it uses them again. Per connection on
+	//! purpose - another connection's rollback says nothing about the references this one has not committed
+	//! yet, and a rebuild is a clear-and-reload, so a shared flag would wipe them (measured, with two
+	//! connections and a real rollback on one of them).
+	bool git4data_registry_reload_needed = false;
+
 	//! The query profiler of this client.
 	shared_ptr<QueryProfiler> profiler;
 

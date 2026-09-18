@@ -1,4 +1,5 @@
 #include "duckdb/function/table/system_functions.hpp"
+#include "duckdb/main/client_data.hpp"
 #include "duckdb/storage/git4data_registry.hpp"
 
 #include "duckdb/catalog/catalog.hpp"
@@ -596,9 +597,11 @@ unique_ptr<FunctionData> Git4DataSnapshotScanFun::CreateBindData(ClientContext &
 	auto &db_manager = DatabaseManager::Get(context);
 	auto attached = db_manager.GetDatabase(context, DatabaseManager::GetDefaultDatabase(context));
 	auto &transaction_manager = DuckTransactionManager::Get(*attached);
-	if (transaction_manager.ConsumeRegistryReloadNeeded()) {
+	if (context.client_data->git4data_registry_reload_needed) {
+		context.client_data->git4data_registry_reload_needed = false;
 		// a rollback may have removed a reference this read is about to resolve
-		Git4DataReloadRegistry(*attached);
+		Git4DataReconcileRegistry(*attached, context.client_data->git4data_added_records);
+		context.client_data->git4data_added_records.clear();
 	}
 	Git4DataReadPlan plan;
 	ResolveGit4DataRead(context, transaction_manager, table_name, reference_name, kind, plan);
@@ -1009,9 +1012,11 @@ unique_ptr<FunctionData> Git4DataDiffFun::CreateBindData(ClientContext &context,
 	auto &db_manager = DatabaseManager::Get(context);
 	auto attached = db_manager.GetDatabase(context, DatabaseManager::GetDefaultDatabase(context));
 	auto &transaction_manager = DuckTransactionManager::Get(*attached);
-	if (transaction_manager.ConsumeRegistryReloadNeeded()) {
+	if (context.client_data->git4data_registry_reload_needed) {
+		context.client_data->git4data_registry_reload_needed = false;
 		// a rollback may have removed a reference this read is about to resolve
-		Git4DataReloadRegistry(*attached);
+		Git4DataReconcileRegistry(*attached, context.client_data->git4data_added_records);
+		context.client_data->git4data_added_records.clear();
 	}
 	auto left_plan = ResolveGit4DataReferencePlan(context, transaction_manager, table_name, left_name);
 	auto right_plan = ResolveGit4DataReferencePlan(context, transaction_manager, table_name, right_name);
