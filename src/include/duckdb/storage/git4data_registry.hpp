@@ -52,6 +52,8 @@ void Git4DataCheckRegistryWrite(const TableCatalogEntry &table);
 //! The same for a schema a statement names: dropping the schema the registry lives in is another way to take
 //! every reference at once.
 void Git4DataCheckRegistrySchema(const string &schema);
+//! Whether a schema name is the one the registry keeps its references in
+bool Git4DataIsRegistrySchema(const string &schema);
 //! Whether a table is one the registry keeps its references in
 bool Git4DataIsRegistryTable(const TableCatalogEntry &table);
 //! Throw when a statement writes or drops one of the registry's tables, or the schema that holds them.

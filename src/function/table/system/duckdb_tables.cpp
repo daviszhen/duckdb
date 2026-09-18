@@ -1,4 +1,5 @@
 #include "duckdb/function/table/system_functions.hpp"
+#include "duckdb/storage/git4data_registry.hpp"
 
 #include "duckdb/catalog/catalog.hpp"
 #include "duckdb/catalog/catalog_entry/schema_catalog_entry.hpp"
@@ -80,6 +81,13 @@ unique_ptr<GlobalTableFunctionState> DuckDBTablesInit(ClientContext &context, Ta
 	// scan all the schemas for tables and collect themand collect them
 	auto schemas = Catalog::GetAllSchemas(context);
 	for (auto &schema : schemas) {
+		// the schema the reference registry is kept in is not part of what a caller's database looks like: it
+		// is the feature's own bookkeeping, and listing it invites a caller to write it (which is refused).
+		// SHOW TABLES and information_schema.tables are queries over this function, so hiding it here hides it
+		// in all of them, while reading the tables by name stays possible.
+		if (Git4DataIsRegistrySchema(schema.get().name.GetIdentifierName())) {
+			continue;
+		}
 		schema.get().Scan(context, CatalogType::TABLE_ENTRY,
 		                  [&](CatalogEntry &entry) { result->entries.push_back(entry); });
 	};

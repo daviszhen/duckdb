@@ -223,8 +223,12 @@ void Git4DataLoadRegistry(QueryContext context, AttachedDatabase &db) {
 //===----------------------------------------------------------------------===//
 // The guard
 //===----------------------------------------------------------------------===//
+bool Git4DataIsRegistrySchema(const string &schema) {
+	return StringUtil::CIEquals(schema, GIT4DATA_REGISTRY_SCHEMA);
+}
+
 bool Git4DataIsRegistryTable(const TableCatalogEntry &table) {
-	return StringUtil::CIEquals(table.ParentSchema().name.GetIdentifierName(), GIT4DATA_REGISTRY_SCHEMA);
+	return Git4DataIsRegistrySchema(table.ParentSchema().name.GetIdentifierName());
 }
 
 void Git4DataCheckRegistryWrite(const TableCatalogEntry &table) {
