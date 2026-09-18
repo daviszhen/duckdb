@@ -138,3 +138,46 @@ statement error
 PRAGMA git4data_bind_branch_table('t', 'b', 't_mine', 'maybe')
 ----
 <REGEX>:.*it is true or false, not "maybe".*
+
+# The copy a second materialize replaces is dropped because it is a table of the identical line with nothing
+# pointing at it - unless something does point at it. Another branch can be materialized *from* that copy, so
+# it is the table that branch is about, and taking it leaves that branch with nothing to read at all.
+# Measured: after the second materialize here, "t_b1" was gone and the branch about it could not be read.
+statement ok
+CREATE TABLE m_src (k INTEGER PRIMARY KEY, v INTEGER)
+
+statement ok
+INSERT INTO m_src SELECT range, range FROM range(4)
+
+statement ok
+CHECKPOINT
+
+statement ok
+PRAGMA git4data_create_branch('m1', '')
+
+statement ok
+PRAGMA git4data_materialize('m_src', 'm1', 'm_copy1')
+
+statement ok
+UPDATE m_copy1 SET v = 111 WHERE k = 1
+
+statement ok
+PRAGMA git4data_create_branch('m2', '')
+
+statement ok
+PRAGMA git4data_materialize('m_copy1', 'm2', 'm_copy1_copy')
+
+statement ok
+PRAGMA git4data_materialize('m_src', 'm1', 'm_copy2')
+
+# the replaced copy stayed, and the branch about it still reads its line
+query II
+SELECT (SELECT v FROM m_copy1 AT (BRANCH => 'm2') WHERE k = 1), (SELECT count(*) FROM m_copy1)
+----
+111	4
+
+# and the branch that materialized again reads the new copy, not the old one
+query I
+SELECT v FROM m_src AT (BRANCH => 'm1') WHERE k = 1
+----
+111

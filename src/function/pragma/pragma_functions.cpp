@@ -554,7 +554,11 @@ static string PragmaGit4DataMaterialize(ClientContext &context, const FunctionPa
 	if (transaction_manager.branches.GetStorageTable(branch_name, source_table, existing) && existing.owned &&
 	    existing.storage != storage_table) {
 		auto resolved = Git4DataResolveTableName(context, existing.storage, existing.oid);
-		if (!resolved.empty()) {
+		// it is not this branch's alone to take either: another branch can have been given it, or be *about*
+		// it, and taking it would leave that one reading its pin or with nothing to read - measured, a
+		// second materialize dropped the source table of a branch materialized from the first copy
+		if (!resolved.empty() &&
+		    !transaction_manager.branches.OtherBranchUsesTable(branch_name, resolved, existing.oid)) {
 			replaced = StringUtil::Format("\nDROP TABLE IF EXISTS %s;", KeywordHelper::WriteOptionallyQuoted(resolved));
 		}
 	}
