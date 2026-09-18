@@ -79,3 +79,47 @@ query I
 SELECT count(*) FROM t AT (BRANCH => 'left')
 ----
 103
+
+# A rename under the mapping does not stop a merge: the copy a branch was given is found by the source's oid,
+# which is what survives a rename, so the merge still knows which table it is writing into.
+statement ok
+CREATE TABLE t2 (k INTEGER PRIMARY KEY, v INTEGER)
+
+statement ok
+INSERT INTO t2 SELECT range, range FROM range(10)
+
+statement ok
+ALTER TABLE t2 RENAME TO t3
+
+statement ok
+PRAGMA git4data_create_branch('rn_root', '')
+
+statement ok
+PRAGMA git4data_create_branch('rn_left', 'rn_root')
+
+statement ok
+PRAGMA git4data_create_branch('rn_right', 'rn_root')
+
+statement ok
+PRAGMA git4data_materialize('t3', 'rn_left', 'rn_l_copy')
+
+statement ok
+PRAGMA git4data_materialize('t3', 'rn_right', 'rn_r_copy')
+
+statement ok
+UPDATE rn_l_copy SET v = 111 WHERE k = 1
+
+statement ok
+UPDATE rn_r_copy SET v = 222 WHERE k = 2
+
+statement ok
+ALTER TABLE t3 RENAME TO t4
+
+statement ok
+PRAGMA git4data_merge('t4', 'rn_left', 'rn_right', 'fail')
+
+query II
+SELECT (SELECT v FROM t4 AT (BRANCH => 'rn_left') WHERE k = 1),
+       (SELECT v FROM t4 AT (BRANCH => 'rn_left') WHERE k = 2)
+----
+111	222

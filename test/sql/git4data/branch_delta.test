@@ -550,3 +550,42 @@ query I
 SELECT count(*) FROM t_g2 AT (BRANCH => 'gd')
 ----
 11
+
+# A *bare* fork from a delta branch - one with no snapshot in between - reads that line with the delta
+# applied, which this note once recorded as refused. The fork takes the parent as the line it started from
+# (the same field a capture uses) rather than only the parent's pin, so the added key is there and the
+# removed one is not: before that, the same fork read ten rows of the raw base, with the row the parent had
+# added missing and the row it had removed present.
+statement ok
+PRAGMA git4data_create_branch('gd_child', 'gd')
+
+query IIII
+SELECT (SELECT count(*) FROM t_g2 AT (BRANCH => 'gd_child')),
+       (SELECT count(*) FROM t_g2 AT (BRANCH => 'gd_child') WHERE k = 100),
+       (SELECT count(*) FROM t_g2 AT (BRANCH => 'gd_child') WHERE k = 200),
+       (SELECT count(*) FROM t_g2 AT (BRANCH => 'gd_child') WHERE k = 3)
+----
+11	1	1	0
+
+# the parent cannot be dropped while the child holds its line, and the child keeps reading it
+statement error
+PRAGMA git4data_drop_branch('gd')
+----
+<REGEX>:.*descend.*
+
+query I
+SELECT count(*) FROM t_g2 AT (BRANCH => 'gd_child')
+----
+11
+
+# a delta of its own is still refused: two overlays over one source are not built
+statement ok
+CREATE TABLE gd_child_add (k INTEGER PRIMARY KEY, v INTEGER)
+
+statement ok
+CREATE TABLE gd_child_del (k INTEGER PRIMARY KEY)
+
+statement error
+PRAGMA git4data_bind_branch_delta('t_g2', 'gd_child', 'gd_child_add', 'gd_child_del')
+----
+<REGEX>:.*inherits a line that differs by a delta.*

@@ -902,7 +902,10 @@ static string PragmaGit4DataBindBranchDelta(ClientContext &context, const Functi
 		Git4DataBranch line_branch;
 		if (transaction_manager.branches.Get(branch.base_line, line_branch)) {
 			for (auto &line_delta : line_branch.deltas) {
-				if (!Git4DataSourceKeyMatches(context, line_delta.source, source_key)) {
+				// a source that has been renamed matches by its oid, exactly as a read matches it: the stored
+				// name is the one it had when the delta was bound, and the key is the one it has now
+				if (!Git4DataSourceKeyMatches(context, line_delta.source, source_key) &&
+				    (line_delta.source_oid == 0 || line_delta.source_oid != source.oid)) {
 					continue;
 				}
 				throw InvalidInputException(
@@ -914,7 +917,8 @@ static string PragmaGit4DataBindBranchDelta(ClientContext &context, const Functi
 		}
 	}
 	for (auto &storage_entry : branch.storage_tables) {
-		if (!Git4DataSourceKeyMatches(context, storage_entry.source, source_key)) {
+		if (!Git4DataSourceKeyMatches(context, storage_entry.source, source_key) &&
+		    (storage_entry.source_oid == 0 || storage_entry.source_oid != source.oid)) {
 			continue;
 		}
 		// one line, one source: a branch that already reads a table of its own reads that, and a delta
@@ -1503,7 +1507,8 @@ static string PragmaGit4DataMerge(ClientContext &context, const FunctionParamete
 	auto &merge_source = Git4DataResolveTable(context, table_name);
 	auto merge_key = Git4DataSourceKey(merge_source);
 	for (auto &entry : left.storage_tables) {
-		if (Git4DataSourceKeyMatches(context, entry.source, merge_key)) {
+		if (Git4DataSourceKeyMatches(context, entry.source, merge_key) ||
+		    (entry.source_oid != 0 && entry.source_oid == merge_source.oid)) {
 			// the table the branch was given can have been renamed, and the merge writes into it
 			merge_into = Git4DataResolveTableName(context, entry.storage, entry.oid);
 		}
@@ -1538,7 +1543,8 @@ static string PragmaGit4DataMerge(ClientContext &context, const FunctionParamete
 	bool drop_merge_base = false;
 	if (transaction_manager.branches.Get(ancestor, ancestor_branch)) {
 		for (auto &storage_entry : ancestor_branch.storage_tables) {
-			if (!Git4DataSourceKeyMatches(context, storage_entry.source, merge_key)) {
+			if (!Git4DataSourceKeyMatches(context, storage_entry.source, merge_key) &&
+			    (storage_entry.source_oid == 0 || storage_entry.source_oid != merge_source.oid)) {
 				continue;
 			}
 			auto &storage_table = Git4DataResolveTable(context, storage_entry.storage);
