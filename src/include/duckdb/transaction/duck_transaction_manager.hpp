@@ -79,6 +79,12 @@ public:
 	void MarkClean() noexcept {
 		dirty.store(false);
 	}
+	//! Mark the registry as changed. What is written beside it in the same block - the two quotas and the
+	//! point-in-time window - has to do the same, or a session whose only change is one of those leaves the
+	//! block unwritten: a checkpoint with an empty log skips its body.
+	void MarkDirty() noexcept {
+		dirty.store(true);
+	}
 
 private:
 	//! Recompute the cached minimum pin. Caller must hold the lock.
@@ -202,6 +208,12 @@ public:
 	}
 	void MarkClean() noexcept {
 		dirty.store(false);
+	}
+	//! Mark the registry as changed. What is written beside it in the same block - the two quotas and the
+	//! point-in-time window - has to do the same, or a session whose only change is one of those leaves the
+	//! block unwritten: a checkpoint with an empty log skips its body.
+	void MarkDirty() noexcept {
+		dirty.store(true);
 	}
 	//! Give a branch its own table for a source table, so writes to it no longer touch the source. The
 	//! oid is the table's, and is checked again on every read. `owned` says the feature created that

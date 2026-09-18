@@ -563,11 +563,18 @@ static string PragmaGit4DataMaterialize(ClientContext &context, const FunctionPa
 			replaced = StringUtil::Format("\nDROP TABLE IF EXISTS %s;", KeywordHelper::WriteOptionallyQuoted(resolved));
 		}
 	}
+	// The binding is written out rather than called through git4data_bind_branch_table: that one returns the
+	// row's statements, and a pragma that returns a statement cannot be called from one - the same wall the
+	// merge's cleanup hit. So the memory half is the internal pragma and the row is plain DML here.
 	return StringUtil::Format("CREATE TABLE %s (%s);\nINSERT INTO %s SELECT * FROM %s AT (BRANCH => '%s');\n"
-	                          "PRAGMA git4data_bind_branch_table('%s', '%s', '%s', 'true');%s",
+	                          "PRAGMA git4data_bind_internal('%s', '%s', '%s', 'true');\n"
+	                          "DELETE FROM %s.%s WHERE branch = '%s' AND source = '%s';\n"
+	                          "INSERT INTO %s.%s VALUES ('%s', '%s', '%s', true);%s",
 	                          quoted_storage, columns, quoted_storage,
 	                          KeywordHelper::WriteOptionallyQuoted(source_table), escaped_branch, escaped_source,
-	                          escaped_branch, escaped_storage, replaced);
+	                          escaped_branch, escaped_storage, GIT4DATA_REGISTRY_SCHEMA, GIT4DATA_STORAGE_TABLE,
+	                          escaped_branch, escaped_source, GIT4DATA_REGISTRY_SCHEMA, GIT4DATA_STORAGE_TABLE,
+	                          escaped_branch, escaped_source, escaped_storage, replaced);
 }
 
 //! Take back what a branch was given for a source table: its table of its own, or the delta it differs
@@ -591,6 +598,15 @@ static string PragmaGit4DataUnbind(ClientContext &context, const FunctionParamet
 	auto named = Catalog::GetEntry<TableCatalogEntry>(context, QualifiedName(Identifier(table_name)),
 	                                                  OnEntryNotFound::RETURN_NULL);
 	auto source_oid = named ? named->oid : 0;
+	// what it unbinds is a row in the registry tables as well, so the statement it returns drops it: a
+	// mapping left behind would be read back at the next open
+	auto drop_row = [&](const char *table, const string &cleared) {
+		if (!Git4DataRegistryTablesThere(context)) {
+			return string();
+		}
+		return StringUtil::Format("DELETE FROM %s.%s WHERE branch = '%s' AND source = '%s';", GIT4DATA_REGISTRY_SCHEMA,
+		                          table, escape(branch_name), escape(cleared));
+	};
 	Git4DataStorageTable storage;
 	if (transaction_manager.branches.GetStorageTable(branch_name, table_name, storage, source_oid)) {
 		// the mapping is found and cleared by the same comparison, so a name that differs only in case
@@ -602,7 +618,8 @@ static string PragmaGit4DataUnbind(ClientContext &context, const FunctionParamet
 		}
 		// the table itself is the caller's: it was created for the branch by materialize, and a caller
 		// who gave one by hand would not expect this call to drop it either
-		return StringUtil::Format("SELECT '%s'::VARCHAR AS branch, '%s'::VARCHAR AS table_name, 'storage' AS "
+		return drop_row(GIT4DATA_STORAGE_TABLE, storage.source) +
+		       StringUtil::Format("SELECT '%s'::VARCHAR AS branch, '%s'::VARCHAR AS table_name, 'storage' AS "
 		                          "unbound, '%s'::VARCHAR AS was",
 		                          escape(branch_name), escape(table_name), escape(storage.storage));
 	}
@@ -611,7 +628,8 @@ static string PragmaGit4DataUnbind(ClientContext &context, const FunctionParamet
 		if (!transaction_manager.branches.ClearDeltaTable(branch_name, delta.source)) {
 			throw InternalException("Could not unbind branch \"%s\" from \"%s\"", branch_name, table_name);
 		}
-		return StringUtil::Format("SELECT '%s'::VARCHAR AS branch, '%s'::VARCHAR AS table_name, 'delta' AS "
+		return drop_row(GIT4DATA_DELTAS_TABLE, delta.source) +
+		       StringUtil::Format("SELECT '%s'::VARCHAR AS branch, '%s'::VARCHAR AS table_name, 'delta' AS "
 		                          "unbound, '%s'::VARCHAR AS was",
 		                          escape(branch_name), escape(table_name), escape(delta.added));
 	}
@@ -623,7 +641,7 @@ static string PragmaGit4DataUnbind(ClientContext &context, const FunctionParamet
 //! Record that a branch reads a table of its own. Only meaningful as the last statement of a
 //! materialize, once the copy has been made. The optional fourth argument says the feature created the
 //! table rather than the caller handing one over, which decides whether a later materialize may drop it.
-static void PragmaGit4DataBindBranchTable(ClientContext &context, const FunctionParameters &parameters) {
+static void Git4DataBindBranchTableImpl(ClientContext &context, const FunctionParameters &parameters) {
 	auto source_table = parameters.values[0].ToString();
 	auto branch_name = parameters.values[1].ToString();
 	auto storage_table = parameters.values[2].ToString();
@@ -675,12 +693,56 @@ static void PragmaGit4DataBindBranchTable(ClientContext &context, const Function
 	transaction_manager.branches.ClearDeltaTable(branch_name, source_table);
 }
 
+//! The caller's form of the same thing: it also returns the row that records the mapping, so the branch
+//! reads the same way after a restart. The row replaces whatever was there for that source - one line, one
+//! source - and the delta it replaces goes with it, which is what the implementation clears in memory.
+static string PragmaGit4DataBindBranchTable(ClientContext &context, const FunctionParameters &parameters) {
+	auto source_table = parameters.values[0].ToString();
+	auto branch_name = parameters.values[1].ToString();
+	auto storage_table = parameters.values[2].ToString();
+	// the implementation parses and validates the fourth argument, so this reads it the same way rather than
+	// casting: the cast's message is not the one the pragma documents (measured, "it is true or false, not
+	// \"maybe\"" is what the test expects)
+	auto owned = false;
+	if (parameters.values.size() > 3) {
+		auto flag = StringUtil::Lower(parameters.values[3].ToString());
+		if (flag != "true" && flag != "false") {
+			throw InvalidInputException(
+			    "The fourth argument of git4data_bind_branch_table says whether the table was created for the branch, "
+			    "so it is true or false, not \"%s\"",
+			    parameters.values[3].ToString());
+		}
+		owned = flag == "true";
+	}
+	Git4DataBindBranchTableImpl(context, parameters);
+	string result = Git4DataEnsureRegistryTables(context);
+	auto escape = [](const string &value) {
+		return StringUtil::Replace(value, "'", "''");
+	};
+	result += StringUtil::Format("DELETE FROM %s.%s WHERE branch = '%s' AND source = '%s';",
+	                             GIT4DATA_REGISTRY_SCHEMA, GIT4DATA_STORAGE_TABLE, escape(branch_name),
+	                             escape(source_table));
+	result += StringUtil::Format("DELETE FROM %s.%s WHERE branch = '%s' AND source = '%s';",
+	                             GIT4DATA_REGISTRY_SCHEMA, GIT4DATA_DELTAS_TABLE, escape(branch_name),
+	                             escape(source_table));
+	result += StringUtil::Format("INSERT INTO %s.%s VALUES ('%s', '%s', '%s', %s);", GIT4DATA_REGISTRY_SCHEMA,
+	                             GIT4DATA_STORAGE_TABLE, escape(branch_name), escape(source_table),
+	                             escape(storage_table), owned ? "true" : "false");
+	return result;
+}
+
+//! The generated form: the SQL materialize returns binds the branch in memory and writes the row itself,
+//! because a pragma that returns a statement cannot be called from one.
+static void PragmaGit4DataBindInternal(ClientContext &context, const FunctionParameters &parameters) {
+	Git4DataBindBranchTableImpl(context, parameters);
+}
+
 //! Record that a branch differs from its base by a delta rather than by a copy of it. The two tables
 //! are the caller's and are written with ordinary SQL: rows to add with the source table's columns,
 //! keys to remove with the source table's key columns. Reads of the branch then serve the base minus
 //! those keys plus those rows, which is what makes writing to a branch cost the change rather than the
 //! table.
-static void PragmaGit4DataBindBranchDelta(ClientContext &context, const FunctionParameters &parameters) {
+static string PragmaGit4DataBindBranchDelta(ClientContext &context, const FunctionParameters &parameters) {
 	auto source_table = parameters.values[0].ToString();
 	auto branch_name = parameters.values[1].ToString();
 	auto added_table = parameters.values[2].ToString();
@@ -782,6 +844,17 @@ static void PragmaGit4DataBindBranchDelta(ClientContext &context, const Function
 	}
 	transaction_manager.branches.SetDeltaTable(branch_name, source_table, added_table, removed_table, added.oid,
 	                                           removed.oid, source.oid);
+	// the delta is a row too, and it replaces whatever that branch had for this source: one line, one source
+	string result = Git4DataEnsureRegistryTables(context);
+	result += StringUtil::Format("DELETE FROM %s.%s WHERE branch = '%s' AND source = '%s';",
+	                             GIT4DATA_REGISTRY_SCHEMA, GIT4DATA_DELTAS_TABLE,
+	                             StringUtil::Replace(branch_name, "'", "''"), StringUtil::Replace(source_table, "'", "''"));
+	result += StringUtil::Format("INSERT INTO %s.%s VALUES ('%s', '%s', '%s', '%s');", GIT4DATA_REGISTRY_SCHEMA,
+	                             GIT4DATA_DELTAS_TABLE, StringUtil::Replace(branch_name, "'", "''"),
+	                             StringUtil::Replace(source_table, "'", "''"),
+	                             StringUtil::Replace(added_table, "'", "''"),
+	                             StringUtil::Replace(removed_table, "'", "''"));
+	return result;
 }
 
 //! A copy-on-write clone of one file, which is what "zero-copy" means at this level: the copy costs
@@ -1508,6 +1581,11 @@ static void PragmaGit4DataLimit(ClientContext &context, const FunctionParameters
 	} else {
 		throw InvalidInputException("Limits are set for \"snapshot\" or \"branch\", not \"%s\"", kind);
 	}
+	// the quota is written in the same block as the registry, and a checkpoint skips its body when the log is
+	// empty: without this, setting a quota and checkpointing in a session that changed nothing else lost it -
+	// measured, limits.test read -1 for a limit of 3 after a restart
+	transaction_manager.snapshots.MarkDirty();
+	transaction_manager.branches.MarkDirty();
 }
 
 static string PragmaGit4DataLimits(ClientContext &context, const FunctionParameters &parameters) {
@@ -1532,11 +1610,13 @@ static void CheckGit4DataReferenceName(const string &name) {
 	}
 }
 
-static void PragmaGit4DataCreateBranch(ClientContext &context, const FunctionParameters &parameters) {
+static string PragmaGit4DataCreateBranch(ClientContext &context, const FunctionParameters &parameters) {
 	auto name = parameters.values[0].ToString();
 	auto parent = parameters.values[1].ToString();
 	CheckGit4DataReferenceName(name);
 	auto &transaction_manager = GetGit4DataTransactionManager(context);
+	// before the branch joins the registry in memory: the migration into the tables reads that registry
+	string result = Git4DataEnsureRegistryTables(context);
 	// the other half of the rule the snapshot side states: the two kinds of reference share a name
 	// namespace wherever one is named without its kind, so they cannot share a name
 	Git4DataSnapshot same_named_snapshot;
@@ -1596,10 +1676,18 @@ static void PragmaGit4DataCreateBranch(ClientContext &context, const FunctionPar
 		}
 	}
 	CheckGit4DataReferenceLimit("branches", transaction_manager.branches.Count(), transaction_manager.branch_limit);
-	if (!transaction_manager.branches.Create(name, pin, parent, Timestamp::GetCurrentTimestamp(), parent_is_snapshot,
-	                                         base_line)) {
+	auto created = Timestamp::GetCurrentTimestamp();
+	if (!transaction_manager.branches.Create(name, pin, parent, created, parent_is_snapshot, base_line)) {
 		throw InvalidInputException("Branch \"%s\" already exists", name);
 	}
+	// the branch is a row now, like a snapshot: it goes to the log with the statement this returns
+	auto escape = [](const string &value) {
+		return StringUtil::Replace(value, "'", "''");
+	};
+	result += StringUtil::Format("INSERT INTO %s.%s VALUES ('%s', %llu, '%s', TIMESTAMP '%s', '%s');",
+	                             GIT4DATA_REGISTRY_SCHEMA, GIT4DATA_BRANCHES_TABLE, escape(name), pin,
+	                             escape(parent), Timestamp::ToString(created), escape(base_line));
+	return result;
 }
 
 //! Drop a branch and the storage it was materialized into: that table is the branch's own copy, so
@@ -1651,6 +1739,17 @@ static string PragmaGit4DataDropBranch(ClientContext &context, const FunctionPar
 		result += StringUtil::Format("DROP TABLE IF EXISTS %s;\n", KeywordHelper::WriteOptionallyQuoted(resolved));
 	}
 	transaction_manager.branches.Drop(name);
+	// and its rows, or the next open would read the branch back out of the tables: the branch, the table it
+	// was given and the delta it differs by all live in one of them
+	if (Git4DataRegistryTablesThere(context)) {
+		auto escaped = StringUtil::Replace(name, "'", "''");
+		result += StringUtil::Format("DELETE FROM %s.%s WHERE name = '%s';", GIT4DATA_REGISTRY_SCHEMA,
+		                             GIT4DATA_BRANCHES_TABLE, escaped);
+		result += StringUtil::Format("DELETE FROM %s.%s WHERE branch = '%s';", GIT4DATA_REGISTRY_SCHEMA,
+		                             GIT4DATA_STORAGE_TABLE, escaped);
+		result += StringUtil::Format("DELETE FROM %s.%s WHERE branch = '%s';", GIT4DATA_REGISTRY_SCHEMA,
+		                             GIT4DATA_DELTAS_TABLE, escaped);
+	}
 	if (result.empty()) {
 		// a branch with no storage of its own still has to return something to execute
 		return "SELECT 1 WHERE false";
@@ -2076,6 +2175,10 @@ void PragmaFunctions::RegisterFunction(BuiltinFunctions &set) {
 	                                           {LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR}));
 	// who created the table is optional, so a binding written by hand keeps the three-argument form and
 	// its table is not the feature's to drop
+	// the generated form: materialize's SQL binds in memory and writes the row itself
+	set.AddFunction(PragmaFunction::PragmaCall("git4data_bind_internal", PragmaGit4DataBindInternal,
+	                                           {LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR},
+	                                           LogicalType::VARCHAR));
 	set.AddFunction(PragmaFunction::PragmaCall("git4data_bind_branch_table", PragmaGit4DataBindBranchTable,
 	                                           {LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR},
 	                                           LogicalType::VARCHAR));

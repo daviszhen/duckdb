@@ -155,10 +155,11 @@ void Git4DataLoadRegistry(QueryContext context, AttachedDatabase &db) {
 		return;
 	}
 	auto &transaction_manager = DuckTransactionManager::Get(db);
-	// Only the snapshots are rebuilt here *yet*: the branches and the two mappings are still written to the
-	// checkpoint's metadata block alone, so clearing them would lose every branch on the first file that has
-	// these tables. When they move too, this is where they are read.
+	// The tables are the whole truth for every record now, so both registries are rebuilt from them: the block
+	// may hold a state from before changes the log replayed, and a branch made since the last checkpoint is
+	// one of those changes.
 	transaction_manager.snapshots.Clear();
+	transaction_manager.branches.Clear();
 
 	auto snapshots = Git4DataRegistryTable(*client, db, GIT4DATA_SNAPSHOTS_TABLE);
 	auto branches = Git4DataRegistryTable(*client, db, GIT4DATA_BRANCHES_TABLE);
@@ -177,8 +178,8 @@ void Git4DataLoadRegistry(QueryContext context, AttachedDatabase &db) {
 		    auto line = chunk.GetValue(3, row).GetValue<string>();
 		    transaction_manager.snapshots.Create(name, pin, created, line);
 	    });
-	// The branch tables are read here so the shape is in place, but nothing writes them yet: a branch is
-	// still restored from the metadata block above, and these reads find an empty table.
+	// branches first: the two mappings are recorded against a branch, and their setters do nothing for a
+	// branch that is not there yet
 	if (branches) {
 	Git4DataScanRegistryTable(*client, *branches,
 	                          {LogicalType::VARCHAR, LogicalType::UBIGINT, LogicalType::VARCHAR, LogicalType::TIMESTAMP,
@@ -214,8 +215,9 @@ void Git4DataLoadRegistry(QueryContext context, AttachedDatabase &db) {
 		                          transaction_manager.branches.SetDeltaTable(branch, source, added, removed);
 	                          });
 	}
-	// what is in the tables is on disk, so a checkpoint does not have to force itself for the snapshots
+	// what is in the tables is on disk, so a checkpoint does not have to force itself for the registries
 	transaction_manager.snapshots.MarkClean();
+	transaction_manager.branches.MarkClean();
 }
 
 //===----------------------------------------------------------------------===//

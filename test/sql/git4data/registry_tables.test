@@ -75,3 +75,83 @@ statement error
 PRAGMA git4data_forget_internal('rt_only')
 ----
 <REGEX>:.*is not one of the references this feature manages for itself.*
+
+# A branch and the tables it reads are rows too, and they are written the same way - so they survive a
+# restart made *without* a checkpoint, which is the case the metadata block could not cover: it is written
+# by a checkpoint, and a session that only adds a branch has nothing else to make one run.
+statement ok
+CREATE TABLE rt2 (k INTEGER PRIMARY KEY, v INTEGER)
+
+statement ok
+INSERT INTO rt2 SELECT range, range FROM range(4)
+
+statement ok
+CHECKPOINT
+
+statement ok
+PRAGMA git4data_create_branch('rt2_own', '')
+
+statement ok
+PRAGMA git4data_materialize('rt2', 'rt2_own', 'rt2_copy')
+
+statement ok
+UPDATE rt2_copy SET v = 111 WHERE k = 1
+
+statement ok
+PRAGMA git4data_create_branch('rt2_delta', '')
+
+statement ok
+CREATE TABLE rt2_add (k INTEGER PRIMARY KEY, v INTEGER)
+
+statement ok
+CREATE TABLE rt2_del (k INTEGER PRIMARY KEY)
+
+statement ok
+INSERT INTO rt2_add VALUES (100, 100)
+
+statement ok
+PRAGMA git4data_bind_branch_delta('rt2', 'rt2_delta', 'rt2_add', 'rt2_del')
+
+# the rows are there before the restart, one per mapping
+query III
+SELECT (SELECT count(*) FROM git4data.branches WHERE name = 'rt2_own'),
+       (SELECT count(*) FROM git4data.storage WHERE branch = 'rt2_own' AND source = 'rt2'),
+       (SELECT count(*) FROM git4data.deltas WHERE branch = 'rt2_delta' AND source = 'rt2')
+----
+1	1	1
+
+restart
+
+# and they are still there after it, without a checkpoint in between: the branch holds the line it was
+# given, and the delta branch holds its own edits over the base
+query III
+SELECT (SELECT count(*) FROM git4data.branches WHERE name IN ('rt2_own', 'rt2_delta')),
+       (SELECT count(*) FROM git4data.storage WHERE branch = 'rt2_own'),
+       (SELECT count(*) FROM git4data.deltas WHERE branch = 'rt2_delta')
+----
+2	1	1
+
+query III
+SELECT (SELECT v FROM rt2 AT (BRANCH => 'rt2_own') WHERE k = 1),
+       (SELECT count(*) FROM rt2 AT (BRANCH => 'rt2_own')),
+       (SELECT count(*) FROM rt2 AT (BRANCH => 'rt2_delta') WHERE k = 100)
+----
+111	4	1
+
+# dropping the branch takes its rows with it, so the next open does not read it back
+statement ok
+PRAGMA git4data_drop_branch('rt2_delta')
+
+query II
+SELECT (SELECT count(*) FROM git4data.branches WHERE name = 'rt2_delta'),
+       (SELECT count(*) FROM git4data.deltas WHERE branch = 'rt2_delta')
+----
+0	0
+
+restart
+
+query II
+SELECT (SELECT count(*) FROM git4data.branches WHERE name = 'rt2_delta'),
+       (SELECT count(*) FROM git4data.deltas WHERE branch = 'rt2_delta')
+----
+0	0
