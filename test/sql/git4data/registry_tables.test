@@ -155,3 +155,48 @@ SELECT (SELECT count(*) FROM git4data.branches WHERE name = 'rt2_delta'),
        (SELECT count(*) FROM git4data.deltas WHERE branch = 'rt2_delta')
 ----
 0	0
+
+# The registry's tables are the feature's own state, and a caller writing them would take a reference's
+# meaning with it: a deleted snapshot row takes its pin, and the history that pin holds down is reclaimed
+# under a reference that still names it. Reading them is allowed - they are how a caller can see what the
+# feature is keeping - and the feature's own statements, which are the ones that write them, still run.
+query I
+SELECT count(*) FROM git4data.snapshots
+----
+1
+
+statement error
+INSERT INTO git4data.snapshots VALUES ('forged', 1, TIMESTAMP '2020-01-01 00:00:00', '')
+----
+<REGEX>:.*is one of the tables the reference registry is kept in.*
+
+statement error
+DELETE FROM git4data.branches
+----
+<REGEX>:.*is one of the tables the reference registry is kept in.*
+
+statement error
+UPDATE git4data.storage SET storage = 'elsewhere'
+----
+<REGEX>:.*is one of the tables the reference registry is kept in.*
+
+statement error
+DROP TABLE git4data.deltas
+----
+<REGEX>:.*is the schema the reference registry is kept in.*
+
+statement error
+DROP SCHEMA git4data
+----
+<REGEX>:.*is the schema the reference registry is kept in.*
+
+statement error
+ALTER TABLE git4data.snapshots ADD COLUMN extra INTEGER
+----
+<REGEX>:.*is the schema the reference registry is kept in.*
+
+# and the references are untouched by all of it
+query II
+SELECT (SELECT count(*) FROM git4data.snapshots), (SELECT count(*) FROM git4data.branches)
+----
+1	2

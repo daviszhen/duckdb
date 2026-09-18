@@ -115,6 +115,11 @@ vector<unique_ptr<SQLStatement>> StatementPreprocessor::TryReparsePragma(unique_
 		const auto query_to_reparse = bound_info->function.query(context, parameters);
 		Parser parser(context.GetParserOptions());
 		parser.ParseQuery(query_to_reparse);
+		// these are the engine's own statements: what a pragma returns is written by the feature, not called
+		// by the caller
+		for (auto &reparsed : parser.statements) {
+			reparsed->internal = true;
+		}
 		return std::move(parser.statements);
 	}
 	vector<unique_ptr<SQLStatement>> res;

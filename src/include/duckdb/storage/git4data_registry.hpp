@@ -44,6 +44,14 @@ bool Git4DataRegistryTablesThere(ClientContext &context);
 //! once the log has been replayed and before the database serves anything: a change to a reference is an
 //! ordinary change to those tables, so the replay is what brings the last of them back.
 void Git4DataLoadRegistry(QueryContext context, AttachedDatabase &db);
+//! Throw when a statement writes one of the registry's tables, or drops or alters it. They are ordinary
+//! tables to the engine, so this is the only thing between a caller and a state the feature depends on: a
+//! deleted snapshot row takes its pin with it, and the history that pin holds down is then reclaimed under a
+//! reference that still names it, which reads as a wrong answer rather than as an error.
+void Git4DataCheckRegistryWrite(const TableCatalogEntry &table);
+//! The same for a schema a statement names: dropping the schema the registry lives in is another way to take
+//! every reference at once.
+void Git4DataCheckRegistrySchema(const string &schema);
 //! Whether a table is one the registry keeps its references in
 bool Git4DataIsRegistryTable(const TableCatalogEntry &table);
 //! Throw when a statement writes or drops one of the registry's tables, or the schema that holds them.

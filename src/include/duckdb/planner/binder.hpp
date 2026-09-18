@@ -219,6 +219,9 @@ class Binder : public enable_shared_from_this<Binder> {
 	friend class RecursiveDependentJoinPlanner;
 
 public:
+	//! Whether the statement being bound was written by the engine rather than a caller
+	bool internal_statement = false;
+
 	DUCKDB_API static shared_ptr<Binder> CreateBinder(ClientContext &context, optional_ptr<Binder> parent = nullptr,
 	                                                  BinderType binder_type = BinderType::REGULAR_BINDER);
 

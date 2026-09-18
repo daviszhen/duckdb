@@ -10,6 +10,7 @@
 #include "duckdb/parser/query_node/select_node.hpp"
 #include "duckdb/parser/tableref/expressionlistref.hpp"
 #include "duckdb/planner/binder.hpp"
+#include "duckdb/storage/git4data_registry.hpp"
 #include "duckdb/planner/expression_binder/insert_binder.hpp"
 #include "duckdb/planner/operator/logical_insert.hpp"
 #include "duckdb/planner/operator/logical_get.hpp"
@@ -607,6 +608,11 @@ BoundStatement Binder::BindNode(InsertQueryNode &node) {
 		                       TableCatalogEntry::Name);
 	}
 	auto &table = table_entry.Cast<TableCatalogEntry>();
+	// A reference's tables are the feature's own state: a caller's statement may not write them, and the
+	// statements this feature generates for itself may - it is how they are kept in the first place.
+	if (!internal_statement) {
+		Git4DataCheckRegistryWrite(table);
+	}
 
 	if (auto expanded = TryExpandTriggers(node, table, TriggerEventType::INSERT_EVENT)) {
 		return std::move(*expanded);

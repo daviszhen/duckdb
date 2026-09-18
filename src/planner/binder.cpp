@@ -76,6 +76,8 @@ Binder::Binder(ClientContext &context, shared_ptr<Binder> parent_p, BinderType b
 }
 
 BoundStatement Binder::Bind(SQLStatement &statement) {
+	// carried so a feature with tables of its own can tell its generated statements from a caller's
+	internal_statement = statement.internal;
 	switch (statement.type) {
 	case StatementType::SELECT_STATEMENT:
 		return Bind(statement.Cast<SelectStatement>());

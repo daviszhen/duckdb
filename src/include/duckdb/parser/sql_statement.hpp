@@ -36,6 +36,10 @@ public:
 	identifier_map_t<idx_t> named_param_map;
 	//! Whether the statement contains any anonymous (? or $N) parameters
 	bool has_anonymous_parameters = false;
+	//! Whether the engine wrote this statement rather than a caller. A pragma that returns SQL is re-parsed
+	//! and executed as statements, and those are the engine's own - which is what lets a feature keep state in
+	//! tables of its own while refusing a caller the same writes.
+	bool internal = false;
 	//! The query text that corresponds to this SQL statement
 	string query;
 

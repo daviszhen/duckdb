@@ -227,6 +227,27 @@ bool Git4DataIsRegistryTable(const TableCatalogEntry &table) {
 	return StringUtil::CIEquals(table.ParentSchema().name.GetIdentifierName(), GIT4DATA_REGISTRY_SCHEMA);
 }
 
+void Git4DataCheckRegistryWrite(const TableCatalogEntry &table) {
+	if (!Git4DataIsRegistryTable(table)) {
+		return;
+	}
+	throw InvalidInputException(
+	    "\"%s\" is one of the tables the reference registry is kept in, and a reference's state cannot be "
+	    "edited through SQL: a snapshot's row carries the pin that holds the history it reads, a branch's rows "
+	    "say which tables it reads, and the feature's own statements write them. Use the git4data_* pragmas.",
+	    table.name.GetIdentifierName());
+}
+
+void Git4DataCheckRegistrySchema(const string &schema) {
+	if (!StringUtil::CIEquals(schema, GIT4DATA_REGISTRY_SCHEMA)) {
+		return;
+	}
+	throw InvalidInputException(
+	    "\"%s\" is the schema the reference registry is kept in, and dropping or altering it would take every "
+	    "snapshot and branch with it. Use the git4data_* pragmas to drop a reference.",
+	    schema);
+}
+
 void Git4DataCheckRegistryTarget(const string &schema, const string &table) {
 	if (!StringUtil::CIEquals(schema, GIT4DATA_REGISTRY_SCHEMA)) {
 		return;

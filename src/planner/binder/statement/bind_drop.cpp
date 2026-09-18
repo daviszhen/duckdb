@@ -1,5 +1,6 @@
 #include "duckdb/parser/statement/drop_statement.hpp"
 #include "duckdb/planner/binder.hpp"
+#include "duckdb/storage/git4data_registry.hpp"
 #include "duckdb/planner/operator/logical_drop.hpp"
 #include "duckdb/catalog/catalog.hpp"
 #include "duckdb/catalog/standard_entry.hpp"
@@ -33,6 +34,14 @@ void Binder::BindDropTrigger(DropStatement &stmt, StatementProperties &propertie
 
 BoundStatement Binder::Bind(DropStatement &stmt) {
 	BoundStatement result;
+
+	// the registry's schema is not a caller's to drop or to alter: it holds every reference the feature keeps
+	if (!internal_statement) {
+		Git4DataCheckRegistrySchema(stmt.info->GetQualifiedName().Schema().GetIdentifierName());
+		if (stmt.info->type == CatalogType::SCHEMA_ENTRY) {
+			Git4DataCheckRegistrySchema(stmt.info->GetQualifiedName().Name().GetIdentifierName());
+		}
+	}
 
 	auto &properties = GetStatementProperties();
 	switch (stmt.info->type) {

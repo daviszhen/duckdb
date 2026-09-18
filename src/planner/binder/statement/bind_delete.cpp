@@ -1,6 +1,7 @@
 #include "duckdb/parser/statement/delete_statement.hpp"
 #include "duckdb/parser/query_node/delete_query_node.hpp"
 #include "duckdb/planner/binder.hpp"
+#include "duckdb/storage/git4data_registry.hpp"
 #include "duckdb/planner/expression_binder/where_binder.hpp"
 #include "duckdb/planner/expression_binder/returning_binder.hpp"
 #include "duckdb/planner/operator/logical_delete.hpp"
@@ -29,6 +30,11 @@ BoundStatement Binder::BindNode(DeleteQueryNode &node) {
 		throw BinderException("Can only delete from base table");
 	}
 	auto &table = *table_ptr;
+	// A reference's tables are the feature's own state: a caller's statement may not write them, and the
+	// statements this feature generates for itself may - it is how they are kept in the first place.
+	if (!internal_statement) {
+		Git4DataCheckRegistryWrite(table);
+	}
 
 	if (auto expanded = TryExpandTriggers(node, table, TriggerEventType::DELETE_EVENT)) {
 		return std::move(*expanded);

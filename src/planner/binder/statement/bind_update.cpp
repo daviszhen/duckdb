@@ -3,6 +3,7 @@
 #include "duckdb/parser/statement/update_statement.hpp"
 #include "duckdb/parser/query_node/update_query_node.hpp"
 #include "duckdb/planner/binder.hpp"
+#include "duckdb/storage/git4data_registry.hpp"
 #include "duckdb/planner/tableref/bound_joinref.hpp"
 #include "duckdb/planner/constraints/bound_check_constraint.hpp"
 #include "duckdb/planner/expression/bound_columnref_expression.hpp"
@@ -171,6 +172,11 @@ BoundStatement Binder::BindNode(UpdateQueryNode &node) {
 		throw BinderException("Can only update base table");
 	}
 	auto &table = *table_ptr;
+	// A reference's tables are the feature's own state: a caller's statement may not write them, and the
+	// statements this feature generates for itself may - it is how they are kept in the first place.
+	if (!internal_statement) {
+		Git4DataCheckRegistryWrite(table);
+	}
 
 	if (auto expanded = TryExpandTriggers(node, table, TriggerEventType::UPDATE_EVENT)) {
 		return std::move(*expanded);

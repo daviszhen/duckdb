@@ -9,6 +9,7 @@
 #include "duckdb/parser/statement/alter_statement.hpp"
 #include "duckdb/parser/tableref/basetableref.hpp"
 #include "duckdb/planner/binder.hpp"
+#include "duckdb/storage/git4data_registry.hpp"
 #include "duckdb/planner/constraints/bound_unique_constraint.hpp"
 #include "duckdb/planner/expression_binder/index_binder.hpp"
 #include "duckdb/planner/operator/logical_create_index.hpp"
@@ -34,6 +35,10 @@ BoundStatement Binder::BindAlterAddIndex(BoundStatement &result, CatalogEntry &e
 		                      CatalogTypeToString(entry.type));
 	}
 	auto &table_info = alter_info->Cast<AlterTableInfo>();
+	// altering a table the registry is kept in would take the references it holds with it
+	if (!internal_statement) {
+		Git4DataCheckRegistrySchema(table_info.GetQualifiedName().Schema().GetIdentifierName());
+	}
 	auto &constraint_info = table_info.Cast<AddConstraintInfo>();
 	auto &table = entry.Cast<TableCatalogEntry>();
 	auto &column_list = table.GetColumns();
@@ -115,6 +120,11 @@ BoundStatement Binder::Bind(AlterStatement &stmt) {
 
 	// resolve the (possibly nested) catalog/schema qualification of the altered entry
 	stmt.info->SetQualifiedName(BindTableName(stmt.info->GetQualifiedName()));
+	// a table the registry is kept in is not a caller's to alter: measured, an ALTER TABLE ... ADD COLUMN on
+	// git4data.snapshots went through while the check sat only in the helper that binds column types
+	if (!internal_statement) {
+		Git4DataCheckRegistrySchema(stmt.info->GetQualifiedName().Schema().GetIdentifierName());
+	}
 
 	optional_ptr<CatalogEntry> entry;
 	if (stmt.info->type == AlterType::SET_COLUMN_COMMENT) {
