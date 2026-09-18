@@ -224,3 +224,21 @@ query I
 SELECT count(*) FROM duckdb_tables() WHERE schema_name = 'main' AND table_name = 'rt'
 ----
 1
+
+# the same skip in the other two catalog functions that walk the schemas: the columns of those tables and
+# the schema itself are not part of what the database looks like to a caller
+query I
+SELECT count(*) FROM duckdb_columns() WHERE schema_name = 'git4data'
+----
+0
+
+query I
+SELECT count(*) FROM duckdb_schemas() WHERE schema_name = 'git4data'
+----
+0
+
+# and the caller's own columns are still listed
+query I
+SELECT count(*) FROM duckdb_columns() WHERE table_name = 'rt'
+----
+2

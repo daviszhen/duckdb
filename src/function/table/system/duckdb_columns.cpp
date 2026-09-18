@@ -1,4 +1,5 @@
 #include "duckdb/function/table/system_functions.hpp"
+#include "duckdb/storage/git4data_registry.hpp"
 
 #include "duckdb/catalog/catalog.hpp"
 #include "duckdb/catalog/catalog_entry/table_catalog_entry.hpp"
@@ -97,6 +98,11 @@ static unique_ptr<GlobalTableFunctionState> DuckDBColumnsInit(ClientContext &con
 	// scan all the schemas for tables and views and collect them
 	auto schemas = Catalog::GetAllSchemas(context);
 	for (auto &schema : schemas) {
+		// the reference registry's own tables are the feature's bookkeeping, not the caller's data: the same
+		// skip duckdb_tables() makes, so the columns are not listed either while reading them by name works
+		if (Git4DataIsRegistrySchema(schema.get().name.GetIdentifierName())) {
+			continue;
+		}
 		schema.get().Scan(context, CatalogType::TABLE_ENTRY,
 		                  [&](CatalogEntry &entry) { result->entries.push_back(entry); });
 	}

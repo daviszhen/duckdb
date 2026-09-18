@@ -1,4 +1,5 @@
 #include "duckdb/function/table/system_functions.hpp"
+#include "duckdb/storage/git4data_registry.hpp"
 
 #include "duckdb/catalog/catalog.hpp"
 #include "duckdb/catalog/catalog_entry/schema_catalog_entry.hpp"
@@ -54,8 +55,14 @@ static unique_ptr<FunctionData> DuckDBSchemasBind(ClientContext &context, TableF
 unique_ptr<GlobalTableFunctionState> DuckDBSchemasInit(ClientContext &context, TableFunctionInitInput &input) {
 	auto result = make_uniq<DuckDBSchemasData>();
 
-	// scan all the schemas and collect them
-	result->entries = Catalog::GetAllSchemas(context);
+	// scan all the schemas and collect them, leaving out the one the reference registry is kept in: it is the
+	// feature's bookkeeping, and listing it invites a caller to write it, which is refused
+	for (auto &schema : Catalog::GetAllSchemas(context)) {
+		if (Git4DataIsRegistrySchema(schema.get().name.GetIdentifierName())) {
+			continue;
+		}
+		result->entries.push_back(schema);
+	}
 
 	return std::move(result);
 }
