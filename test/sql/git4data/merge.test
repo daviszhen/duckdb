@@ -545,3 +545,66 @@ SELECT (SELECT count(*) FROM pn AT (BRANCH => 'pnl') WHERE k = 100), (SELECT cou
        (SELECT count(*) FROM pn AT (BRANCH => 'pnl'))
 ----
 1	1	11
+
+# A composite key is a key like any other for a merge that lands in a delta: the landing matches rows on the
+# whole key, so a table whose key is two columns has to work as well as a single-column one.
+statement ok
+CREATE TABLE ck (a INTEGER, b INTEGER, v INTEGER, PRIMARY KEY (a, b))
+
+statement ok
+INSERT INTO ck SELECT range // 10, range % 10, range FROM range(20)
+
+statement ok
+CHECKPOINT
+
+statement ok
+CREATE TABLE ck_add (a INTEGER, b INTEGER, v INTEGER, PRIMARY KEY (a, b))
+
+statement ok
+CREATE TABLE ck_del (a INTEGER, b INTEGER, PRIMARY KEY (a, b))
+
+statement ok
+PRAGMA git4data_create_branch('ckbase', '')
+
+statement ok
+PRAGMA git4data_create_branch('ckl', 'ckbase')
+
+statement ok
+PRAGMA git4data_create_branch('ckr', 'ckbase')
+
+statement ok
+PRAGMA git4data_bind_branch_delta('ck', 'ckl', 'ck_add', 'ck_del')
+
+statement ok
+PRAGMA git4data_materialize('ck', 'ckr', 'ck_copy')
+
+statement ok
+INSERT INTO ck_copy VALUES (5, 5, 555)
+
+statement ok
+DELETE FROM ck_copy WHERE a = 0 AND b = 1
+
+statement ok
+UPDATE ck_copy SET v = 777 WHERE a = 0 AND b = 2
+
+statement ok
+PRAGMA git4data_merge('ck', 'ckl', 'ckr', 'fail')
+
+query IIII
+SELECT (SELECT v FROM ck AT (BRANCH => 'ckl') WHERE a = 5 AND b = 5),
+       (SELECT count(*) FROM ck AT (BRANCH => 'ckl') WHERE a = 0 AND b = 1),
+       (SELECT v FROM ck AT (BRANCH => 'ckl') WHERE a = 0 AND b = 2),
+       (SELECT count(*) FROM ck AT (BRANCH => 'ckl'))
+----
+555	0	777	20
+
+query II
+SELECT (SELECT string_agg(a::VARCHAR || ':' || b::VARCHAR, ',' ORDER BY a, b) FROM ck_add),
+       (SELECT string_agg(a::VARCHAR || ':' || b::VARCHAR, ',' ORDER BY a, b) FROM ck_del)
+----
+0:2,5:5	0:1,0:2
+
+query I
+SELECT count(*) FROM ck
+----
+20
