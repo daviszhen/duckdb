@@ -1218,20 +1218,6 @@ static bool Git4DataDiffSameStoredKeyChunk(const Git4DataDiffState &state, const
 	return true;
 }
 
-//! Whether two left rows share a key, which is what says which of them a match accounts for - the question
-//! the set of matched keys used to answer by construction.
-static bool Git4DataDiffSameStoredKeys(const Git4DataDiffState &state, const Git4DataDiffState::StoredRow &left,
-                                       const Git4DataDiffState::StoredRow &right) {
-	auto &left_block = *state.left_blocks[left.block];
-	auto &right_block = *state.left_blocks[right.block];
-	for (idx_t i = 0; i < state.key_count; i++) {
-		if (!Value::NotDistinctFrom(left_block.GetValue(i, left.row), right_block.GetValue(i, right.row))) {
-			return false;
-		}
-	}
-	return true;
-}
-
 //! The key of the row at the given position, or an empty vector when the table has no primary key
 static vector<Value> Git4DataDiffRowKey(DataChunk &chunk, idx_t key_count, idx_t row) {
 	vector<Value> key;
@@ -1693,16 +1679,13 @@ static void Git4DataDiffFunction(ClientContext &context, TableFunctionInput &dat
 					    auto bits_entry = state.left_by_key.find(bits);
 					    if (bits_entry != state.left_by_key.end()) {
 						    for (auto &candidate : bits_entry->second) {
-							    if (candidate.bits != bits) {
+							    // one left row is one partner: a second right row carrying the same key is a
+							    // row of its own and belongs in the additions, which is what a left row that
+							    // was already paired means here
+							    if (candidate.bits != bits || candidate.matched) {
 								    continue;
 							    }
-							    // every left row carrying these bits is accounted for, which is what the set of
-							    // matched patterns said
-							    for (auto &same : bits_entry->second) {
-								    if (same.bits == bits) {
-									    same.matched = true;
-								    }
-							    }
+							    candidate.matched = true;
 							    if (!Git4DataDiffSameStoredValues(state, candidate.stored, chunk, state.key_count,
 							                                      row)) {
 								    state.changed.push_back(Git4DataDiffState::Change {
@@ -1720,16 +1703,13 @@ static void Git4DataDiffFunction(ClientContext &context, TableFunctionInput &dat
 				    auto entry = state.left_by_key.find(hash);
 				    if (entry != state.left_by_key.end()) {
 					    for (auto &candidate : entry->second) {
-						    if (!Git4DataDiffSameStoredKeyChunk(state, candidate.stored, chunk, row)) {
+						    // as in the integer path: a paired left row is not a partner again, so a
+						    // repeated key on the right is an addition rather than a change of one row
+						    if (candidate.matched ||
+						        !Git4DataDiffSameStoredKeyChunk(state, candidate.stored, chunk, row)) {
 							    continue;
 						    }
-						    // every left row sharing this key is accounted for, which is what the set of
-						    // matched keys said; they share a bucket, so this is the bucket's own rows
-						    for (auto &same : entry->second) {
-							    if (Git4DataDiffSameStoredKeys(state, candidate.stored, same.stored)) {
-								    same.matched = true;
-							    }
-						    }
+						    candidate.matched = true;
 						    if (!Git4DataDiffSameStoredValues(state, candidate.stored, chunk, state.key_count, row)) {
 							    state.changed.push_back(Git4DataDiffState::Change {
 							        candidate.row_id, row_id, Git4DataDiffStoreChangeKey(state, context, chunk, row)});

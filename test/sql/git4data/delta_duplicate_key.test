@@ -1,0 +1,90 @@
+# name: test/sql/git4data/delta_duplicate_key.test
+# description: A delta whose added table repeats a key, and what a diff of such a line reports
+# group: [git4data]
+
+# A delta's added table is the caller's own, and nothing stops them putting the same key in it twice -
+# `git4data_apply` refuses to add a key the branch already shows, but a hand-bound pair of tables is
+# exactly the freedom the feature documents. What a diff then reports is the question, and the answer
+# used to be wrong: the pairing loop took the *first* left row matching a key and returned, so every
+# right row carrying that key was paired with that one row and reported as a *change* of it: a branch
+# with twenty thousand extra rows sharing a key reported no addition and no removal at all, on either
+# side of the comparison. One left row is one partner now, so the repeats are additions or removals, which is
+# what the two sides' row counts say they are.
+
+load {TEST_DIR}/delta_duplicate_key.db
+
+statement ok
+CREATE TABLE t (k INTEGER PRIMARY KEY, v INTEGER)
+
+statement ok
+INSERT INTO t SELECT range, range FROM range(20)
+
+statement ok
+CHECKPOINT
+
+statement ok
+PRAGMA git4data_create_branch('dup', '')
+
+# an added table with no primary key of its own, holding the same key twenty times
+statement ok
+CREATE TABLE dup_add (k INTEGER, v INTEGER)
+
+statement ok
+INSERT INTO dup_add SELECT 7, range FROM range(20)
+
+statement ok
+CREATE TABLE dup_del (k INTEGER PRIMARY KEY)
+
+statement ok
+PRAGMA git4data_bind_branch_delta('t', 'dup', 'dup_add', 'dup_del')
+
+# the line shows the base plus every added row, repeats included
+query I
+SELECT count(*) FROM t AT (BRANCH => 'dup')
+----
+40
+
+# a copy of the base, to compare against: the same table, the same twenty rows
+statement ok
+PRAGMA git4data_create_branch('copy', '')
+
+statement ok
+PRAGMA git4data_materialize('t', 'copy', 't_copy')
+
+query I
+SELECT count(*) FROM t AT (BRANCH => 'copy')
+----
+20
+
+# The repeats are additions: the copy's single row for that key pairs with one of the branch's, and the
+# other nineteen are rows the copy does not have. Before the fix this reported nineteen *changes* and no
+# additions - a row count difference with nothing to show for it.
+query II
+SELECT g4d_change, count(*) FROM git4data_diff('t', 'copy', 'dup') GROUP BY g4d_change ORDER BY g4d_change
+----
+added	20
+
+# and the other way round they are removals, which is the same statement from the other side
+query II
+SELECT g4d_change, count(*) FROM git4data_diff('t', 'dup', 'copy') GROUP BY g4d_change ORDER BY g4d_change
+----
+removed	20
+
+# What the additions carry: the key of the row they are, and the key column is named after the table's
+# own, so the caller can match a change against the live table
+query I
+SELECT count(*) FROM git4data_diff('t', 'copy', 'dup') WHERE g4d_change = 'added' AND k = 7
+----
+20
+
+# A key that is not repeated still pairs as it always did, and the row whose values match is not a change
+query I
+SELECT count(*) FROM git4data_diff('t', 'copy', 'dup') WHERE g4d_change = 'changed'
+----
+0
+
+# A reference against itself has nothing to report even with the repeats in it
+query I
+SELECT count(*) FROM git4data_diff('t', 'dup', 'dup')
+----
+0
