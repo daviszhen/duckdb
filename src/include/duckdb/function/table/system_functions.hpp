@@ -102,6 +102,26 @@ struct Git4DataSnapshotsFun {
 	static TableFunction GetFunction();
 };
 
+//! The reference state a database is in - the commit counter, the bound a checkpoint must respect, and the
+//! pins that hold it - as one row a statement can select. Its values used to be reachable only through
+//! `PRAGMA git4data_state`, whose result cannot be selected *from*, so a test could assert that it ran.
+struct Git4DataStateFun {
+	static void RegisterFunction(BuiltinFunctions &set);
+	static TableFunction GetFunction();
+};
+
+//! The quotas on references and what they count, as one row
+struct Git4DataLimitsFun {
+	static void RegisterFunction(BuiltinFunctions &set);
+	static TableFunction GetFunction();
+};
+
+//! The point-in-time recovery window: whether it is open, how long, and whether its internal reference is held
+struct Git4DataPitrStateFun {
+	static void RegisterFunction(BuiltinFunctions &set);
+	static TableFunction GetFunction();
+};
+
 struct DuckDBApproxDatabaseCountFun {
 	static void RegisterFunction(BuiltinFunctions &set);
 };

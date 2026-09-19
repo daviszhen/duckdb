@@ -249,17 +249,8 @@ static void PragmaGit4DataPitrOff(ClientContext &context, const FunctionParamete
 }
 
 static string PragmaGit4DataPitrState(ClientContext &context, const FunctionParameters &parameters) {
-	auto &transaction_manager = GetGit4DataTransactionManager(context);
-	constexpr int64_t MICROS_PER_DAY = 24LL * 60 * 60 * 1000000;
-	auto days = transaction_manager.PitrWindow().value / MICROS_PER_DAY;
-	// when the reference was taken is deliberately not reported here: it is the wall clock, so a
-	// test cannot assert it. It shows in git4data_snapshots, where it belongs.
-	Git4DataSnapshot reference;
-	auto held = transaction_manager.snapshots.Get(DuckTransactionManager::PITR_REFERENCE, reference);
-	return StringUtil::Format("SELECT %s::BOOLEAN AS pitr_enabled, %lld::BIGINT AS window_days, "
-	                          "%s::BOOLEAN AS reference_held",
-	                          transaction_manager.PitrEnabled() ? "true" : "false", (long long)days,
-	                          held ? "true" : "false");
+	// the row comes from the table function, which is where its values can also be selected
+	return "SELECT * FROM git4data_pitr_state()";
 }
 
 static string PragmaGit4DataRestore(ClientContext &context, const FunctionParameters &parameters) {
@@ -1770,12 +1761,8 @@ static void PragmaGit4DataLimit(ClientContext &context, const FunctionParameters
 }
 
 static string PragmaGit4DataLimits(ClientContext &context, const FunctionParameters &parameters) {
-	auto &transaction_manager = GetGit4DataTransactionManager(context);
-	return StringUtil::Format(
-	    "SELECT %lld::BIGINT AS snapshot_limit, %llu::UBIGINT AS snapshots, "
-	    "%lld::BIGINT AS branch_limit, %llu::UBIGINT AS branches",
-	    (long long)transaction_manager.snapshot_limit, (unsigned long long)transaction_manager.UserSnapshotCount(),
-	    (long long)transaction_manager.branch_limit, (unsigned long long)transaction_manager.branches.Count());
+	// the row comes from the table function, which is where its values can also be selected
+	return "SELECT * FROM git4data_limits()";
 }
 
 //! A name beginning with two underscores is one of the feature's own internal references - the
@@ -2058,17 +2045,8 @@ static string PragmaGit4DataSnapshots(ClientContext &context, const FunctionPara
 }
 
 static string PragmaGit4DataState(ClientContext &context, const FunctionParameters &parameters) {
-	auto &transaction_manager = GetGit4DataTransactionManager(context);
-	auto last_commit = transaction_manager.GetLastCommit();
-	auto pinned = transaction_manager.snapshots.LowestPin();
-	// Mirrors the decision made in DuckTransactionManager::Checkpoint
-	auto retained = last_commit >= transaction_manager.LowestRetentionBound();
-	return StringUtil::Format("SELECT %llu::UBIGINT AS last_commit_id, %llu::UBIGINT AS pinned_commit_id, "
-	                          "%s::BOOLEAN AS history_retained, %llu::UBIGINT AS retention_bound_value, "
-	                          "%llu::UBIGINT AS start_timestamp_counter",
-	                          last_commit, pinned, retained ? "true" : "false",
-	                          transaction_manager.LowestRetentionBound().Value(),
-	                          transaction_manager.GetStartTimestampCounter());
+	// the row comes from the table function, which is where its values can also be selected
+	return "SELECT * FROM git4data_state()";
 }
 
 //! Reads a table through the physical row groups, using the retention bound rather

@@ -1,0 +1,90 @@
+# name: test/sql/git4data/state_limits.test
+# description: The reference state, the quotas and the recovery window as rows a statement can select
+# group: [git4data]
+
+# Three more surfaces that report a *value* rather than a listing: the commit counter and the bound a
+# checkpoint must respect, the quotas on references and what they count, and the recovery window. Each was a
+# pragma returning a single row, so `PRAGMA ...` could be run by a test and its numbers could not be asserted.
+# They are table functions now, and the pragmas return them.
+
+load {TEST_DIR}/state_limits.db
+
+statement ok
+CREATE TABLE t (k INTEGER PRIMARY KEY, v INTEGER)
+
+statement ok
+INSERT INTO t SELECT range, range FROM range(5)
+
+statement ok
+CHECKPOINT
+
+statement ok
+PRAGMA git4data_create_snapshot('s1')
+
+statement ok
+PRAGMA git4data_limit('snapshot', 3)
+
+statement ok
+PRAGMA git4data_pitr(7)
+
+# The pin the state reports is the lowest pin the listing reports: the two surfaces read the same registry,
+# and this is the one number a checkpoint's decision rests on.
+query I
+SELECT (SELECT pinned_commit_id FROM git4data_state()) = (SELECT min(pinned_commit_id) FROM git4data_snapshots())
+----
+true
+
+# The commit a session is at is at or after the pin it holds, and the counter the file restores is at or ahead
+# of the last commit - which is what keeps a commit id from being handed out twice across a reopen.
+query II
+SELECT last_commit_id >= pinned_commit_id, start_timestamp_counter >= last_commit_id FROM git4data_state()
+----
+true	true
+
+# `history_retained` is the checkpoint's own decision read back, so it has to agree with the two numbers it is
+# made of. It is **not** a statement about the retention bound against the pin: measured, the bound sits above
+# the lowest pin (8 against 7 in the shell this was read in), which is why the assertion is the identity rather
+# than the ordering this test first claimed.
+query III
+SELECT history_retained, history_retained = (last_commit_id >= retention_bound_value),
+       retention_bound_value <= last_commit_id
+FROM git4data_state()
+----
+true	true	true
+
+# The quotas, and what they count: the snapshot count is the user references, and the branch count is the
+# listing's rows. The internal references the feature keeps for itself are **visible in the listing** - with the
+# window open, `__pitr__` is a row there, because it is a reference that holds history down and hiding it would
+# hide the pin - and they are **not counted** by the quota, which is what the two rules below separate. The
+# filter is `substr` rather than `NOT LIKE '\_\_%'`: measured, the escaping does not survive the
+# sqllogictest file and the pattern matched nothing.
+query IIII
+SELECT snapshot_limit, branch_limit,
+       snapshots = (SELECT count(*) FROM git4data_snapshots() WHERE substr(snapshot_name, 1, 2) <> '__'),
+       branches = (SELECT count(*) FROM git4data_branches())
+FROM git4data_limits()
+----
+3	-1	true	true
+
+# the recovery window, and the reference that holds it
+query III
+SELECT pitr_enabled, window_days, reference_held FROM git4data_pitr_state()
+----
+true	7	true
+
+# closing the window releases that reference; the length itself stays set, which is what the setting is
+statement ok
+PRAGMA git4data_pitr_off
+
+query II
+SELECT pitr_enabled, reference_held FROM git4data_pitr_state()
+----
+false	false
+
+# and the pragmas return the same rows as the functions
+query III
+SELECT (SELECT count(*) FROM git4data_state()) = (SELECT count(*) FROM (SELECT * FROM git4data_state())),
+       (SELECT snapshot_limit FROM git4data_limits()) = (SELECT snapshot_limit FROM (SELECT * FROM git4data_limits())),
+       (SELECT pitr_enabled FROM git4data_pitr_state()) = (SELECT pitr_enabled FROM (SELECT * FROM git4data_pitr_state()))
+----
+true	true	true

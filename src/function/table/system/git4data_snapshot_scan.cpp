@@ -1786,4 +1786,101 @@ void Git4DataSnapshotsFun::RegisterFunction(BuiltinFunctions &set) {
 	set.AddFunction(GetFunction());
 }
 
+//===----------------------------------------------------------------------===//
+// The state a database is in, as one row a statement can select
+//===----------------------------------------------------------------------===//
+//! The same argument as the listings above, for the three surfaces that report a *value*: the commit counter
+//! and the bound a checkpoint must respect, the quotas on references, and the recovery window. Each was a
+//! pragma returning a single row, so its numbers were readable and never asserted.
+static void Git4DataRowNames(vector<Identifier> &names, vector<LogicalType> &types, const char *name,
+                             LogicalType type) {
+	names.emplace_back(name);
+	types.push_back(std::move(type));
+}
+
+static unique_ptr<FunctionData> Git4DataStateBind(ClientContext &context, TableFunctionBindInput &,
+                                                  vector<LogicalType> &return_types, vector<Identifier> &names) {
+	auto result = make_uniq<Git4DataListingBindData>();
+	auto &transaction_manager = GetGit4DataTransactionManagerForListing(context);
+	auto last_commit = transaction_manager.GetLastCommit();
+	auto pinned = transaction_manager.snapshots.LowestPin();
+	// Mirrors the decision made in DuckTransactionManager::Checkpoint
+	auto retained = last_commit >= transaction_manager.LowestRetentionBound();
+	result->rows.push_back({Value::UBIGINT(last_commit), Value::UBIGINT(pinned), Value::BOOLEAN(retained),
+	                        Value::UBIGINT(transaction_manager.LowestRetentionBound().Value()),
+	                        Value::UBIGINT(transaction_manager.GetStartTimestampCounter())});
+	Git4DataRowNames(names, return_types, "last_commit_id", LogicalType::UBIGINT);
+	Git4DataRowNames(names, return_types, "pinned_commit_id", LogicalType::UBIGINT);
+	Git4DataRowNames(names, return_types, "history_retained", LogicalType::BOOLEAN);
+	Git4DataRowNames(names, return_types, "retention_bound_value", LogicalType::UBIGINT);
+	Git4DataRowNames(names, return_types, "start_timestamp_counter", LogicalType::UBIGINT);
+	return std::move(result);
+}
+
+static unique_ptr<FunctionData> Git4DataLimitsBind(ClientContext &context, TableFunctionBindInput &,
+                                                   vector<LogicalType> &return_types, vector<Identifier> &names) {
+	auto result = make_uniq<Git4DataListingBindData>();
+	auto &transaction_manager = GetGit4DataTransactionManagerForListing(context);
+	result->rows.push_back({Value::BIGINT(transaction_manager.snapshot_limit),
+	                        Value::UBIGINT(transaction_manager.UserSnapshotCount()),
+	                        Value::BIGINT(transaction_manager.branch_limit),
+	                        Value::UBIGINT(transaction_manager.branches.Count())});
+	Git4DataRowNames(names, return_types, "snapshot_limit", LogicalType::BIGINT);
+	Git4DataRowNames(names, return_types, "snapshots", LogicalType::UBIGINT);
+	Git4DataRowNames(names, return_types, "branch_limit", LogicalType::BIGINT);
+	Git4DataRowNames(names, return_types, "branches", LogicalType::UBIGINT);
+	return std::move(result);
+}
+
+static unique_ptr<FunctionData> Git4DataPitrStateBind(ClientContext &context, TableFunctionBindInput &,
+                                                      vector<LogicalType> &return_types, vector<Identifier> &names) {
+	auto result = make_uniq<Git4DataListingBindData>();
+	auto &transaction_manager = GetGit4DataTransactionManagerForListing(context);
+	constexpr int64_t MICROS_PER_DAY = 24LL * 60 * 60 * 1000000;
+	auto days = transaction_manager.PitrWindow().value / MICROS_PER_DAY;
+	// when the reference was taken is deliberately not reported here: it is the wall clock, so a test cannot
+	// assert it. It shows in git4data_snapshots, where it belongs.
+	Git4DataSnapshot reference;
+	auto held = transaction_manager.snapshots.Get(DuckTransactionManager::PITR_REFERENCE, reference);
+	result->rows.push_back({Value::BOOLEAN(transaction_manager.PitrEnabled()), Value::BIGINT(days),
+	                        Value::BOOLEAN(held)});
+	Git4DataRowNames(names, return_types, "pitr_enabled", LogicalType::BOOLEAN);
+	Git4DataRowNames(names, return_types, "window_days", LogicalType::BIGINT);
+	Git4DataRowNames(names, return_types, "reference_held", LogicalType::BOOLEAN);
+	return std::move(result);
+}
+
+TableFunction Git4DataStateFun::GetFunction() {
+	TableFunction fun("git4data_state", {}, Git4DataListingScan, Git4DataStateBind);
+	fun.init_global = Git4DataListingInit;
+	fun.projection_pushdown = false;
+	return fun;
+}
+
+void Git4DataStateFun::RegisterFunction(BuiltinFunctions &set) {
+	set.AddFunction(GetFunction());
+}
+
+TableFunction Git4DataLimitsFun::GetFunction() {
+	TableFunction fun("git4data_limits", {}, Git4DataListingScan, Git4DataLimitsBind);
+	fun.init_global = Git4DataListingInit;
+	fun.projection_pushdown = false;
+	return fun;
+}
+
+void Git4DataLimitsFun::RegisterFunction(BuiltinFunctions &set) {
+	set.AddFunction(GetFunction());
+}
+
+TableFunction Git4DataPitrStateFun::GetFunction() {
+	TableFunction fun("git4data_pitr_state", {}, Git4DataListingScan, Git4DataPitrStateBind);
+	fun.init_global = Git4DataListingInit;
+	fun.projection_pushdown = false;
+	return fun;
+}
+
+void Git4DataPitrStateFun::RegisterFunction(BuiltinFunctions &set) {
+	set.AddFunction(GetFunction());
+}
+
 } // namespace duckdb
