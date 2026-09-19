@@ -606,3 +606,47 @@ SELECT (SELECT count(*) FROM ap AT (BRANCH => 'apb')),
        (SELECT count(*) FROM apb_add)
 ----
 4	0
+
+# A table with no primary key cannot say which rows a write removes - and the shape that reaches this refusal is
+# not a plain keyless table: a delta cannot even be *bound* to one ("has no primary key, so a delta cannot say
+# which rows it removes"), so the check below is reached when the table the mapping was made against is replaced
+# by a keyless one of the same name. It fires before the read, so the caller is told about the key rather than
+# about the swap.
+statement ok
+CREATE TABLE ap_keyless (k INTEGER PRIMARY KEY, v INTEGER)
+
+statement ok
+INSERT INTO ap_keyless VALUES (1, 10)
+
+statement ok
+CREATE TABLE ap_keyless_add (k INTEGER PRIMARY KEY, v INTEGER)
+
+statement ok
+CREATE TABLE ap_keyless_del (k INTEGER PRIMARY KEY)
+
+statement ok
+PRAGMA git4data_create_branch('apkl', '')
+
+statement ok
+PRAGMA git4data_bind_branch_delta('ap_keyless', 'apkl', 'ap_keyless_add', 'ap_keyless_del')
+
+statement ok
+INSERT INTO ap_keyless VALUES (2, 20)
+
+statement ok
+PRAGMA git4data_apply('ap_keyless', 'apkl', 'INSERT INTO ap_keyless VALUES (3, 30)')
+
+# the table is replaced by one with no primary key, and the write is refused for that reason
+statement ok
+DROP TABLE ap_keyless
+
+statement ok
+CREATE TABLE ap_keyless (k INTEGER, v INTEGER)
+
+statement ok
+INSERT INTO ap_keyless VALUES (1, 10)
+
+statement error
+PRAGMA git4data_apply('ap_keyless', 'apkl', 'INSERT INTO ap_keyless VALUES (2, 20)')
+----
+<REGEX>:.*has no primary key, so a delta cannot say which rows a write removes.*

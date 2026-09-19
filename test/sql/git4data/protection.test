@@ -99,3 +99,16 @@ query III
 PRAGMA git4data_probe('v')
 ----
 600	400	999
+
+# The schema guard's two sentences, and the claim in the second one: dropping the schema the registry lives in
+# would take every reference with it, so it is refused - and the advice is the pragmas, which is the way to drop
+# one reference.
+statement error
+DROP SCHEMA git4data
+----
+<REGEX>:.*is the schema the reference registry is kept in, and dropping or altering it would take every snapshot and branch with it\. Use the git4data_\* pragmas to drop a reference\..*
+
+statement error
+DROP SCHEMA git4data CASCADE
+----
+<REGEX>:.*dropping or altering it would take every snapshot and branch with it.*

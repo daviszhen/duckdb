@@ -72,3 +72,22 @@ query II
 SELECT (SELECT v FROM t WHERE k = 25), (SELECT v FROM t WHERE k = 0)
 ----
 25	0
+
+# A pick aligns rows by their primary key, so a table without one is refused - the sentence says why rather than
+# the two references being compared and the answer being empty or arbitrary.
+statement ok
+CREATE TABLE pk_keyless (k INTEGER, v INTEGER)
+
+statement ok
+INSERT INTO pk_keyless VALUES (1, 10), (2, 20)
+
+statement ok
+PRAGMA git4data_create_snapshot('pkl_pin')
+
+statement ok
+INSERT INTO pk_keyless VALUES (3, 30)
+
+statement error
+PRAGMA git4data_pick('pk_keyless', 'pkl_pin', 'pkl_pin', 'fail')
+----
+<REGEX>:.*has no primary key, so a pick cannot tell which rows to apply the changes to.*
