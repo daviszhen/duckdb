@@ -616,6 +616,11 @@ void DuckTransactionManager::SetPitr(timestamp_t window, timestamp_t now, const 
 
 void DuckTransactionManager::ClearPitr() {
 	pitr_enabled = false;
+	// and the length goes with it: a window that is off has no length, which is what a restart reports
+	// anyway (the block's length is only put back with the window). Measured before this, turning the window
+	// off in a session that had just opened it read `false, 7, false` from `git4data_pitr_state` while the
+	// same database after a restart read `false, 0, false`.
+	pitr_window = timestamp_t(0);
 	snapshots.Drop(PITR_REFERENCE);
 }
 
