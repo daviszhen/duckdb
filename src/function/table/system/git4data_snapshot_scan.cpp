@@ -1216,6 +1216,11 @@ struct Git4DataDiffState : public GlobalTableFunctionState {
 		//! The key's 64-bit pattern when the key is a single integer column: the map is then bucketed by it,
 		//! which is exact, and matching a right row against it allocates nothing at all
 		uint64_t bits = 0;
+		//! The next row sharing this one's key, as a position in `left_candidates`: the rows that share a key
+		//! are one chain, so a key costs a map entry and nothing else. A `vector` per key - the shape this
+		//! replaces - cost a header and a heap block per distinct key on top of the map entry, measured at
+		//! about 60 MiB over a million rows.
+		idx_t next = DConstants::INVALID_INDEX;
 	};
 	//! The left side, in blocks: every block holds up to `STANDARD_VECTOR_SIZE` rows of the key and value
 	//! columns, and `stored_rows` is how many rows of the last block are used
@@ -1224,7 +1229,9 @@ struct Git4DataDiffState : public GlobalTableFunctionState {
 	//! The keys the change lists name, in blocks of key columns, with `change_key_rows` rows used in the last
 	vector<unique_ptr<DataChunk>> change_keys;
 	idx_t change_key_rows = 0;
-	unordered_map<hash_t, vector<KeyedRow>> left_by_key;
+	//! Every left row, in the order it was read, with `left_heads` saying where each key's chain starts
+	vector<KeyedRow> left_candidates;
+	unordered_map<hash_t, idx_t> left_heads;
 	struct Change {
 		row_t row_id;
 		row_t counterpart;
@@ -1497,6 +1504,54 @@ static vector<Value> Git4DataDiffStoredLeftKey(const Git4DataDiffState &state, i
 		key.push_back(block.GetValue(i, row));
 	}
 	return key;
+}
+
+//! Put a left row at the head of its key's chain, and answer with the link the caller's row should carry. The
+//! rows live in one arena and the chain is a position in it, so a key costs a map entry - not a map entry and
+//! a container of its own.
+//! Which left row a right row pairs with: the position of the first row of the key's chain that is still
+//! unpaired, or - when one of them carries the same values as this right row - that one.
+//!
+//! A chain holds more than one row only when a key is repeated, and a delta's added table is the caller's, so
+//! a line can hold the same key twenty times. Pairing like with like is what keeps a repeated key from being
+//! reported as a *change* of one of the rows: with a value-equal partner the two are the same row and nothing
+//! is reported, and only a right row with no equal partner is a change of the first one. It also makes the
+//! answer independent of the order the rows came back in, which the arena's order had made it depend on -
+//! measured, reversing the chain turned a removal into a change in `delta_duplicate_key.test`.
+static idx_t Git4DataDiffPair(Git4DataDiffState &state, idx_t head, DataChunk &chunk, idx_t row, bool key_is_bits) {
+	idx_t first = DConstants::INVALID_INDEX;
+	for (auto index = head; index != DConstants::INVALID_INDEX; index = state.left_candidates[index].next) {
+		auto &candidate = state.left_candidates[index];
+		if (candidate.matched) {
+			continue;
+		}
+		if (key_is_bits) {
+			if (!Git4DataDiffSameStoredValues(state, candidate.stored, chunk, state.key_count, row)) {
+				if (first == DConstants::INVALID_INDEX) {
+					first = index;
+				}
+				continue;
+			}
+			return index;
+		}
+		if (!Git4DataDiffSameStoredKeyChunk(state, candidate.stored, chunk, row)) {
+			continue;
+		}
+		if (Git4DataDiffSameStoredValues(state, candidate.stored, chunk, state.key_count, row)) {
+			return index;
+		}
+		if (first == DConstants::INVALID_INDEX) {
+			first = index;
+		}
+	}
+	return first;
+}
+
+static void Git4DataDiffChainPush(Git4DataDiffState &state, hash_t key, Git4DataDiffState::KeyedRow entry) {
+	auto head = state.left_heads.find(key);
+	entry.next = head == state.left_heads.end() ? DConstants::INVALID_INDEX : head->second;
+	state.left_heads[key] = state.left_candidates.size();
+	state.left_candidates.push_back(entry);
 }
 
 //! A fresh block for the change keys, when the last one is full. A table with no primary key has no key
@@ -1861,11 +1916,11 @@ static void Git4DataDiffFunction(ClientContext &context, TableFunctionInput &dat
 					    if (Git4DataDiffChunkKeyBits(chunk, row, bits)) {
 						    // the bucket is the key itself, so a lookup in it needs no comparison at all
 						    entry.bits = bits;
-						    state.left_by_key[bits].push_back(entry);
+						    Git4DataDiffChainPush(state, bits, entry);
 						    return;
 					    }
 				    }
-				    state.left_by_key[Git4DataDiffChunkKeyHash(chunk, state.key_count, row)].push_back(entry);
+				    Git4DataDiffChainPush(state, Git4DataDiffChunkKeyHash(chunk, state.key_count, row), entry);
 			    });
 			state.phase = Git4DataDiffState::Phase::RIGHT;
 		}
@@ -1876,16 +1931,12 @@ static void Git4DataDiffFunction(ClientContext &context, TableFunctionInput &dat
 			    state.right_added_open, state.right_added_local_open, [&](DataChunk &chunk, row_t row_id, idx_t row) {
 				    uint64_t bits = 0;
 				    if (state.key_is_integer && Git4DataDiffChunkKeyBits(chunk, row, bits)) {
-					    // the bucket is the key itself, so a hit is exact and needs no key vector
-					    auto bits_entry = state.left_by_key.find(bits);
-					    if (bits_entry != state.left_by_key.end()) {
-						    for (auto &candidate : bits_entry->second) {
-							    // one left row is one partner: a second right row carrying the same key is a
-							    // row of its own and belongs in the additions, which is what a left row that
-							    // was already paired means here
-							    if (candidate.bits != bits || candidate.matched) {
-								    continue;
-							    }
+					    // the chain's key is the key itself, so a hit is exact and needs no comparison of keys
+					    auto bits_entry = state.left_heads.find(bits);
+					    if (bits_entry != state.left_heads.end()) {
+						    auto partner = Git4DataDiffPair(state, bits_entry->second, chunk, row, true);
+						    if (partner != DConstants::INVALID_INDEX) {
+							    auto &candidate = state.left_candidates[partner];
 							    candidate.matched = true;
 							    if (!Git4DataDiffSameStoredValues(state, candidate.stored, chunk, state.key_count,
 							                                      row)) {
@@ -1901,15 +1952,11 @@ static void Git4DataDiffFunction(ClientContext &context, TableFunctionInput &dat
 					    return;
 				    }
 				    auto hash = Git4DataDiffChunkKeyHash(chunk, state.key_count, row);
-				    auto entry = state.left_by_key.find(hash);
-				    if (entry != state.left_by_key.end()) {
-					    for (auto &candidate : entry->second) {
-						    // as in the integer path: a paired left row is not a partner again, so a
-						    // repeated key on the right is an addition rather than a change of one row
-						    if (candidate.matched ||
-						        !Git4DataDiffSameStoredKeyChunk(state, candidate.stored, chunk, row)) {
-							    continue;
-						    }
+				    auto entry = state.left_heads.find(hash);
+				    if (entry != state.left_heads.end()) {
+					    auto partner = Git4DataDiffPair(state, entry->second, chunk, row, false);
+					    if (partner != DConstants::INVALID_INDEX) {
+						    auto &candidate = state.left_candidates[partner];
 						    candidate.matched = true;
 						    if (!Git4DataDiffSameStoredValues(state, candidate.stored, chunk, state.key_count, row)) {
 							    state.changed.push_back(Git4DataDiffState::Change {
@@ -1921,17 +1968,18 @@ static void Git4DataDiffFunction(ClientContext &context, TableFunctionInput &dat
 				    state.added.push_back(Git4DataDiffState::Change {
 				        row_id, NO_COUNTERPART, Git4DataDiffStoreChangeKey(state, context, chunk, row)});
 			    });
-			for (auto &entry : state.left_by_key) {
-				for (auto &candidate : entry.second) {
-					if (candidate.matched) {
-						continue;
-					}
-					state.removed.push_back(Git4DataDiffState::Change {
-					    candidate.row_id, NO_COUNTERPART,
-					    Git4DataDiffStoreChangeKeyFromLeft(state, context, candidate.stored)});
+			// in the order the rows were read, which the arena kept: the map's order was whatever its buckets
+			// held, so the removals of a diff came out in an order no caller could predict
+			for (auto &candidate : state.left_candidates) {
+				if (candidate.matched) {
+					continue;
 				}
+				state.removed.push_back(
+				    Git4DataDiffState::Change {candidate.row_id, NO_COUNTERPART,
+				                               Git4DataDiffStoreChangeKeyFromLeft(state, context, candidate.stored)});
 			}
-			state.left_by_key.clear();
+			state.left_candidates.clear();
+			state.left_heads.clear();
 			// the left side is in the changes that came out of it now, so the blocks go back
 			state.left_blocks.clear();
 			state.stored_rows = 0;

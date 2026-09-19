@@ -59,6 +59,23 @@ SELECT count(*) FROM git4data_diff('t', 'base', 'feature') WHERE k = 50
 ----
 0
 
+# The removals come out in the order the branches' rows were read - ascending row id - which is a property
+# of the side and not of a hash bucket. A key path held its rows in one container per key, and the order its
+# keys iterated in was the map's; the rows live in one array now, so the order is the one they were read in.
+query I
+SELECT g4d_row_id FROM git4data_diff('t', 'base', 'feature') WHERE g4d_change = 'removed'
+----
+10
+11
+12
+13
+14
+15
+16
+17
+18
+19
+
 # the keys the branch carried forward are the ones it changed, and the removed ones are the ones it
 # dropped - not the ones the main line dropped since the base
 query I
