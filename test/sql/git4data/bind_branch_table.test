@@ -359,3 +359,56 @@ statement error
 SELECT * FROM late_src AT (BRANCH => 'late')
 ----
 <REGEX>:.*columns in that order.*someone else's.*
+
+# A branch's own table is read as the source's rows *by position*, so the two have to have the same columns in
+# the same order - and the refusal at bind time is the first of two lines of defence, the second being the read,
+# which catches a table whose shape changed after it was bound. Measured with both checks disabled (perturbations
+# recorded in the design note): a copy built as `SELECT v, k FROM sh` and bound as the branch's line makes a read
+# of `sh AT (BRANCH => 'b')` return **k = 777, v = 1** from a row that holds k = 1 and v = 777 - the values would
+# be someone else's, which is what the sentence says.
+statement ok
+CREATE TABLE sh (k INTEGER PRIMARY KEY, v INTEGER)
+
+statement ok
+INSERT INTO sh VALUES (1, 777)
+
+statement ok
+PRAGMA git4data_create_branch('shb', '')
+
+statement ok
+CREATE TABLE sh_copy_swapped (v INTEGER, k INTEGER)
+
+statement ok
+INSERT INTO sh_copy_swapped SELECT v, k FROM sh
+
+statement error
+PRAGMA git4data_bind_branch_table('sh', 'shb', 'sh_copy_swapped')
+----
+<REGEX>:.*is read as the rows of "sh" for this branch, and a read maps its columns by position - so it needs that table's columns, in that order\..*
+
+# a table with the source's columns in the source's order is accepted, and then a rename takes the shape away -
+# which the read refuses rather than answering from the wrong column
+statement ok
+CREATE TABLE sh_copy (k INTEGER PRIMARY KEY, v INTEGER)
+
+statement ok
+INSERT INTO sh_copy SELECT k, v FROM sh
+
+statement ok
+PRAGMA git4data_bind_branch_table('sh', 'shb', 'sh_copy')
+
+query II
+SELECT k, v FROM sh AT (BRANCH => 'shb')
+----
+1	777
+
+statement ok
+ALTER TABLE sh_copy RENAME COLUMN k TO v_renamed
+
+statement ok
+ALTER TABLE sh_copy RENAME COLUMN v TO k_renamed
+
+statement error
+SELECT k, v FROM sh AT (BRANCH => 'shb')
+----
+<REGEX>:.*no longer has that table's columns in that order - a read maps them by position, so the values would be someone else's\..*
