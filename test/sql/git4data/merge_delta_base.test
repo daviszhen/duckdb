@@ -98,3 +98,66 @@ SELECT k, v FROM t ORDER BY k
 1	10
 2	20
 3	30
+
+# Two sides forked from a delta branch part *inside* that delta, not at the source the ancestor's pin names.
+# Measured before this was fixed: the base was read as the source at the ancestor's pin - the source without
+# the delta - so every row the delta had removed looked changed on both sides, and two sides that were the
+# same state (`git4data_diff` between them 0) were refused as a conflict.
+statement ok
+CREATE TABLE t2 (k INTEGER PRIMARY KEY, v INTEGER)
+
+statement ok
+INSERT INTO t2 SELECT range, range FROM range(10)
+
+statement ok
+CHECKPOINT
+
+statement ok
+CREATE TABLE t2_add (k INTEGER PRIMARY KEY, v INTEGER)
+
+statement ok
+CREATE TABLE t2_del (k INTEGER PRIMARY KEY)
+
+statement ok
+PRAGMA git4data_create_branch('dl', '')
+
+statement ok
+PRAGMA git4data_bind_branch_delta('t2', 'dl', 't2_add', 't2_del')
+
+statement ok
+INSERT INTO t2_del VALUES (2)
+
+statement ok
+PRAGMA git4data_create_branch('dl1', 'dl')
+
+statement ok
+PRAGMA git4data_create_branch('dl2', 'dl')
+
+statement ok
+PRAGMA git4data_materialize('t2', 'dl1', 't2_dl1')
+
+# the two sides hold the same state, so the merge has nothing to resolve and nothing to refuse
+query I
+SELECT count(*) FROM git4data_diff('t2', 'dl1', 'dl2')
+----
+0
+
+statement ok
+PRAGMA git4data_merge('t2', 'dl1', 'dl2', 'fail')
+
+query II
+SELECT (SELECT count(*) FROM t2 AT (BRANCH => 'dl1')), (SELECT count(*) FROM t2 AT (BRANCH => 'dl1') WHERE k = 2)
+----
+9	0
+
+# and a change only one side made still lands, with no conflict invented for the rows it did not touch
+statement ok
+UPDATE t2_dl1 SET v = 555 WHERE k = 1
+
+statement ok
+PRAGMA git4data_merge('t2', 'dl1', 'dl2', 'fail')
+
+query II
+SELECT (SELECT v FROM t2 AT (BRANCH => 'dl1') WHERE k = 1), (SELECT count(*) FROM t2 AT (BRANCH => 'dl1'))
+----
+555	9

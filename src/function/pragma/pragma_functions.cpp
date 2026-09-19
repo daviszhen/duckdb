@@ -1662,6 +1662,20 @@ static string PragmaGit4DataMerge(ClientContext &context, const FunctionParamete
 			base_reference = DuckTransactionManager::MERGE_BASE_REFERENCE;
 			drop_merge_base = true;
 		};
+		// Which of the two is the state the two sides parted at depends on when they forked, and the pin says
+		// which: a fork from a parent that has a line of its own pins the commit it forked at, so a merge
+		// target whose pin is newer than the ancestor's own parted *inside* that line. Both the ancestor's own
+		// copy below and its own delta go through this, because both are its line: a delta is a change it made
+		// to the source, and naming the pin instead reads the source without it.
+		auto name_the_parting_state = [&]() {
+			Git4DataBranch target_branch;
+			if (transaction_manager.branches.Get(left_name, target_branch) &&
+			    target_branch.pin > ancestor_branch.pin) {
+				name_line_as_base();
+			} else {
+				name_pin_as_base();
+			}
+		};
 		// A delta is the ancestor's own change to the source, so its name reads as its line *now*; whether its
 		// two tables are empty yet is not asked, because naming the pin is right either way.
 		// A delta is the ancestor's own change to the source, so its name reads as its line *now*; whether its
@@ -1669,7 +1683,7 @@ static string PragmaGit4DataMerge(ClientContext &context, const FunctionParamete
 		for (auto &delta_entry : ancestor_branch.deltas) {
 			if (Git4DataSourceKeyMatches(context, delta_entry.source, merge_key) ||
 			    (delta_entry.source_oid != 0 && delta_entry.source_oid == merge_source.oid)) {
-				name_pin_as_base();
+				name_the_parting_state();
 			}
 		}
 		for (auto &storage_entry : ancestor_branch.storage_tables) {
@@ -1740,14 +1754,7 @@ static string PragmaGit4DataMerge(ClientContext &context, const FunctionParamete
 				// `storage_writes.test` are the second case (their sides were forked before the ancestor was
 				// given a copy) and `fork_state_merge.test` the first; a pin newer than the ancestor's own is
 				// what tells them apart, because a fork from a parent with a line pins the commit it forked at.
-				Git4DataBranch target_branch;
-				auto forked_inside_the_line =
-				    transaction_manager.branches.Get(left_name, target_branch) && target_branch.pin > ancestor_branch.pin;
-				if (forked_inside_the_line) {
-					name_line_as_base();
-				} else {
-					name_pin_as_base();
-				}
+				name_the_parting_state();
 			}
 		}
 	}
