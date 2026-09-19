@@ -416,3 +416,176 @@ query I
 SELECT count(*) FROM mg AT (BRANCH => 'mg0')
 ----
 5
+
+# 7. A point-in-time window beside a *chain*: the window is one reference the database moves itself at each
+# checkpoint, and the chain's links are references the caller made. The window may not keep history (a window of
+# zero keeps nothing), so what holds the chain's pins down is the chain. Probed before it was written down: with
+# a zero-day window and a checkpoint, the chain read exactly what it read before, and the retention bound stayed
+# at the chain's oldest pin rather than moving up to the window's.
+statement ok
+CREATE TABLE pw (k INTEGER PRIMARY KEY, v INTEGER)
+
+statement ok
+INSERT INTO pw SELECT range, range FROM range(5)
+
+statement ok
+PRAGMA git4data_create_branch('pw0', '')
+
+statement ok
+CREATE TABLE pw0_add (k INTEGER PRIMARY KEY, v INTEGER)
+
+statement ok
+CREATE TABLE pw0_del (k INTEGER PRIMARY KEY)
+
+statement ok
+PRAGMA git4data_bind_branch_delta('pw', 'pw0', 'pw0_add', 'pw0_del')
+
+statement ok
+INSERT INTO pw0_add VALUES (100, 100)
+
+statement ok
+INSERT INTO pw0_del VALUES (2)
+
+statement ok
+PRAGMA git4data_create_branch('pw1', 'pw0')
+
+statement ok
+PRAGMA git4data_create_branch('pw2', 'pw1')
+
+# the bound before the window is what the chain holds it at, and a window of zero keeps nothing of its own
+query IIII
+SELECT (SELECT count(*) FROM pw AT (BRANCH => 'pw2')),
+       (SELECT count(*) FROM pw AT (BRANCH => 'pw2') WHERE k = 100),
+       (SELECT count(*) FROM pw AT (BRANCH => 'pw2') WHERE k = 2),
+       (SELECT history_retained FROM git4data_state())
+----
+5	1	0	true
+
+statement ok
+PRAGMA git4data_pitr(0)
+
+statement ok
+CHECKPOINT
+
+query IIII
+SELECT (SELECT count(*) FROM pw AT (BRANCH => 'pw2')),
+       (SELECT count(*) FROM pw AT (BRANCH => 'pw1')),
+       (SELECT count(*) FROM pw AT (BRANCH => 'pw0')),
+       (SELECT count(*) FROM pw AT (BRANCH => 'pw2') WHERE k = 2)
+----
+5	5	5	0
+
+# the window holds a reference of its own, which is what it moves; the chain is untouched by that
+query III
+SELECT (SELECT count(*) FROM git4data_snapshots() WHERE snapshot_name = '__pitr__'),
+       (SELECT reference_held FROM git4data_pitr_state()),
+       (SELECT count(*) FROM pw AT (BRANCH => 'pw2') WHERE k = 100)
+----
+1	true	1
+
+statement ok
+PRAGMA git4data_pitr(7)
+
+statement ok
+INSERT INTO pw VALUES (500, 500)
+
+statement ok
+CHECKPOINT
+
+# a write and a checkpoint do not disturb the chain: it reads its pins, not the table
+query IIII
+SELECT (SELECT count(*) FROM pw AT (BRANCH => 'pw2')),
+       (SELECT count(*) FROM pw AT (BRANCH => 'pw2') WHERE k = 500),
+       (SELECT count(*) FROM pw),
+       (SELECT history_retained FROM git4data_state())
+----
+5	0	6	true
+
+# 8. More than one source, with two overlays on one of them: a branch inherits a line for every source its parent
+# has one for, and its own delta covers *one* source - so a read of the other must be unaffected by it. Probed
+# before it was written down: the child read the parent's line for both sources, its own delta applied to one,
+# and a write through it for that source left the other alone.
+statement ok
+CREATE TABLE ms1t (k INTEGER PRIMARY KEY, v INTEGER)
+
+statement ok
+INSERT INTO ms1t SELECT range, range FROM range(4)
+
+statement ok
+CREATE TABLE ms2t (k INTEGER PRIMARY KEY, v INTEGER)
+
+statement ok
+INSERT INTO ms2t SELECT range * 10, range FROM range(4)
+
+statement ok
+PRAGMA git4data_create_branch('msp', '')
+
+statement ok
+CREATE TABLE msp1_add (k INTEGER PRIMARY KEY, v INTEGER)
+
+statement ok
+CREATE TABLE msp1_del (k INTEGER PRIMARY KEY)
+
+statement ok
+CREATE TABLE msp2_add (k INTEGER PRIMARY KEY, v INTEGER)
+
+statement ok
+CREATE TABLE msp2_del (k INTEGER PRIMARY KEY)
+
+statement ok
+PRAGMA git4data_bind_branch_delta('ms1t', 'msp', 'msp1_add', 'msp1_del')
+
+statement ok
+PRAGMA git4data_bind_branch_delta('ms2t', 'msp', 'msp2_add', 'msp2_del')
+
+statement ok
+INSERT INTO msp1_add VALUES (100, 100)
+
+statement ok
+INSERT INTO msp1_del VALUES (1)
+
+statement ok
+INSERT INTO msp2_add VALUES (200, 200)
+
+statement ok
+PRAGMA git4data_create_branch('msc', 'msp')
+
+statement ok
+CREATE TABLE msc1_add (k INTEGER PRIMARY KEY, v INTEGER)
+
+statement ok
+CREATE TABLE msc1_del (k INTEGER PRIMARY KEY)
+
+statement ok
+PRAGMA git4data_bind_branch_delta('ms1t', 'msc', 'msc1_add', 'msc1_del')
+
+statement ok
+INSERT INTO msc1_add VALUES (300, 300)
+
+statement ok
+INSERT INTO msc1_del VALUES (100)
+
+# the child applies its own delta to the first source and the inherited line as it stands to the second
+query IIII
+SELECT (SELECT string_agg(k::VARCHAR, ',' ORDER BY k) FROM ms1t AT (BRANCH => 'msc')),
+       (SELECT string_agg(k::VARCHAR, ',' ORDER BY k) FROM ms1t AT (BRANCH => 'msp')),
+       (SELECT string_agg(k::VARCHAR, ',' ORDER BY k) FROM ms2t AT (BRANCH => 'msc')),
+       (SELECT count(*) FROM ms2t AT (BRANCH => 'msc') WHERE k = 0)
+----
+0,2,3,300	0,2,3,100	0,10,20,30,200	1
+
+# the listing says which sources the branch holds something of its own for, and which line the rest comes from
+query III
+SELECT line, delta_source, delta_added FROM git4data_branches() WHERE branch_name = 'msc'
+----
+msp	ms1t	msc1_add
+
+statement ok
+PRAGMA git4data_apply('ms1t', 'msc', 'INSERT INTO ms1t VALUES (400, 400)')
+
+query III
+SELECT (SELECT string_agg(k::VARCHAR, ',' ORDER BY k) FROM ms1t AT (BRANCH => 'msc')),
+       (SELECT string_agg(k::VARCHAR, ',' ORDER BY k) FROM ms1t AT (BRANCH => 'msp')),
+       (SELECT string_agg(k::VARCHAR, ',' ORDER BY k) FROM ms2t AT (BRANCH => 'msc'))
+----
+0,2,3,300,400	0,2,3,100	0,10,20,30,200
