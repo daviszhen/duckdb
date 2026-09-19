@@ -322,6 +322,11 @@ struct Git4DataDeltaRead {
 	//! the rows the caller has written to that table and not committed, which are in its local storage.
 	//! False once the overlay has no rows left.
 	bool Next(ClientContext &context, const vector<StorageIndex> &column_ids, DataChunk &target) {
+		// An overlay that names no added table holds no rows to read: what it says is which keys it took
+		// away, and that is a removal set the read filters with.
+		if (!scan) {
+			return false;
+		}
 		while (true) {
 			target.Reset();
 			if (local_open) {
@@ -933,10 +938,11 @@ static unique_ptr<GlobalTableFunctionState> Git4DataSnapshotScanInit(ClientConte
 		auto &layer = bind_data.deltas[i];
 		Git4DataDeltaRead read;
 		read.layer = layer;
+		// the chunk exists whether or not there is a table to fill it: an overlay may name only removals
+		read.chunk = make_uniq<DataChunk>();
+		read.chunk->Initialize(Allocator::Get(context), scan_types);
 		if (!layer.added.empty()) {
 			auto &added_table = Git4DataResolveTable(context, layer.added);
-			read.chunk = make_uniq<DataChunk>();
-			read.chunk->Initialize(Allocator::Get(context), scan_types);
 			read.scan = make_uniq<TableScanState>();
 			read.scan->Initialize(result->column_ids, nullptr);
 			added_table.GetStorage().GetRowGroupCollection()->InitializeScan(
@@ -1758,10 +1764,11 @@ static void Git4DataDiffSetupDeltas(ClientContext &context, const vector<Git4Dat
 	for (auto &layer : layers) {
 		Git4DataDeltaRead read;
 		read.layer = layer;
+		// the chunk exists whether or not there is a table to fill it: an overlay may name only removals
+		read.chunk = make_uniq<DataChunk>();
+		read.chunk->Initialize(Allocator::Get(context), scan_types);
 		if (!layer.added.empty()) {
 			auto &added_table = Git4DataResolveTable(context, layer.added);
-			read.chunk = make_uniq<DataChunk>();
-			read.chunk->Initialize(Allocator::Get(context), scan_types);
 			read.scan = make_uniq<TableScanState>();
 			read.scan->Initialize(column_ids, nullptr);
 			added_table.GetStorage().GetRowGroupCollection()->InitializeScan(query_context, read.scan->table_state,
