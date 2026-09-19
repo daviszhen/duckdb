@@ -369,3 +369,179 @@ query I
 SELECT count(*) FROM dm
 ----
 10
+
+# The three conflict policies work the same way when the merge lands in a delta: fail refuses, skip leaves the
+# conflicting key as the left has it, and accept takes the right's row - and a row the right removed lands too.
+# Both sides change k = 1 differently, which a delta records as a removal plus an added row.
+statement ok
+CREATE TABLE pm1 (k INTEGER PRIMARY KEY, v INTEGER)
+
+statement ok
+CREATE TABLE pm2 (k INTEGER PRIMARY KEY, v INTEGER)
+
+statement ok
+INSERT INTO pm1 SELECT range, range FROM range(10)
+
+statement ok
+INSERT INTO pm2 SELECT range, range FROM range(10)
+
+statement ok
+CHECKPOINT
+
+statement ok
+CREATE TABLE p1la (k INTEGER PRIMARY KEY, v INTEGER)
+
+statement ok
+CREATE TABLE p1ld (k INTEGER PRIMARY KEY)
+
+statement ok
+CREATE TABLE p1ra (k INTEGER PRIMARY KEY, v INTEGER)
+
+statement ok
+CREATE TABLE p1rd (k INTEGER PRIMARY KEY)
+
+statement ok
+CREATE TABLE p2la (k INTEGER PRIMARY KEY, v INTEGER)
+
+statement ok
+CREATE TABLE p2ld (k INTEGER PRIMARY KEY)
+
+statement ok
+CREATE TABLE p2ra (k INTEGER PRIMARY KEY, v INTEGER)
+
+statement ok
+CREATE TABLE p2rd (k INTEGER PRIMARY KEY)
+
+statement ok
+PRAGMA git4data_create_branch('p1base', '')
+
+statement ok
+PRAGMA git4data_create_branch('p1l', 'p1base')
+
+statement ok
+PRAGMA git4data_create_branch('p1r', 'p1base')
+
+statement ok
+PRAGMA git4data_bind_branch_delta('pm1', 'p1l', 'p1la', 'p1ld')
+
+statement ok
+PRAGMA git4data_bind_branch_delta('pm1', 'p1r', 'p1ra', 'p1rd')
+
+statement ok
+PRAGMA git4data_create_branch('p2base', '')
+
+statement ok
+PRAGMA git4data_create_branch('p2l', 'p2base')
+
+statement ok
+PRAGMA git4data_create_branch('p2r', 'p2base')
+
+statement ok
+PRAGMA git4data_bind_branch_delta('pm2', 'p2l', 'p2la', 'p2ld')
+
+statement ok
+PRAGMA git4data_bind_branch_delta('pm2', 'p2r', 'p2ra', 'p2rd')
+
+statement ok
+INSERT INTO p1ld VALUES (1)
+
+statement ok
+INSERT INTO p1la VALUES (1, 111)
+
+statement ok
+INSERT INTO p1rd VALUES (1)
+
+statement ok
+INSERT INTO p1ra VALUES (1, 222)
+
+statement error
+PRAGMA git4data_merge('pm1', 'p1l', 'p1r', 'fail')
+----
+<REGEX>:.*merge conflict.*
+
+statement ok
+PRAGMA git4data_merge('pm1', 'p1l', 'p1r', 'skip')
+
+query III
+SELECT (SELECT v FROM pm1 AT (BRANCH => 'p1l') WHERE k = 1), (SELECT count(*) FROM p1la WHERE k = 1),
+       (SELECT count(*) FROM p1ld WHERE k = 1)
+----
+111	1	1
+
+# accept takes the right's value for the conflicting key, and the key the right removed goes with it
+statement ok
+INSERT INTO p2ld VALUES (1)
+
+statement ok
+INSERT INTO p2la VALUES (1, 111)
+
+statement ok
+INSERT INTO p2rd VALUES (1)
+
+statement ok
+INSERT INTO p2ra VALUES (1, 222)
+
+statement ok
+INSERT INTO p2rd VALUES (7)
+
+statement ok
+PRAGMA git4data_merge('pm2', 'p2l', 'p2r', 'accept')
+
+query IIII
+SELECT (SELECT v FROM pm2 AT (BRANCH => 'p2l') WHERE k = 1), (SELECT count(*) FROM pm2 AT (BRANCH => 'p2l') WHERE k = 7),
+       (SELECT count(*) FROM p2la WHERE k = 1), (SELECT count(*) FROM p2ld WHERE k = 1)
+----
+222	0	1	1
+
+# Both sides making the same addition leaves one row in the target, not two: a second copy of it in the delta's
+# added table would make the branch's own read answer with a duplicate-key error.
+statement ok
+CREATE TABLE pn (k INTEGER PRIMARY KEY, v INTEGER)
+
+statement ok
+INSERT INTO pn SELECT range, range FROM range(10)
+
+statement ok
+CHECKPOINT
+
+statement ok
+CREATE TABLE pna (k INTEGER PRIMARY KEY, v INTEGER)
+
+statement ok
+CREATE TABLE pnd (k INTEGER PRIMARY KEY)
+
+statement ok
+CREATE TABLE pnra (k INTEGER PRIMARY KEY, v INTEGER)
+
+statement ok
+CREATE TABLE pnrd (k INTEGER PRIMARY KEY)
+
+statement ok
+PRAGMA git4data_create_branch('pnbase', '')
+
+statement ok
+PRAGMA git4data_create_branch('pnl', 'pnbase')
+
+statement ok
+PRAGMA git4data_create_branch('pnr', 'pnbase')
+
+statement ok
+PRAGMA git4data_bind_branch_delta('pn', 'pnl', 'pna', 'pnd')
+
+statement ok
+PRAGMA git4data_bind_branch_delta('pn', 'pnr', 'pnra', 'pnrd')
+
+statement ok
+INSERT INTO pna VALUES (100, 100)
+
+statement ok
+INSERT INTO pnra VALUES (100, 100)
+
+statement ok
+PRAGMA git4data_merge('pn', 'pnl', 'pnr', 'fail')
+
+query III
+SELECT (SELECT count(*) FROM pn AT (BRANCH => 'pnl') WHERE k = 100), (SELECT count(*) FROM pna WHERE k = 100),
+       (SELECT count(*) FROM pn AT (BRANCH => 'pnl'))
+----
+1	1	11
