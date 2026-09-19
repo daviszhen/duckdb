@@ -168,6 +168,17 @@ static bool Git4DataIntegerKeyBits(const Value &key, uint64_t &result) {
 //! otherwise the hash spares the rows that cannot be in the string set and the string decides for the rest.
 static bool Git4DataRowWasRemoved(const Git4DataRemovedKeys &removed, DataChunk &chunk,
                                   const vector<idx_t> &key_positions, DataChunk &key_hashes, idx_t row) {
+	// Nothing was removed, which is the common case: a reference with no delta reads its base as it stands.
+	// **Without this the string below is built for every row of every side even when the set is empty** -
+	// measured, two million key strings for a diff of a million-row copy against itself, which is what its
+	// 2.370 s was almost entirely made of.
+	// Nothing was removed, which is the common case: a reference with no delta reads its base as it stands.
+	// **Without this the string below is built for every row of every side even when the set is empty** -
+	// measured, two million key strings for a diff of a million-row copy against itself, which is what its
+	// 2.370 s was almost entirely made of.
+	if (removed.Empty()) {
+		return false;
+	}
 	if (removed.typed) {
 		auto key = chunk.GetValue(key_positions[0], row);
 		if (key.IsNull()) {
@@ -991,8 +1002,14 @@ struct Git4DataDiffState : public GlobalTableFunctionState {
 	unordered_set<row_t> left_rows;
 	unordered_set<row_t> right_rows;
 	//! Key values of the rows on the left, so a removed row can be paired with the added row that
-	//! replaced it. Only filled when the table has a primary key.
+	//! replaced it. Only filled when the table has a primary key - unless the key is one integer column, in
+	//! which case `left_key_bits` holds it and this map stays empty: a key vector per left row was one
+	//! allocation per row over the whole side, which is what made two reads of one table cost 2.630 s for a
+	//! million rows (increment 3s).
 	unordered_map<row_t, vector<Value>> left_keys;
+	unordered_map<row_t, uint64_t> left_key_bits;
+	//! The key's type, so a key can be built back from its bits for the rows that are reported
+	LogicalType integer_key_type;
 	//! Whether the two sides are two different tables, in which case the comparison is made on the
 	//! primary key and the scan carries every column so two rows can be told apart by value.
 	bool compare_by_key = false;
@@ -1181,6 +1198,28 @@ static string Git4DataDiffKeyString(const vector<Value> &key) {
 	return result;
 }
 
+//! The key a 64-bit pattern stands for, in the key's own type
+static Value Git4DataDiffKeyFromBits(const LogicalType &type, uint64_t bits) {
+	switch (type.id()) {
+	case LogicalTypeId::TINYINT:
+		return Value::TINYINT(NumericCast<int8_t>(static_cast<int64_t>(bits)));
+	case LogicalTypeId::SMALLINT:
+		return Value::SMALLINT(NumericCast<int16_t>(static_cast<int64_t>(bits)));
+	case LogicalTypeId::INTEGER:
+		return Value::INTEGER(NumericCast<int32_t>(static_cast<int64_t>(bits)));
+	case LogicalTypeId::BIGINT:
+		return Value::BIGINT(static_cast<int64_t>(bits));
+	case LogicalTypeId::UTINYINT:
+		return Value::UTINYINT(NumericCast<uint8_t>(bits));
+	case LogicalTypeId::USMALLINT:
+		return Value::USMALLINT(NumericCast<uint16_t>(bits));
+	case LogicalTypeId::UINTEGER:
+		return Value::UINTEGER(NumericCast<uint32_t>(bits));
+	default:
+		return Value::UBIGINT(bits);
+	}
+}
+
 //! The key bits of one row of a chunk, for a diff whose key is a single integer column
 static bool Git4DataDiffChunkKeyBits(DataChunk &chunk, idx_t row, uint64_t &bits) {
 	auto key = chunk.GetValue(0, row);
@@ -1274,6 +1313,9 @@ static unique_ptr<GlobalTableFunctionState> Git4DataDiffInit(ClientContext &cont
 	// what each side removed from its base, read once: a side that differs by a delta is not the table
 	// A single integer key gives the diff an exact bucket and removes the per-row key and string allocations
 	result->key_is_integer = bind_data.key_columns.size() == 1 && Git4DataIsIntegerKeyType(bind_data.key_types[0]);
+	if (result->key_is_integer) {
+		result->integer_key_type = bind_data.key_types[0];
+	}
 	Git4DataCollectRemovedKeys(context, bind_data.left_delta_removed, bind_data.key_types, bind_data.key_columns.size(),
 	                           bind_data.left_delta_bound, result->left_removed);
 	Git4DataCollectRemovedKeys(context, bind_data.right_delta_removed, bind_data.key_types,
@@ -1606,7 +1648,12 @@ static void Git4DataDiffFunction(ClientContext &context, TableFunctionInput &dat
 		                    [&](DataChunk &chunk, row_t row_id, idx_t row) {
 			                    state.left_rows.insert(row_id);
 			                    if (state.key_count > 0) {
-				                    state.left_keys.emplace(row_id, Git4DataDiffRowKey(chunk, state.key_count, row));
+				                    uint64_t key_bits = 0;
+				                    if (state.key_is_integer && Git4DataDiffChunkKeyBits(chunk, row, key_bits)) {
+					                    state.left_key_bits.emplace(row_id, key_bits);
+				                    } else {
+					                    state.left_keys.emplace(row_id, Git4DataDiffRowKey(chunk, state.key_count, row));
+				                    }
 			                    }
 		                    });
 		state.phase = Git4DataDiffState::Phase::RIGHT;
@@ -1625,6 +1672,12 @@ static void Git4DataDiffFunction(ClientContext &context, TableFunctionInput &dat
 		vector<pair<row_t, vector<Value>>> removed_rows;
 		for (auto row_id : state.left_rows) {
 			if (state.right_rows.find(row_id) != state.right_rows.end()) {
+				continue;
+			}
+			auto bits = state.left_key_bits.find(row_id);
+			if (bits != state.left_key_bits.end()) {
+				removed_rows.emplace_back(
+				    row_id, vector<Value> {Git4DataDiffKeyFromBits(state.integer_key_type, bits->second)});
 				continue;
 			}
 			auto key = state.left_keys.find(row_id);
@@ -1677,6 +1730,7 @@ static void Git4DataDiffFunction(ClientContext &context, TableFunctionInput &dat
 		state.left_rows.clear();
 		state.right_rows.clear();
 		state.left_keys.clear();
+		state.left_key_bits.clear();
 		state.phase = Git4DataDiffState::Phase::EMIT;
 	}
 	auto emitted = Git4DataDiffEmit(output, state.changed, state.changed_cursor, "changed");
