@@ -725,9 +725,42 @@ static Git4DataReadPlan ResolveGit4DataReferencePlan(ClientContext &context,
 	ResolveGit4DataRead(context, transaction_manager, table_name, name, kind, plan);
 	return plan;
 }
+//! Refuse a table that has a generated column, which a reference read cannot produce.
+//!
+//! **Measured, and it was a wrong answer rather than a refusal.** The engine does not store a generated column
+//! (`pragma_storage_info` lists no segment for a `g INTEGER GENERATED ALWAYS AS (v * 2)` column), so the value a
+//! caller sees is computed by the binder on top of an ordinary scan - and a reference reads a table's *stored*
+//! columns through its own row-group scan, which is not that. It used to take the column's physical index anyway
+//! and return whatever sat in that slot: the `g` above read back as the row's own index (0 and 1) while reading
+//! the table gave 20 and 40.
+//!
+//! Every surface reads through here or through the diff's bind, and **the diff alone would work**: it skips
+//! generated columns by design (`Git4DataDiffInit`), because it compares keys and compares values only to tell a
+//! changed row from one that is the same - so it never needs a column it cannot read. Refusing it anyway is the
+//! choice this file makes, because a table with a generated column that can be diffed but not read is a rule a
+//! caller has to hold in their head. What would make the whole feature work is **materializing the column**: a
+//! copy spells out its columns, and one written as an ordinary column rather than as the expression would hold
+//! real values, so a *materialized* branch could be read. That is a design decision (the copy's column is then
+//! writable, where the source's is not) and it is recorded rather than taken.
+static void Git4DataCheckNoGeneratedColumns(ClientContext &context, const string &table_name) {
+	auto &source = Git4DataResolveTable(context, table_name);
+	for (auto &column : source.GetColumns().Logical()) {
+		if (!column.Generated()) {
+			continue;
+		}
+		throw InvalidInputException(
+		    "Table \"%s\" has a generated column (%s), and a reference reads a table's stored columns through "
+		    "its own scan - a generated column is not stored, so the read would have to compute it, which is what "
+		    "the binder does and this scan does not. Make the column an ordinary one, or read the table without a "
+		    "reference.",
+		    table_name, column.Name());
+	}
+}
+
 unique_ptr<FunctionData> Git4DataSnapshotScanFun::CreateBindData(ClientContext &context, const string &table_name,
                                                                  const string &reference_name, Git4DataRefKind kind) {
 	auto result = make_uniq<Git4DataSnapshotScanBindData>();
+	Git4DataCheckNoGeneratedColumns(context, table_name);
 	result->table_name = table_name;
 	result->reference_name = reference_name;
 	result->kind = kind;
@@ -1331,6 +1364,10 @@ unique_ptr<FunctionData> Git4DataDiffFun::CreateBindData(ClientContext &context,
 	result->right_delta_bound = right_plan.delta_bound;
 
 	auto &table = Git4DataResolveTable(context, table_name);
+	// a generated column cannot be read out of a row's stored columns, and a diff reads the same table the scan
+	// would (see Git4DataCheckNoGeneratedColumns - the diff alone would work, and refusing it anyway is this
+	// file's choice)
+	Git4DataCheckNoGeneratedColumns(context, table_name);
 	Git4DataDiffPrimaryKey(table, result->key_columns, result->key_types, result->key_names);
 	// A branch with a table of its own is read as that table, and its row ids are its own. Comparing
 	// those against another table's row ids would compare numbers that mean different rows, so the

@@ -1,0 +1,100 @@
+# name: test/sql/git4data/generated_column.test
+# description: A table with a generated column, which a reference read refuses
+# group: [git4data]
+
+# A generated column is not stored: `pragma_storage_info` lists no segment for one, so the value a caller sees
+# is computed by the binder on top of an ordinary scan. A reference reads a table's *stored* columns through its
+# own row-group scan, so it cannot produce such a value - and the scan used to take the column's physical index
+# anyway and return whatever sat in that slot: measured, a `g INTEGER GENERATED ALWAYS AS (v * 2)` column read
+# back as the row's own index (0 and 1) while reading the table gave 20 and 40, which is a wrong answer with
+# nothing to say it was one. Every read refuses now, and the message names the column and says why.
+
+load {TEST_DIR}/generated_column.db
+
+statement ok
+CREATE TABLE t (k INTEGER PRIMARY KEY, v INTEGER, g INTEGER GENERATED ALWAYS AS (v * 2))
+
+statement ok
+INSERT INTO t (k, v) VALUES (1, 10), (2, 20)
+
+statement ok
+CHECKPOINT
+
+# the table itself reads fine, because the binder computes the column
+query III
+SELECT k, v, g FROM t ORDER BY k
+----
+1	10	20
+2	20	40
+
+statement ok
+PRAGMA git4data_create_snapshot('s')
+
+statement ok
+PRAGMA git4data_create_branch('b', '')
+
+# a read at a snapshot refuses, and the message names the column it cannot produce
+statement error
+SELECT * FROM t AT (SNAPSHOT => 's')
+----
+<REGEX>:.*has a generated column \("g"\).*
+
+statement error
+SELECT * FROM t AT (BRANCH => 'b')
+----
+<REGEX>:.*has a generated column \("g"\).*
+
+# Every surface that reads a reference goes through that read: a diff, a materialize, and the statement an
+# apply translates are all refused the same way rather than answered from the wrong slot.
+statement error
+SELECT * FROM git4data_diff('t', 's', 'b')
+----
+<REGEX>:.*generated column.*
+
+statement error
+PRAGMA git4data_materialize('t', 'b', 't_b')
+----
+<REGEX>:.*generated column.*
+
+# the branch is given a delta, so the apply gets as far as reading the branch's image
+statement ok
+CREATE TABLE b_add (k INTEGER PRIMARY KEY, v INTEGER, g INTEGER)
+
+statement ok
+CREATE TABLE b_del (k INTEGER PRIMARY KEY)
+
+statement ok
+PRAGMA git4data_bind_branch_delta('t', 'b', 'b_add', 'b_del')
+
+statement error
+PRAGMA git4data_apply('t', 'b', 'UPDATE t SET v = 1 WHERE k = 1')
+----
+<REGEX>:.*generated column.*
+
+statement error
+PRAGMA git4data_pick('t', 's', 'b')
+----
+<REGEX>:.*generated column.*
+
+# The feature pins rows and a commit, not a schema, so a table whose generated column has been dropped is
+# ordinary again - and the references taken while it had one read the table as it now is.
+statement ok
+ALTER TABLE t DROP COLUMN g
+
+statement ok
+PRAGMA git4data_create_snapshot('after_drop')
+
+query II
+SELECT count(*), sum(v) FROM t AT (SNAPSHOT => 'after_drop')
+----
+2	30
+
+query II
+SELECT count(*), sum(v) FROM t AT (SNAPSHOT => 's')
+----
+2	30
+
+query I
+SELECT count(*) FROM git4data_diff('t', 's', 'after_drop')
+----
+0
