@@ -54,7 +54,7 @@ PRAGMA git4data_create_branch('c', 'missing')
 statement error
 PRAGMA git4data_drop_branch('root')
 ----
-<REGEX>:.*descending.*
+<REGEX>:.*descending from it\. Drop those branches first\..*
 
 # a leaf can be dropped, and is really gone
 statement ok
@@ -184,4 +184,4 @@ SELECT (SELECT count(*) FROM fl AT (BRANCH => 'fld')),
 statement error
 PRAGMA git4data_drop_branch('flc')
 ----
-<REGEX>:.*descending.*
+<REGEX>:.*descending from it\. Drop those branches first\..*

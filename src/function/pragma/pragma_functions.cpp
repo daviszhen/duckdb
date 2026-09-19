@@ -2078,7 +2078,9 @@ static string PragmaGit4DataDropBranch(ClientContext &context, const FunctionPar
 	}
 	if (transaction_manager.branches.HasChildren(name)) {
 		// a descendant still walks through this name to reach its ancestors
-		throw InvalidInputException("Branch \"%s\" still has branches descending from it", name);
+		throw InvalidInputException("Branch \"%s\" still has branches descending from it. Drop those branches "
+		                            "first.",
+		                            name);
 	}
 	if (transaction_manager.branches.HasLineDependents(name)) {
 		// those branches read this one's storage at their fork pin, which dropping it would take away
