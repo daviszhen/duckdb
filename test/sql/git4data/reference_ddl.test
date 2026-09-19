@@ -168,6 +168,9 @@ statement ok
 INSERT INTO sw SELECT range, range FROM range(4)
 
 statement ok
+PRAGMA git4data_create_snapshot('base_snap')
+
+statement ok
 PRAGMA git4data_create_branch('swb', '')
 
 statement ok
@@ -220,6 +223,21 @@ PRAGMA git4data_apply('sw', 'swb', 'INSERT INTO sw VALUES (400, 400)')
 # the same for a table of its own
 statement error
 SELECT count(*) FROM sw AT (BRANCH => 'sws')
+----
+<REGEX>:.*has a mapping for "sw", and the table carrying that name now is not the one the mapping was made against.*
+
+# The message names the ways out that work. `git4data_materialize` was in that list and cannot work here - it
+# copies what the branch *reads*, which is the mapping this refusal is about, so it answered with this same
+# sentence (measured): a message naming a way out that refuses with the message is a loop. The two it names do
+# work: a rebind, and taking the mapping back (asserted below).
+statement error
+PRAGMA git4data_materialize('sw', 'swb', 'swb_copy')
+----
+<REGEX>:.*Bind the mapping again \(git4data_bind_branch_delta, git4data_bind_branch_table\) or take it back with git4data_unbind\..*
+
+# and a pick, which reads the branch's image, refuses the same way rather than comparing against the new table
+statement error
+PRAGMA git4data_pick('sw', 'swb', 'base_snap', 'fail')
 ----
 <REGEX>:.*has a mapping for "sw", and the table carrying that name now is not the one the mapping was made against.*
 

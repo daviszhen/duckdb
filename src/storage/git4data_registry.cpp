@@ -539,8 +539,11 @@ void Git4DataCheckSourceBoundTable(ClientContext &context, const Git4DataBranch 
 	throw InvalidInputException(
 	    "Branch \"%s\" has a mapping for \"%s\", and the table carrying that name now is not the one the "
 	    "mapping was made against - one was dropped and another was created with the same name. Bind the mapping "
-	    "again (git4data_bind_branch_delta, git4data_bind_branch_table, git4data_materialize), or take it back "
-	    "with git4data_unbind.",
+	    "again (git4data_bind_branch_delta, git4data_bind_branch_table) or take it back with git4data_unbind.",
+	    // `git4data_materialize` was in that list and cannot work here: it copies what the branch *reads*, and
+	    // what it reads is the mapping this refusal is about, so it answers with this same sentence (measured,
+	    // increment 3cc) - a message that names a way out which refuses with the message is a loop, and the first
+	    // version of this one had it.
 	    branch.name, stored_source);
 }
 
