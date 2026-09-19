@@ -225,6 +225,14 @@ CREATE VIEW git4data.v AS SELECT 1 AS a
 # MERGE INTO reaches the rows through none of INSERT, UPDATE or DELETE, and it was measured doing exactly
 # what they are refused for: `MERGE INTO git4data.snapshots ... WHEN NOT MATCHED THEN INSERT ...` put a
 # forged reference in the registry (the count below went from 1 to 2 before this was refused).
+# COPY ... FROM is a fourth way to write rows and reaches the guard through the insert path rather than
+# through a statement of its own, so it is asserted here rather than left to the INSERT case above: measured,
+# it is refused with the same message and the row count does not move.
+statement error
+COPY git4data.snapshots FROM '{TEST_DIR}/registry_tables.test' (FORMAT CSV)
+----
+<REGEX>:.*is one of the tables the reference registry is kept in.*
+
 statement error
 MERGE INTO git4data.snapshots USING (SELECT 'forged' AS name) s ON (git4data.snapshots.name = s.name) WHEN NOT MATCHED THEN INSERT VALUES ('forged', 1, TIMESTAMP '2020-01-01 00:00:00', '')
 ----
