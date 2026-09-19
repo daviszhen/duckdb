@@ -367,3 +367,66 @@ query II
 SELECT storage_source, delta_source FROM git4data_branches() WHERE branch_name = 'msb'
 ----
 ms1	ms2_renamed
+
+# The line a branch reads is not the reference it was created from: a fork from a *snapshot* of a branch carries
+# the snapshot as `parent` and that branch as its line. Measured before `line` was added: `ln_child` reported
+# `parent = ln_cap`, `has_delta = false` and no delta tables, while it read five rows through `ln_b`'s delta -
+# so the row named neither the line nor the tables, and `inherited_missing` beside it referred to a line the row
+# did not mention.
+statement ok
+CREATE TABLE ln_t (k INTEGER PRIMARY KEY, v INTEGER)
+
+statement ok
+INSERT INTO ln_t SELECT range, range FROM range(4)
+
+statement ok
+PRAGMA git4data_create_branch('ln_b', '')
+
+statement ok
+CREATE TABLE ln_add (k INTEGER PRIMARY KEY, v INTEGER)
+
+statement ok
+CREATE TABLE ln_del (k INTEGER PRIMARY KEY)
+
+statement ok
+PRAGMA git4data_bind_branch_delta('ln_t', 'ln_b', 'ln_add', 'ln_del')
+
+statement ok
+INSERT INTO ln_add VALUES (100, 100)
+
+statement ok
+PRAGMA git4data_create_snapshot('ln_cap', 'ln_b')
+
+statement ok
+PRAGMA git4data_create_branch('ln_child', 'ln_cap')
+
+query IIII
+SELECT parent, line, has_delta, inherited_missing FROM git4data_branches() WHERE branch_name = 'ln_child'
+----
+ln_cap	ln_b	false	false
+
+query II
+SELECT (SELECT count(*) FROM ln_t AT (BRANCH => 'ln_child')),
+       (SELECT count(*) FROM ln_t AT (BRANCH => 'ln_child') WHERE k = 100)
+----
+5	1
+
+# a branch that reads the source table itself has no line, and a branch made with no parent has no parent: both
+# are NULL rather than an empty string, so a caller asks "nothing here" the same way in either column
+query III
+SELECT parent IS NULL, line IS NULL, delta_added FROM git4data_branches() WHERE branch_name = 'ln_b'
+----
+true	true	ln_add
+
+# and the capture of a line says whether the tables it reads were identified in this session, which is the
+# column the branches listing already carried: here they were, and a capture of the table itself has no line and
+# therefore nothing to identify
+query III
+SELECT line, line_missing, identified FROM git4data_snapshots() WHERE snapshot_name = 'ln_cap'
+----
+ln_b	false	true
+
+query II
+SELECT line IS NULL, identified IS NULL FROM git4data_snapshots() WHERE snapshot_name = 'plain_snap'
+----
+true	true
