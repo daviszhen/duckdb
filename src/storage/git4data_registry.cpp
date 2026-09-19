@@ -529,6 +529,21 @@ bool Git4DataSourceKeyMatches(ClientContext &context, const string &stored, cons
 	       StringUtil::CIEquals(stored_name.Name().GetIdentifierName(), key_name.Name().GetIdentifierName());
 }
 
+void Git4DataCheckSourceBoundTable(ClientContext &context, const Git4DataBranch &branch, const string &stored_source,
+                                   idx_t stored_oid, idx_t requested_oid) {
+	// A rename matches by oid and a mapping read back from a file carries no oid at all, so both are left alone:
+	// what this refuses is a name that reaches a table the mapping was not made against.
+	if (stored_oid == 0 || requested_oid == 0 || stored_oid == requested_oid) {
+		return;
+	}
+	throw InvalidInputException(
+	    "Branch \"%s\" has a mapping for \"%s\", and the table carrying that name now is not the one the "
+	    "mapping was made against - one was dropped and another was created with the same name. Bind the mapping "
+	    "again (git4data_bind_branch_delta, git4data_bind_branch_table, git4data_materialize), or take it back "
+	    "with git4data_unbind.",
+	    branch.name, stored_source);
+}
+
 optional_ptr<const Git4DataStorageTable> Git4DataFindStorageTable(ClientContext &context, const Git4DataBranch &branch,
                                                                   const string &key, idx_t source_oid) {
 	for (auto &entry : branch.storage_tables) {

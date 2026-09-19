@@ -111,6 +111,20 @@ optional_ptr<const Git4DataBranchDelta> Git4DataFindDeltaTable(ClientContext &co
                                                              const Git4DataBranch &branch,
                                                          const string &key, idx_t source_oid = 0);
 
+//! Refuse a mapping whose source name now reaches a **different** table than the one it was made against.
+//!
+//! A mapping is found by the key a read names and by the oid of the table it was made against, because a rename
+//! takes the name away and leaves the oid. What the oid also says is that a name which now reaches another table
+//! is not the table the mapping was made against - and that was silent: measured (increment 3cb), after
+//! `DROP TABLE s; CREATE TABLE s (...)`, a branch bound to `s` read the *new* table as if it were the one it was
+//! given, and a write through `git4data_apply` landed in the mapping's own tables as that table's line, while the
+//! listing said `delta_source = s` and `delta_missing = false`. The mapping's own tables have refused this since
+//! they were built ("the tables carrying those names now are not them"); the source half was missing. A mapping
+//! whose oid is unknown - one read back from a file, where the catalog's ids do not survive - is not compared, so
+//! this fires only where the engine can tell.
+void Git4DataCheckSourceBoundTable(ClientContext &context, const Git4DataBranch &branch, const string &stored_source,
+                                   idx_t stored_oid, idx_t requested_oid);
+
 //! Whether a schema name is the one the registry keeps its references in
 bool Git4DataIsRegistrySchema(const string &schema);
 //! Whether a table is one the registry keeps its references in

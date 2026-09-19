@@ -154,3 +154,103 @@ query IIII
 PRAGMA git4data_limits
 ----
 -1	0	-1	0
+
+# A mapping is found by the key a read names and by the oid of the table it was made against - and the oid also
+# says when a name now reaches a **different** table. That was silent: measured before this, after
+# `DROP TABLE sw; CREATE TABLE sw (...)` a branch bound to `sw` read the new table as if it were the one it was
+# given, and a write through `git4data_apply` landed in the mapping's own tables as that table's line, while the
+# listing said `delta_source = sw` and `delta_missing = false`. The mapping's own tables have refused this since
+# they were built ("the tables carrying those names now are not them"); the source half was missing.
+statement ok
+CREATE TABLE sw (k INTEGER PRIMARY KEY, v INTEGER)
+
+statement ok
+INSERT INTO sw SELECT range, range FROM range(4)
+
+statement ok
+PRAGMA git4data_create_branch('swb', '')
+
+statement ok
+CREATE TABLE swb_add (k INTEGER PRIMARY KEY, v INTEGER)
+
+statement ok
+CREATE TABLE swb_del (k INTEGER PRIMARY KEY)
+
+statement ok
+PRAGMA git4data_bind_branch_delta('sw', 'swb', 'swb_add', 'swb_del')
+
+statement ok
+INSERT INTO swb_add VALUES (100, 100)
+
+statement ok
+PRAGMA git4data_create_branch('sws', '')
+
+statement ok
+PRAGMA git4data_materialize('sw', 'sws', 'sws_copy')
+
+query III
+SELECT (SELECT count(*) FROM sw AT (BRANCH => 'swb')),
+       (SELECT count(*) FROM sw AT (BRANCH => 'swb') WHERE k = 100),
+       (SELECT count(*) FROM sw AT (BRANCH => 'sws'))
+----
+5	1	4
+
+# the source table is dropped and another takes its name
+statement ok
+DROP TABLE sw
+
+statement ok
+CREATE TABLE sw (k INTEGER PRIMARY KEY, v INTEGER)
+
+statement ok
+INSERT INTO sw SELECT range * 10, range FROM range(3)
+
+# a read through the mapping is refused rather than answered from the new table
+statement error
+SELECT count(*) FROM sw AT (BRANCH => 'swb')
+----
+<REGEX>:.*has a mapping for "sw", and the table carrying that name now is not the one the mapping was made against.*
+
+# and so is a write through it, which used to land in the mapping's tables as the new table's line
+statement error
+PRAGMA git4data_apply('sw', 'swb', 'INSERT INTO sw VALUES (400, 400)')
+----
+<REGEX>:.*one was dropped and another was created with the same name.*
+
+# the same for a table of its own
+statement error
+SELECT count(*) FROM sw AT (BRANCH => 'sws')
+----
+<REGEX>:.*has a mapping for "sw", and the table carrying that name now is not the one the mapping was made against.*
+
+# a merge is covered by the same refusal without a check of its own: it reads both sides through the read path
+# before it lands anything - measured, removing the check from the merge's own lookup changes nothing, because
+# the diff's read of the target refuses first
+statement error
+PRAGMA git4data_merge('sw', 'swb', 'sws', 'fail')
+----
+<REGEX>:.*has a mapping for "sw", and the table carrying that name now is not the one the mapping was made against.*
+
+# the caller's way through is to take the mapping back - which is why the refusal above must not fire for
+# `git4data_unbind` itself, and it did until this was measured: the message named a way out that the check was
+# blocking. Without the mapping the branch reads the *name* again, which is the table that has it now, at the
+# branch's pin: the new table did not exist then, so there are no rows at all
+statement ok
+PRAGMA git4data_unbind('sw', 'swb')
+
+query I
+SELECT count(*) FROM sw AT (BRANCH => 'swb')
+----
+0
+
+# and the mapping can be made again against the table that has the name now
+statement ok
+PRAGMA git4data_bind_branch_delta('sw', 'swb', 'swb_add', 'swb_del')
+
+# and the mapping made again is read as of now while the base is read at the pin, so its own added row is there
+# and nothing of the new table's rows is
+query II
+SELECT (SELECT count(*) FROM sw AT (BRANCH => 'swb') WHERE k = 100),
+       (SELECT count(*) FROM sw AT (BRANCH => 'swb') WHERE k = 0)
+----
+1	0

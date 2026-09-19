@@ -506,6 +506,12 @@ static string Git4DataBranchStorageTable(ClientContext &context, const Git4DataB
 			if (!requested || entry.source_oid == 0 || entry.source_oid != requested->oid) {
 				continue;
 			}
+		} else {
+			// the name matched, which is not the same as the mapping having been made against *this* table: a
+			// table dropped and another created with its name reaches here, and a read of it would be answered
+			// from the line this branch was given for the table that is gone
+			Git4DataCheckSourceBoundTable(context, branch, entry.source, entry.source_oid,
+			                              requested ? requested->oid : 0);
 		}
 		auto storage = Git4DataResolveTableOrNull(context, entry.storage);
 		if (!storage) {
@@ -685,9 +691,14 @@ static Git4DataLineState ResolveGit4DataLineState(ClientContext &context, DuckTr
 	for (auto &delta : branch.deltas) {
 		// the source's name can change under the mapping, and its oid is what survives that
 		auto &requested = Git4DataResolveTable(context, table_name);
-		if (!Git4DataSourceKeyMatches(context, delta.source, table_name) &&
-		    (delta.source_oid == 0 || delta.source_oid != requested.oid)) {
-			continue;
+		if (!Git4DataSourceKeyMatches(context, delta.source, table_name)) {
+			if (delta.source_oid == 0 || delta.source_oid != requested.oid) {
+				continue;
+			}
+		} else {
+			// the same refusal as the storage mapping's: a name that now reaches another table is not the one
+			// this mapping was made against
+			Git4DataCheckSourceBoundTable(context, branch, delta.source, delta.source_oid, requested.oid);
 		}
 		// the delta's tables are the caller's: one that has since been dropped falls back to the base, and
 		// one that was *renamed* is found by oid, because the caller meant that table

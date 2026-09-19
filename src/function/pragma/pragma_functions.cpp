@@ -1179,6 +1179,7 @@ static string PragmaGit4DataApply(ClientContext &context, const FunctionParamete
 	auto already = Git4DataResolveTableOrNull(context, table_name);
 	auto write_key = already ? Git4DataSourceKey(*already) : table_name;
 	auto found_delta = Git4DataFindDeltaTable(context, branch, write_key, already ? already->oid : 0);
+
 	if (!found_delta) {
 		throw InvalidInputException(
 		    "Branch \"%s\" does not differ from its base by a delta for \"%s\", so a write has nowhere to be "
@@ -1576,6 +1577,14 @@ static string PragmaGit4DataMerge(ClientContext &context, const FunctionParamete
 	optional_ptr<const Git4DataBranchDelta> merge_delta;
 	if (merge_into.empty()) {
 		merge_delta = Git4DataFindDeltaTable(context, left, merge_key, merge_source.oid);
+		if (merge_delta) {
+			// The merge lands in this mapping, so it has to be the one the target was given. This is load-bearing
+			// and not covered by the read path: measured, with it removed the refusal comes from the merge's own
+			// ancestor lookup instead ("Branches ... share no ancestor to merge against"), which is a different
+			// sentence about a different problem - the read of the target never happens.
+			Git4DataCheckSourceBoundTable(context, left, merge_delta->source, merge_delta->source_oid,
+			                             merge_source.oid);
+		}
 		if (!merge_delta) {
 			throw InvalidInputException("Branch \"%s\" has neither a table of its own nor a delta for table "
 			                            "\"%s\", so a merge has nowhere to land - materialize it, or give it a "
