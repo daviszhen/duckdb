@@ -46,6 +46,37 @@ SELECT c FROM t AT (SNAPSHOT => 'pin')
 ----
 <REGEX>:.*Binder Error.*
 
+# A column added *again* under the name of the dropped one is a new column, and the reference reads it as
+# its own default - the same rule as the column added above, which is what the name makes easy to forget:
+# the values the pinned rows had under that name are gone with the column they were in.
+statement ok
+ALTER TABLE t ADD COLUMN c INTEGER DEFAULT 0
+
+query II
+SELECT v, c FROM t AT (SNAPSHOT => 'pin') WHERE k = 1
+----
+1	0
+
+# A column *type* change is the in-place path that rewrites a column's data, and the pre-images survive it:
+# the reference still reads the row it pinned, while the table reads the update that came after it. Measured,
+# because the note recorded a worry that a path which dirtied a segment would lose the pre-image; this is
+# that path, and it does not.
+statement ok
+UPDATE t SET v = 1000 WHERE k = 1
+
+statement ok
+ALTER TABLE t ALTER COLUMN v TYPE BIGINT
+
+query II
+SELECT v, c FROM t AT (SNAPSHOT => 'pin') WHERE k = 1
+----
+1	0
+
+query I
+SELECT v FROM t WHERE k = 1
+----
+1000
+
 # Dropping the table takes the rows with it. The reference stays - it is a commit, not a claim on a
 # table - and reading it says the table is not there rather than crashing.
 statement ok
