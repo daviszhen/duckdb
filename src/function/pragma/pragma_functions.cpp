@@ -1637,6 +1637,8 @@ static string PragmaGit4DataMerge(ClientContext &context, const FunctionParamete
 			                                          Timestamp::GetCurrentTimestamp(), ancestor_branch.base_line)) {
 				throw InternalException("Could not create the internal merge base reference");
 			}
+			context.client_data->git4data_added_records.push_back(
+			    "snapshot\t" + string(DuckTransactionManager::MERGE_BASE_REFERENCE));
 			base_reference = DuckTransactionManager::MERGE_BASE_REFERENCE;
 			drop_merge_base = true;
 		};
@@ -1668,6 +1670,8 @@ static string PragmaGit4DataMerge(ClientContext &context, const FunctionParamete
 			                                          Timestamp::GetCurrentTimestamp(), ancestor)) {
 				throw InternalException("Could not create the internal merge base reference");
 			}
+			context.client_data->git4data_added_records.push_back(
+			    "snapshot\t" + string(DuckTransactionManager::MERGE_BASE_REFERENCE));
 			base_reference = DuckTransactionManager::MERGE_BASE_REFERENCE;
 			drop_merge_base = true;
 		};

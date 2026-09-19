@@ -260,6 +260,15 @@ void Git4DataReconcileRegistry(AttachedDatabase &db, const vector<string> &added
 	    Git4DataAddedByThisTransaction(added, "snapshot", DuckTransactionManager::PITR_REFERENCE)) {
 		transaction_manager.ClearPitr();
 	}
+	// The reference a merge names its base with is the other one the reload cannot decide: it is created while
+	// the merge's statement is being built, so a rollback would leave it in memory. Left there it is invisible
+	// (not listed, not counted) but not inert - measured, it survives a checkpoint and a restart, and it
+	// refuses a git4data_drop_branch of the branch whose line it captured, so the branch stayed and with it
+	// the history its pin holds (1000 physical rows against a control's 500 after the same deletions). A merge
+	// that fails therefore takes its base with it.
+	if (Git4DataAddedByThisTransaction(added, "snapshot", DuckTransactionManager::MERGE_BASE_REFERENCE)) {
+		transaction_manager.snapshots.Drop(DuckTransactionManager::MERGE_BASE_REFERENCE);
+	}
 }
 
 void Git4DataLoadRegistry(AttachedDatabase &db, bool keep_internal_from_memory) {

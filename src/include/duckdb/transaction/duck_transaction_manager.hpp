@@ -355,12 +355,13 @@ public:
 	//! reference. A window of zero moves it at every checkpoint, which keeps nothing.
 	static constexpr const char *PITR_REFERENCE = "__pitr__";
 	//! The reference a merge names the ancestor's pin with, so both diffs read the state two lines parted
-	//! at. It exists for the length of one merge; a merge that fails leaves it, which is why it is not
-	//! counted against the quota and not listed - it is not a reference the user asked for. Measured: with
-	//! an ancestor that has a copy of its own - the only shape that names a pin at all, since an ancestor
-	//! without one is read as its own name - a read through this name after a refused merge returns the
-	//! state it pinned, and after a merge that completes it answers that it does not exist, because the
-	//! generated body ends in `git4data_forget_internal`. `merge.test` asserts both.
+	//! at. It exists for the length of one merge and is neither counted against the quota nor listed, since
+	//! it is not a reference the user asked for. A merge that fails takes it with it: the pragma records it
+	//! as a record of the transaction, so the rebuild that follows a rollback leaves it out (and drops it
+	//! when the registry tables are not there to rebuild from), and a merge that completes forgets it through
+	//! the generated body's closing `git4data_forget_internal`. It used to be left behind by a failed merge,
+	//! and the measurements that made that a defect are in the note: it survived a checkpoint and a restart,
+	//! and it refused a git4data_drop_branch of the branch whose line it captured.
 	static constexpr const char *MERGE_BASE_REFERENCE = "__merge_base__";
 	//! The name a read uses for the table as it stands now, through the caller's own transaction - the live
 	//! side of a diff. It is a name the registries never hold: it is resolved before they are looked in, and

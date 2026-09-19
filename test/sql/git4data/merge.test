@@ -709,10 +709,12 @@ SELECT v FROM cp AT (BRANCH => 'cpl2') WHERE a = 1 AND b = 1
 
 # The internal reference a merge names its base with is created only when the ancestor has a copy or a delta
 # of its own - an ancestor without one is read as its own name, so no pin is needed and none is made. Where it
-# is made, a merge that fails leaves it (a read through it returns the state it pinned) and a merge that
-# completes forgets it, which is what the generated body's closing `git4data_forget_internal` is for. The
-# first version of this phase used an ancestor with neither, where the reference never exists, and its two
-# assertions passed for that reason rather than for this one.
+# is made, a merge that *fails* takes it with it now, and that is a defect this note records: the reference was
+# left behind before, invisible (not listed, not counted) but not inert. It survived a checkpoint and a restart,
+# and it refused a `git4data_drop_branch` of the branch whose line it captured, telling the caller to drop the
+# snapshot first - so the branch stayed, and with it the history its pin holds (measured, 1000 physical rows
+# against a control's 500 after the same deletions). A merge that completes forgets its base through the
+# generated body's closing `git4data_forget_internal`, which this phase asserts as the other half.
 statement ok
 CREATE TABLE mbs (k INTEGER PRIMARY KEY, v INTEGER)
 
@@ -754,12 +756,13 @@ PRAGMA git4data_merge('mbs', 'mbsl', 'mbsr', 'fail')
 ----
 <REGEX>:.*merge conflict.*
 
-# the refused merge left the base behind, and it still names the state the two sides parted at
-query I
+# the refused merge left nothing behind ...
+statement error
 SELECT count(*) FROM mbs AT (SNAPSHOT => '__merge_base__')
 ----
-10
+<REGEX>:.*does not exist.*
 
+# and a merge that goes through forgets its base too, which is the generated body's closing statement
 statement ok
 PRAGMA git4data_merge('mbs', 'mbsl', 'mbsr', 'skip')
 
@@ -767,3 +770,13 @@ statement error
 SELECT count(*) FROM mbs AT (SNAPSHOT => '__merge_base__')
 ----
 <REGEX>:.*does not exist.*
+
+# and the branch the refused merge used to block can be dropped, once its children are
+statement ok
+PRAGMA git4data_drop_branch('mbsl')
+
+statement ok
+PRAGMA git4data_drop_branch('mbsr')
+
+statement ok
+PRAGMA git4data_drop_branch('mbsbase')
