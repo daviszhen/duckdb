@@ -1029,15 +1029,28 @@ struct Git4DataDiffState : public GlobalTableFunctionState {
 	vector<LogicalType> scan_types;
 	//! The number of columns after the keys, contiguous in the scan chunk, when comparing by key
 	idx_t value_count = 0;
+	//! Where a stored left row is: which block of rows holds it and which row inside that block
+	struct StoredRow {
+		idx_t block;
+		idx_t row;
+	};
 	//! A row of the left side, held under its primary key
 	struct KeyedRow {
-		vector<Value> key;
-		vector<Value> values;
+		//! Where this row's key and values are. The left side is held as the *values themselves* in flat
+		//! columns, a block of `STANDARD_VECTOR_SIZE` rows at a time, rather than as a vector of `Value`
+		//! objects per row: the peak of a million-row diff measured 286 MiB that way and 168 MiB this way
+		//! (increment 3u). A diff is what merge, pick and restore are built on, so this is the memory a
+		//! caller pays to compare two references at all.
+		StoredRow stored;
 		row_t row_id;
 		//! The key's 64-bit pattern when the key is a single integer column: the map is then bucketed by it,
 		//! which is exact, and matching a right row against it allocates nothing at all
 		uint64_t bits = 0;
 	};
+	//! The left side, in blocks: every block holds up to `STANDARD_VECTOR_SIZE` rows of the key and value
+	//! columns, and `stored_rows` is how many rows of the last block are used
+	vector<unique_ptr<DataChunk>> left_blocks;
+	idx_t stored_rows = 0;
 	unordered_map<hash_t, vector<KeyedRow>> left_by_key;
 	struct Change {
 		row_t row_id;
@@ -1228,16 +1241,71 @@ static bool Git4DataDiffChunkKeyBits(DataChunk &chunk, idx_t row, uint64_t &bits
 	return Git4DataIntegerKeyBits(key, bits);
 }
 
+//! Append one scanned row's key and value columns to the left side's blocks, and say where it landed. The
+//! columns are written one at a time into a block of `STANDARD_VECTOR_SIZE` rows, so a stored row costs the
+//! values themselves - four bytes for an INTEGER - with a row id and a key pattern beside them.
+static Git4DataDiffState::StoredRow Git4DataDiffStoreRow(Git4DataDiffState &state, ClientContext &context,
+                                                         DataChunk &chunk, idx_t row) {
+	if (state.left_blocks.empty() || state.stored_rows == STANDARD_VECTOR_SIZE) {
+		auto block = make_uniq<DataChunk>();
+		vector<LogicalType> stored_types;
+		for (idx_t i = 0; i < state.key_count + state.value_count; i++) {
+			stored_types.push_back(state.scan_types[i]);
+		}
+		block->Initialize(Allocator::Get(context), stored_types);
+		block->SetCardinality(STANDARD_VECTOR_SIZE);
+		state.left_blocks.push_back(std::move(block));
+		state.stored_rows = 0;
+	}
+	auto stored = Git4DataDiffState::StoredRow {state.left_blocks.size() - 1, state.stored_rows++};
+	auto &block = *state.left_blocks[stored.block];
+	for (idx_t i = 0; i < state.key_count + state.value_count; i++) {
+		block.SetValue(i, stored.row, chunk.GetValue(i, row));
+	}
+	return stored;
+}
+
 //! Whether the values a left row stored are the ones this row of the chunk carries. The comparison is made
-//! against the chunk rather than against a materialized row, so a matched row costs no allocation.
-static bool Git4DataDiffSameRowValues(const vector<Value> &left, DataChunk &chunk, idx_t first_value, idx_t row) {
-	for (idx_t i = 0; i < left.size(); i++) {
+//! against the chunk rather than against a materialized row, so a matched row costs no allocation, and the
+//! stored side is read out of the block the row is in.
+static bool Git4DataDiffSameStoredValues(const Git4DataDiffState &state, const Git4DataDiffState::StoredRow &stored,
+                                         DataChunk &chunk, idx_t first_value, idx_t row) {
+	auto &block = *state.left_blocks[stored.block];
+	for (idx_t i = 0; i < state.value_count; i++) {
 		auto value = chunk.GetValue(first_value + i, row);
-		if (!Value::NotDistinctFrom(left[i], value)) {
+		if (!Value::NotDistinctFrom(block.GetValue(state.key_count + i, stored.row), value)) {
 			return false;
 		}
 	}
 	return true;
+}
+
+//! The same for the key a right row built: a stored row's key is read column by column, so comparing it
+//! materializes nothing
+static bool Git4DataDiffSameStoredKey(const Git4DataDiffState &state, const Git4DataDiffState::StoredRow &stored,
+                                      const vector<Value> &key) {
+	if (state.key_count != key.size()) {
+		return false;
+	}
+	auto &block = *state.left_blocks[stored.block];
+	for (idx_t i = 0; i < key.size(); i++) {
+		if (!Value::NotDistinctFrom(block.GetValue(i, stored.row), key[i])) {
+			return false;
+		}
+	}
+	return true;
+}
+
+//! One stored row's key as the vector a change carries out. Materialized only where a change is emitted,
+//! which is why the collection phase can hold the whole side as columns.
+static vector<Value> Git4DataDiffStoredKey(const Git4DataDiffState &state, const Git4DataDiffState::StoredRow &stored) {
+	auto &block = *state.left_blocks[stored.block];
+	vector<Value> key;
+	key.reserve(state.key_count);
+	for (idx_t i = 0; i < state.key_count; i++) {
+		key.push_back(block.GetValue(i, stored.row));
+	}
+	return key;
 }
 
 static bool Git4DataDiffSameKey(const vector<Value> &left, const vector<Value> &right) {
@@ -1506,27 +1574,6 @@ static idx_t Git4DataDiffEmit(DataChunk &output, const vector<Git4DataDiffState:
 }
 
 //! The values of a row after the keys, in the order the scan carries them
-static vector<Value> Git4DataDiffRowValues(DataChunk &chunk, idx_t key_count, idx_t value_count, idx_t row) {
-	vector<Value> values;
-	values.reserve(value_count);
-	for (idx_t i = 0; i < value_count; i++) {
-		values.push_back(chunk.data[key_count + i].GetValue(row));
-	}
-	return values;
-}
-
-static bool Git4DataDiffSameValues(const vector<Value> &left, const vector<Value> &right) {
-	if (left.size() != right.size()) {
-		return false;
-	}
-	for (idx_t i = 0; i < left.size(); i++) {
-		if (!Value::NotDistinctFrom(left[i], right[i])) {
-			return false;
-		}
-	}
-	return true;
-}
-
 static void Git4DataDiffFunction(ClientContext &context, TableFunctionInput &data_p, DataChunk &output) {
 	auto &state = data_p.global_state->Cast<Git4DataDiffState>();
 	if (state.phase == Git4DataDiffState::Phase::DONE) {
@@ -1542,21 +1589,20 @@ static void Git4DataDiffFunction(ClientContext &context, TableFunctionInput &dat
 			    context, state, state.left_scan, state.left_bound, state.left_added_table, state.left_delta_bound,
 			    state.left_removed, state.left_storage, state.left_own_storage, state.left_local_open,
 			    state.left_added_open, state.left_added_local_open, [&](DataChunk &chunk, row_t row_id, idx_t row) {
-				    auto key = Git4DataDiffRowKey(chunk, state.key_count, row);
 				    Git4DataDiffState::KeyedRow entry;
-				    entry.key = key;
-				    entry.values = Git4DataDiffRowValues(chunk, state.key_count, state.value_count, row);
+				    entry.stored = Git4DataDiffStoreRow(state, context, chunk, row);
 				    entry.row_id = row_id;
 				    if (state.key_is_integer) {
 					    uint64_t bits = 0;
 					    if (Git4DataDiffChunkKeyBits(chunk, row, bits)) {
 						    // the bucket is the key itself, so a lookup in it needs no comparison at all
 						    entry.bits = bits;
-						    state.left_by_key[bits].push_back(std::move(entry));
+						    state.left_by_key[bits].push_back(entry);
 						    return;
 					    }
 				    }
-				    state.left_by_key[Git4DataDiffKeyHash(key)].push_back(std::move(entry));
+				    state.left_by_key[Git4DataDiffKeyHash(Git4DataDiffRowKey(chunk, state.key_count, row))].push_back(
+				        entry);
 			    });
 			state.phase = Git4DataDiffState::Phase::RIGHT;
 		}
@@ -1579,7 +1625,8 @@ static void Git4DataDiffFunction(ClientContext &context, TableFunctionInput &dat
 								    continue;
 							    }
 							    matched_bits.insert(bits);
-							    if (!Git4DataDiffSameRowValues(candidate.values, chunk, state.key_count, row)) {
+							    if (!Git4DataDiffSameStoredValues(state, candidate.stored, chunk, state.key_count,
+							                                      row)) {
 								    state.changed.push_back(Git4DataDiffState::Change {
 								        candidate.row_id, row_id, vector<Value> {chunk.GetValue(0, row)}});
 							    }
@@ -1595,12 +1642,11 @@ static void Git4DataDiffFunction(ClientContext &context, TableFunctionInput &dat
 				    auto entry = state.left_by_key.find(hash);
 				    if (entry != state.left_by_key.end()) {
 					    for (auto &candidate : entry->second) {
-						    if (!Git4DataDiffSameKey(candidate.key, key)) {
+						    if (!Git4DataDiffSameStoredKey(state, candidate.stored, key)) {
 							    continue;
 						    }
 						    matched.insert(Git4DataDiffKeyString(key));
-						    auto values = Git4DataDiffRowValues(chunk, state.key_count, state.value_count, row);
-						    if (!Git4DataDiffSameValues(candidate.values, values)) {
+						    if (!Git4DataDiffSameStoredValues(state, candidate.stored, chunk, state.key_count, row)) {
 							    state.changed.push_back(Git4DataDiffState::Change {candidate.row_id, row_id, key});
 						    }
 						    return;
@@ -1610,15 +1656,28 @@ static void Git4DataDiffFunction(ClientContext &context, TableFunctionInput &dat
 			    });
 			for (auto &entry : state.left_by_key) {
 				for (auto &candidate : entry.second) {
-					if (state.key_is_integer ? matched_bits.find(candidate.bits) != matched_bits.end()
-					                         : matched.find(Git4DataDiffKeyString(candidate.key)) != matched.end()) {
+					if (state.key_is_integer) {
+						if (matched_bits.find(candidate.bits) != matched_bits.end()) {
+							continue;
+						}
+						state.removed.push_back(Git4DataDiffState::Change {
+						    candidate.row_id, NO_COUNTERPART, Git4DataDiffStoredKey(state, candidate.stored)});
+						continue;
+					}
+					// the key is read out of the block once: it is what says whether the row was matched,
+					// and it is what a removal carries out
+					auto key = Git4DataDiffStoredKey(state, candidate.stored);
+					if (matched.find(Git4DataDiffKeyString(key)) != matched.end()) {
 						continue;
 					}
 					state.removed.push_back(
-					    Git4DataDiffState::Change {candidate.row_id, NO_COUNTERPART, candidate.key});
+					    Git4DataDiffState::Change {candidate.row_id, NO_COUNTERPART, std::move(key)});
 				}
 			}
 			state.left_by_key.clear();
+			// the left side is in the changes that came out of it now, so the blocks go back
+			state.left_blocks.clear();
+			state.stored_rows = 0;
 			state.phase = Git4DataDiffState::Phase::EMIT;
 		}
 		auto keyed = Git4DataDiffEmit(output, state.changed, state.changed_cursor, "changed");
