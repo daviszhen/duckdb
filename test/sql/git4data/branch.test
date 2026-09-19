@@ -125,3 +125,63 @@ query III
 PRAGMA git4data_probe('t')
 ----
 1000	0	999
+
+# A fork takes the state its parent holds, and a parent's state differs from the source at its pin whenever it
+# *reads a line* - not only when it holds something of its own. Measured before this: `fld`, forked from a branch
+# that read its own parent's delta, carried an empty `base_line` with that branch's pin and read the **raw
+# table**, so the key the line added was gone and the key it removed was back - a fork silently changing what the
+# branch it forked from reads.
+statement ok
+CREATE TABLE fl (k INTEGER PRIMARY KEY, v INTEGER)
+
+statement ok
+INSERT INTO fl SELECT range, range FROM range(5)
+
+statement ok
+PRAGMA git4data_create_branch('flb', '')
+
+statement ok
+CREATE TABLE flb_add (k INTEGER PRIMARY KEY, v INTEGER)
+
+statement ok
+CREATE TABLE flb_del (k INTEGER PRIMARY KEY)
+
+statement ok
+PRAGMA git4data_bind_branch_delta('fl', 'flb', 'flb_add', 'flb_del')
+
+statement ok
+INSERT INTO flb_add VALUES (100, 100), (101, 101)
+
+statement ok
+INSERT INTO flb_del VALUES (2)
+
+statement ok
+PRAGMA git4data_create_branch('flc', 'flb')
+
+statement ok
+PRAGMA git4data_create_branch('fld', 'flc')
+
+query IIIII
+SELECT (SELECT count(*) FROM fl AT (BRANCH => 'flb')),
+       (SELECT count(*) FROM fl AT (BRANCH => 'flb') WHERE k = 100),
+       (SELECT count(*) FROM fl AT (BRANCH => 'flb') WHERE k = 2),
+       (SELECT count(*) FROM fl AT (BRANCH => 'flc')),
+       (SELECT count(*) FROM fl AT (BRANCH => 'flc') WHERE k = 2)
+----
+6	1	0	6	0
+
+# the second hop reads what the first one reads, and its line is the branch it forked from
+query IIIII
+SELECT (SELECT count(*) FROM fl AT (BRANCH => 'fld')),
+       (SELECT count(*) FROM fl AT (BRANCH => 'fld') WHERE k = 100),
+       (SELECT count(*) FROM fl AT (BRANCH => 'fld') WHERE k = 101),
+       (SELECT count(*) FROM fl AT (BRANCH => 'fld') WHERE k = 2),
+       (SELECT line FROM git4data_branches() WHERE branch_name = 'fld')
+----
+6	1	1	0	flc
+
+# and the branch that line runs through cannot be dropped while the fork holds it
+statement error
+PRAGMA git4data_drop_branch('flc')
+----
+<REGEX>:.*descending.*

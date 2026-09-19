@@ -2005,7 +2005,15 @@ static string PragmaGit4DataCreateBranch(ClientContext &context, const FunctionP
 			// what it reads is that line as it stood then, and whatever the parent does afterwards is
 			// outside the pin. Without this the child reads the parent's base: measured, a parent whose row
 			// read 111 forked a child whose row read 1.
-			if (!parent_branch.storage_tables.empty() || !parent_branch.deltas.empty()) {
+			// **A branch reads a line it inherited too** (increment 3bu). A parent with nothing of its own but a
+			// `base_line` still reads *that* line, so its state differs from the source at its pin and the fork
+			// has to take the line as well as the pin - otherwise the child reads the source and the parent's
+			// line is lost one hop down. Measured before this: `b0` differed by a delta (adding one key, removing
+			// another), `b1` was forked from it and read that line, and `b2` forked from `b1` carried an empty
+			// `base_line` with `b1`'s pin and read the **raw table** - the key the line added was gone and the one
+			// it removed was back, silently, from a fork that was supposed to take what its parent holds.
+			if (!parent_branch.storage_tables.empty() || !parent_branch.deltas.empty() ||
+			    !parent_branch.base_line.empty()) {
 				// A fork takes the state the parent holds, not the commit the parent was pinned at,
 				// whenever the two differ - which they do the moment the parent has a table of its own or a
 				// delta. The child carries the parent as the line it started from and pins the commit it
