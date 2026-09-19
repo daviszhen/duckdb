@@ -183,8 +183,10 @@ void Git4DataReconcileRegistry(AttachedDatabase &db, const vector<string> &added
 	auto &transaction_manager = DuckTransactionManager::Get(db);
 	auto before_snapshots = transaction_manager.snapshots.List();
 	auto before_branches = transaction_manager.branches.List();
-	// the tables, if they are there, are read again; if they are not, memory is left as it is
-	Git4DataLoadRegistry(db);
+	// the tables, if they are there, are read again; if they are not, memory is left as it is. What memory
+	// holds here is the state the rollback has just taken back, so the internal references are read from the
+	// tables alone - the block's copy is the open's to use, not the reconcile's.
+	Git4DataLoadRegistry(db, false);
 	auto tables_have_snapshots = Git4DataRegistryTablesExist(db);
 
 	// What this transaction added goes: its rows went with the rollback, and a reference no disk holds must not
@@ -260,7 +262,7 @@ void Git4DataReconcileRegistry(AttachedDatabase &db, const vector<string> &added
 	}
 }
 
-void Git4DataLoadRegistry(AttachedDatabase &db) {
+void Git4DataLoadRegistry(AttachedDatabase &db, bool keep_internal_from_memory) {
 	if (!Git4DataRegistryTablesExist(db)) {
 		// an older file, whose records are in the checkpoint's metadata block: they were loaded by the block
 		// reader, and there is nothing here to read
@@ -287,7 +289,7 @@ void Git4DataLoadRegistry(AttachedDatabase &db) {
 	Git4DataSnapshot kept_pitr;
 	bool has_kept_pitr = false;
 	for (auto &snapshot : transaction_manager.snapshots.List()) {
-		if (!StringUtil::StartsWith(snapshot.name, "__")) {
+		if (!keep_internal_from_memory || !StringUtil::StartsWith(snapshot.name, "__")) {
 			continue;
 		}
 		if (snapshot.name == DuckTransactionManager::PITR_REFERENCE) {
