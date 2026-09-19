@@ -527,8 +527,8 @@ static string Git4DataBranchStorageTable(ClientContext &context, const Git4DataB
 		if (entry.oid != 0 && entry.oid != storage->oid) {
 			throw InvalidInputException(
 			    "Branch \"%s\" was given table \"%s\" for \"%s\", and the table carrying that name now is not it - "
-			    "the table it was given was dropped and another was created with the same name. Point the branch at a "
-			    "table of its own again with git4data_bind_branch_table.",
+			    "the table it was given is no longer reachable under that name. Point the branch at a table of its "
+			    "own again with git4data_bind_branch_table.",
 			    branch.name, entry.storage, table_name);
 		}
 		return resolved;
@@ -717,7 +717,8 @@ static Git4DataLineState ResolveGit4DataLineState(ClientContext &context, DuckTr
 			    (delta.removed_oid != 0 && delta.removed_oid != removed_table->oid)) {
 				throw InvalidInputException(
 				    "Branch \"%s\" was given tables \"%s\" and \"%s\" for \"%s\", and the tables carrying those names "
-				    "now are not them - one was dropped and another was created with the same name. Bind the delta "
+				    "now are not them - the tables it was given are no longer reachable under those names. Bind the "
+				    "delta "
 				    "again with git4data_bind_branch_delta.",
 				    branch.name, delta.added, delta.removed, table_name);
 			}

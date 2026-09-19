@@ -218,7 +218,7 @@ SELECT count(*) FROM sw AT (BRANCH => 'swb')
 statement error
 PRAGMA git4data_apply('sw', 'swb', 'INSERT INTO sw VALUES (400, 400)')
 ----
-<REGEX>:.*one was dropped and another was created with the same name.*
+<REGEX>:.*the table it was made against is no longer reachable under that name\..*
 
 # the same for a table of its own
 statement error
@@ -272,3 +272,89 @@ SELECT (SELECT count(*) FROM sw AT (BRANCH => 'swb') WHERE k = 100),
        (SELECT count(*) FROM sw AT (BRANCH => 'swb') WHERE k = 0)
 ----
 1	0
+
+# The three refusals about a mapping whose tables are not the ones it was given all said "one was dropped and
+# another was created with the same name", and a **rename** reaches them without any drop: measured below, the
+# source renamed and a new table taking its old name leaves the mapping following the renamed table by oid (it
+# reads five rows through `ren_s2`), while a read through the old name is refused - correctly, because that name
+# now reaches a different table, but for a reason the sentence got wrong. The claim is what changed here: what is
+# true in both shapes is that the table is no longer reachable under that name.
+statement ok
+CREATE TABLE ren_s (k INTEGER PRIMARY KEY, v INTEGER)
+
+statement ok
+INSERT INTO ren_s SELECT range, range FROM range(4)
+
+statement ok
+PRAGMA git4data_create_branch('renb', '')
+
+statement ok
+CREATE TABLE renb_add (k INTEGER PRIMARY KEY, v INTEGER)
+
+statement ok
+CREATE TABLE renb_del (k INTEGER PRIMARY KEY)
+
+statement ok
+PRAGMA git4data_bind_branch_delta('ren_s', 'renb', 'renb_add', 'renb_del')
+
+statement ok
+INSERT INTO renb_add VALUES (100, 100)
+
+statement ok
+ALTER TABLE ren_s RENAME TO ren_s2
+
+statement ok
+CREATE TABLE ren_s (k INTEGER PRIMARY KEY, v INTEGER)
+
+statement ok
+INSERT INTO ren_s VALUES (7, 7)
+
+# nothing was dropped, and the mapping followed the table it was made against
+query I
+SELECT count(*) FROM ren_s2 AT (BRANCH => 'renb')
+----
+5
+
+query II
+SELECT (SELECT count(*) FROM ren_s2 AT (BRANCH => 'renb') WHERE k = 100), (SELECT count(*) FROM ren_s)
+----
+1	1
+
+# the old name now reaches another table, so a read through it is refused - with a reason that holds
+statement error
+SELECT count(*) FROM ren_s AT (BRANCH => 'renb')
+----
+<REGEX>:.*is not the one the mapping was made against - the table it was made against is no longer reachable under that name\..*
+
+# and the same shape for the mapping's *own* tables: rename the added table and take its name
+statement ok
+CREATE TABLE ren_t (k INTEGER PRIMARY KEY, v INTEGER)
+
+statement ok
+INSERT INTO ren_t SELECT range, range FROM range(4)
+
+statement ok
+PRAGMA git4data_create_branch('rent', '')
+
+statement ok
+CREATE TABLE rent_add (k INTEGER PRIMARY KEY, v INTEGER)
+
+statement ok
+CREATE TABLE rent_del (k INTEGER PRIMARY KEY)
+
+statement ok
+PRAGMA git4data_bind_branch_delta('ren_t', 'rent', 'rent_add', 'rent_del')
+
+statement ok
+INSERT INTO rent_add VALUES (200, 200)
+
+statement ok
+ALTER TABLE rent_add RENAME TO rent_add_moved
+
+statement ok
+CREATE TABLE rent_add (k INTEGER PRIMARY KEY, v INTEGER)
+
+statement error
+SELECT count(*) FROM ren_t AT (BRANCH => 'rent')
+----
+<REGEX>:.*the tables carrying those names now are not them - the tables it was given are no longer reachable under those names\..*
