@@ -2444,12 +2444,34 @@ static unique_ptr<FunctionData> Git4DataBranchesBind(ClientContext &context, Tab
 				check_identified(ancestor);
 			}
 		}
+		// The source each mapping is *for*. A branch is a line for every source it is given, so the tables are
+		// two comma-joined lists without their sources - and a caller with a branch over two tables could not
+		// tell which added/removed pair belonged to which, nor which table a copy stood for. Measured
+		// (increment 3bs): a branch bound to two sources reported `delta_added = "s1_add, s2_add"` with the
+		// source named nowhere in the listing. Each list is in the order of the mapping list it belongs to,
+		// and the two new columns are placed beside the tables they pair with.
+		string storage_source;
+		for (auto &entry : branch.storage_tables) {
+			if (!storage_source.empty()) {
+				storage_source += ", ";
+			}
+			auto resolved = Git4DataResolveTableName(context, entry.source, entry.source_oid);
+			storage_source += resolved.empty() ? entry.source : resolved;
+		}
+		string delta_source;
+		for (auto &entry : branch.deltas) {
+			if (!delta_source.empty()) {
+				delta_source += ", ";
+			}
+			auto resolved = Git4DataResolveTableName(context, entry.source, entry.source_oid);
+			delta_source += resolved.empty() ? entry.source : resolved;
+		}
 		result->rows.push_back(
 		    {Value(branch.name), Value::UBIGINT(branch.pin), Value(branch.parent), Value::TIMESTAMP(branch.created),
 		     Value::BOOLEAN(!branch.storage_tables.empty()), Value::BOOLEAN(!branch.deltas.empty()),
 		     Value::BOOLEAN(storage_missing), Value::BOOLEAN(delta_missing), Value::BOOLEAN(identified),
-		     Value(Git4DataJoinedStorageTables(context, branch)), Value(delta_added), Value(delta_removed),
-		     Value::BOOLEAN(inherited_missing)});
+		     Value(storage_source), Value(Git4DataJoinedStorageTables(context, branch)), Value(delta_source),
+		     Value(delta_added), Value(delta_removed), Value::BOOLEAN(inherited_missing)});
 	}
 	names.emplace_back("branch_name");
 	return_types.emplace_back(LogicalType::VARCHAR);
@@ -2471,7 +2493,11 @@ static unique_ptr<FunctionData> Git4DataBranchesBind(ClientContext &context, Tab
 	//! by; after a reopen they are not, and only names and shapes are compared
 	names.emplace_back("identified");
 	return_types.emplace_back(LogicalType::BOOLEAN);
+	names.emplace_back("storage_source");
+	return_types.emplace_back(LogicalType::VARCHAR);
 	names.emplace_back("storage_table");
+	return_types.emplace_back(LogicalType::VARCHAR);
+	names.emplace_back("delta_source");
 	return_types.emplace_back(LogicalType::VARCHAR);
 	names.emplace_back("delta_added");
 	return_types.emplace_back(LogicalType::VARCHAR);

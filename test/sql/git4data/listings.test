@@ -292,3 +292,78 @@ query II
 SELECT delta_missing, inherited_missing FROM git4data_branches() WHERE branch_name = 'dlp'
 ----
 true	false
+
+# A branch is a line for *every* source it is given, so the tables it holds are comma-joined lists - and the
+# source each pair belongs to was named nowhere in the listing. Measured before `storage_source`/`delta_source`:
+# a branch holding a copy for one table and a delta for another reported `delta_added = "ms2_add"` with the one
+# it applies to absent, and on a branch over two deltas only the position of the names in `delta_added` and
+# `delta_removed` linked the two halves - nothing at all said the mapping was for that table.
+statement ok
+CREATE TABLE ms1 (k INTEGER PRIMARY KEY, v INTEGER)
+
+statement ok
+INSERT INTO ms1 SELECT range, range FROM range(4)
+
+statement ok
+CREATE TABLE ms2 (k INTEGER PRIMARY KEY, v INTEGER)
+
+statement ok
+INSERT INTO ms2 SELECT range * 10, range FROM range(4)
+
+statement ok
+PRAGMA git4data_create_branch('msb', '')
+
+statement ok
+PRAGMA git4data_materialize('ms1', 'msb', 'ms1_copy')
+
+statement ok
+CREATE TABLE ms2_add (k INTEGER PRIMARY KEY, v INTEGER)
+
+statement ok
+CREATE TABLE ms2_del (k INTEGER PRIMARY KEY)
+
+statement ok
+PRAGMA git4data_bind_branch_delta('ms2', 'msb', 'ms2_add', 'ms2_del')
+
+query IIIII
+SELECT storage_source, storage_table, delta_source, delta_added, delta_removed FROM git4data_branches()
+WHERE branch_name = 'msb'
+----
+ms1	ms1_copy	ms2	ms2_add	ms2_del
+
+# two sources, so the four names come in the order of the mappings they belong to: the source list and the table
+# list line up position by position
+statement ok
+CREATE TABLE ms3 (k INTEGER PRIMARY KEY, v INTEGER)
+
+statement ok
+INSERT INTO ms3 SELECT range * 100, range FROM range(4)
+
+statement ok
+PRAGMA git4data_create_branch('msc', '')
+
+statement ok
+CREATE TABLE ms3_add (k INTEGER PRIMARY KEY, v INTEGER)
+
+statement ok
+CREATE TABLE ms3_del (k INTEGER PRIMARY KEY)
+
+statement ok
+PRAGMA git4data_bind_branch_delta('ms2', 'msc', 'ms2_add', 'ms2_del')
+
+statement ok
+PRAGMA git4data_bind_branch_delta('ms3', 'msc', 'ms3_add', 'ms3_del')
+
+query III
+SELECT delta_source, delta_added, delta_removed FROM git4data_branches() WHERE branch_name = 'msc'
+----
+ms2, ms3	ms2_add, ms3_add	ms2_del, ms3_del
+
+# a source that has been renamed is reported as the table it is now, which is the rule the tables follow too
+statement ok
+ALTER TABLE ms2 RENAME TO ms2_renamed
+
+query II
+SELECT storage_source, delta_source FROM git4data_branches() WHERE branch_name = 'msb'
+----
+ms1	ms2_renamed
