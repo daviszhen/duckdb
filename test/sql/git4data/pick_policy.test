@@ -104,3 +104,97 @@ query I
 SELECT v FROM t WHERE k = 1
 ----
 2
+
+# A deletion is an agreement like any other: when the live table and the source have both removed the same
+# row, there is nothing left for them to differ about, so a pick under fail goes through. Measured across
+# three shapes at once, with a source of its own for each (a branch with a copy, because the source side has
+# to be changeable):
+#   both removed the same row            -> goes through, row gone
+#   live removed it, source changed it   -> refused, the two sides did not end up with the same row
+#   source removed it, live left it      -> goes through, row gone
+statement ok
+CREATE TABLE t_p1 (k INTEGER PRIMARY KEY, v INTEGER)
+
+statement ok
+CREATE TABLE t_p2 (k INTEGER PRIMARY KEY, v INTEGER)
+
+statement ok
+CREATE TABLE t_p3 (k INTEGER PRIMARY KEY, v INTEGER)
+
+statement ok
+INSERT INTO t_p1 SELECT range, range FROM range(10)
+
+statement ok
+INSERT INTO t_p2 SELECT range, range FROM range(10)
+
+statement ok
+INSERT INTO t_p3 SELECT range, range FROM range(10)
+
+statement ok
+CHECKPOINT
+
+statement ok
+PRAGMA git4data_create_branch('pb1', '')
+
+statement ok
+PRAGMA git4data_create_branch('pb2', '')
+
+statement ok
+PRAGMA git4data_create_branch('pb3', '')
+
+statement ok
+PRAGMA git4data_create_branch('ps1', '')
+
+statement ok
+PRAGMA git4data_create_branch('ps2', '')
+
+statement ok
+PRAGMA git4data_create_branch('ps3', '')
+
+statement ok
+PRAGMA git4data_materialize('t_p1', 'ps1', 'c_p1')
+
+statement ok
+PRAGMA git4data_materialize('t_p2', 'ps2', 'c_p2')
+
+statement ok
+PRAGMA git4data_materialize('t_p3', 'ps3', 'c_p3')
+
+statement ok
+DELETE FROM t_p1 WHERE k = 5
+
+statement ok
+DELETE FROM c_p1 WHERE k = 5
+
+statement ok
+DELETE FROM t_p2 WHERE k = 5
+
+statement ok
+UPDATE c_p2 SET v = 999 WHERE k = 5
+
+statement ok
+DELETE FROM c_p3 WHERE k = 5
+
+# both removed: agreement, so it goes through and the row is gone
+statement ok
+PRAGMA git4data_pick('t_p1', 'ps1', 'pb1', 'fail')
+
+query I
+SELECT count(*) FROM t_p1 WHERE k = 5
+----
+0
+
+# the live table removed the row and the source changed it: a conflict, the sides are not the same
+statement error
+PRAGMA git4data_pick('t_p2', 'ps2', 'pb2', 'fail')
+----
+<REGEX>:.*pick conflict.*
+
+# the source removed it and the live table never touched it: the removal lands
+statement ok
+PRAGMA git4data_pick('t_p3', 'ps3', 'pb3', 'fail')
+
+query I
+SELECT count(*) FROM t_p3 WHERE k = 5
+----
+0
