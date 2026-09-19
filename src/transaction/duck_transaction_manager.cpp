@@ -603,11 +603,15 @@ idx_t DuckTransactionManager::UserSnapshotCount() const {
 	return count;
 }
 
-void DuckTransactionManager::SetPitr(timestamp_t window, timestamp_t now) {
+string DuckTransactionManagerPitrLine(timestamp_t window) {
+	return StringUtil::Format("window_micros=%lld", window.value);
+}
+
+void DuckTransactionManager::SetPitr(timestamp_t window, timestamp_t now, const string &line) {
 	pitr_enabled = true;
 	pitr_window = window;
 	snapshots.Drop(PITR_REFERENCE);
-	snapshots.Create(PITR_REFERENCE, last_commit, now);
+	snapshots.Create(PITR_REFERENCE, last_commit, now, line);
 }
 
 void DuckTransactionManager::ClearPitr() {
@@ -621,17 +625,21 @@ void DuckTransactionManager::AdvancePitr(timestamp_t now) {
 	}
 	Git4DataSnapshot current;
 	if (!snapshots.Get(PITR_REFERENCE, current)) {
-		// the reference was dropped by hand - put it back at the current commit
-		snapshots.Create(PITR_REFERENCE, last_commit, now);
+		// the reference was dropped by hand - put it back at the current commit, keeping whatever the
+		// window's length was written onto it: the move below and the checkpoint both carry that line on
+		snapshots.Create(PITR_REFERENCE, last_commit, now, DuckTransactionManagerPitrLine(pitr_window));
 		return;
 	}
 	if (now.value - current.created.value < pitr_window.value) {
 		// still inside the window: leave it where it is, which is what keeps that history readable
 		return;
 	}
-	// out of the window, so the state it holds is no longer promised - move the window forward
+	// out of the window, so the state it holds is no longer promised - move the window forward, carrying the
+	// line: it is what says how long the window is, and a moved reference that lost it would come back from
+	// a crash with a window of no length at all, which keeps nothing
+	auto line = current.line;
 	snapshots.Drop(PITR_REFERENCE);
-	snapshots.Create(PITR_REFERENCE, last_commit, now);
+	snapshots.Create(PITR_REFERENCE, last_commit, now, line);
 }
 
 void DuckTransactionManager::Checkpoint(ClientContext &context, bool force) {

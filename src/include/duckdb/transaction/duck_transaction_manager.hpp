@@ -35,6 +35,14 @@ struct DuckCleanupInfo {
 	bool ScheduleCleanup() noexcept;
 };
 
+//! The line written onto the recovery window's own reference. The window's length is not a property of the
+//! reference, but the reference is the only thing about the window that a crash before a checkpoint leaves
+//! behind, so it carries the length: a session that restores it can open the same window again instead of one
+//! that has forgotten how long it was - and a window of no length keeps nothing, which is the wrong direction
+//! to be wrong in. Read back only from an internal reference, so it cannot be confused with the branch name a
+//! caller's snapshot carries in the same column.
+string DuckTransactionManagerPitrLine(timestamp_t window);
+
 //! A pinned snapshot: a named point on the commit timeline that must stay readable.
 struct Git4DataSnapshot {
 	string name;
@@ -354,7 +362,10 @@ public:
 	//! side of a diff. It is a name the registries never hold: it is resolved before they are looked in, and
 	//! the reserved prefix is what keeps a caller from taking it.
 	static constexpr const char *LIVE_REFERENCE = "__live__";
-	void SetPitr(timestamp_t window, timestamp_t now);
+	//! Open the recovery window, or move it to a new length. `line` is written onto the reference the window
+	//! holds: it carries the window's own length, so a session that restores the reference out of the log
+	//! after a crash can open the same window again rather than one that has forgotten how long it was.
+	void SetPitr(timestamp_t window, timestamp_t now, const string &line);
 	//! Put a window read from disk back in place without touching the reference it moves
 	void RestorePitr(timestamp_t window) {
 		pitr_enabled = true;

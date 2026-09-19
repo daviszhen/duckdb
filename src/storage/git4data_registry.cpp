@@ -64,14 +64,11 @@ string Git4DataEnsureRegistryTables(ClientContext &context) {
 	};
 	auto &migrating = Git4DataTransactionManager(context);
 	for (auto &snapshot : migrating.snapshots.List()) {
-		// The references the engine manages itself are not rows anywhere: they are moved from C++, so the
-		// checkpoint's registry block is their home, and copying one into these tables makes a second copy
-		// that goes stale the next time the engine moves it. Measured, a window opened before the tables
-		// existed left a row whose pin was the commit the *migration* ran at, and after a later move the
-		// reopened database read the row instead of the block - a window pointing at the wrong state.
-		if (StringUtil::StartsWith(snapshot.name, "__")) {
-			continue;
-		}
+		// The references the engine moves itself come across too. They used to be skipped, because a copy
+		// here shadowed the block the engine keeps up to date - measured, a window opened before the tables
+		// existed left a row the reopened database read instead of the block, pointing at the wrong state.
+		// The load now takes the newer of the two pins, so a stale row cannot shadow a moved reference any
+		// more, and the row is what a crash before the next checkpoint has to fall back on.
 		result += StringUtil::Format("INSERT INTO %s.%s VALUES ('%s', %llu, TIMESTAMP '%s', '%s');\n",
 		                             GIT4DATA_REGISTRY_SCHEMA, GIT4DATA_SNAPSHOTS_TABLE, escape(snapshot.name),
 		                             snapshot.pin, Timestamp::ToString(snapshot.created), escape(snapshot.line));
@@ -297,15 +294,32 @@ void Git4DataLoadRegistry(AttachedDatabase &db) {
 	    db, *snapshots, {LogicalType::VARCHAR, LogicalType::UBIGINT, LogicalType::TIMESTAMP, LogicalType::VARCHAR},
 	    [&](DataChunk &chunk, idx_t row) {
 		    auto name = chunk.GetValue(0, row).GetValue<string>();
-		    if (StringUtil::StartsWith(name, "__")) {
-			    // The engine's own references are not rows - the migration used to write them, so a file can
-			    // hold one from an older build, and the copy in the block (which the caller read at open) is
-			    // the one that is kept up to date. Reading the row here would shadow it.
-			    return;
-		    }
 		    auto pin = chunk.GetValue(1, row).GetValue<uint64_t>();
 		    auto created = chunk.GetValue(2, row).GetValue<timestamp_t>();
 		    auto line = chunk.GetValue(3, row).GetValue<string>();
+		    if (StringUtil::StartsWith(name, "__")) {
+			    // An internal reference is a row like any other, and this row is what a crash before the next
+			    // checkpoint leaves behind. The block holds the copy the engine *moves*, at a checkpoint, so
+			    // where both are there the newer pin is the one that holds: a pin only moves forward, and
+			    // keeping the older of the two would retain history the window has already let go.
+			    Git4DataSnapshot held;
+			    if (transaction_manager.snapshots.Get(name, held) && held.pin >= pin) {
+				    return;
+			    }
+			    transaction_manager.snapshots.Drop(name);
+			    // The window's own reference carries the length of the window, and this row is the only
+			    // record of it that survives a crash before a checkpoint: the block's copy is written by a
+			    // checkpoint, so a window opened and then crashed on came back as a reference with no window
+			    // around it. Read back only from an internal name, where the same column holds this line
+			    // rather than the branch a caller's snapshot captured.
+			    if (line.rfind("window_micros=", 0) == 0) {
+				    try {
+					    transaction_manager.RestorePitr(timestamp_t(std::stoll(line.substr(14))));
+				    } catch (...) {
+					    // a line that does not parse leaves the window as the block left it
+				    }
+			    }
+		    }
 		    transaction_manager.snapshots.Create(name, pin, created, line);
 	    });
 	// branches first: the two mappings are recorded against a branch, and their setters do nothing for a

@@ -277,18 +277,57 @@ static string BuildGit4DataRestore(ClientContext &context, const string &table_n
 //! Keep the last N days of history reachable without anyone taking a reference by hand: one
 //! reference is moved forward as it falls out of the window, at each checkpoint. A window of zero
 //! keeps nothing, which is what a test can rely on.
-static void PragmaGit4DataPitr(ClientContext &context, const FunctionParameters &parameters) {
+static string PragmaGit4DataPitr(ClientContext &context, const FunctionParameters &parameters) {
 	auto days = parameters.values[0].GetValue<int64_t>();
 	if (days < 0) {
 		throw InvalidInputException("A point-in-time recovery window cannot be negative");
 	}
 	constexpr int64_t MICROS_PER_DAY = 24LL * 60 * 60 * 1000000;
+	// the tables first: the migration copies what the file already holds into them, and it has to see the
+	// references that were there before this statement opened the window
+	auto result = Git4DataEnsureRegistryTables(context);
 	auto &transaction_manager = GetGit4DataTransactionManager(context);
-	transaction_manager.SetPitr(timestamp_t(days * MICROS_PER_DAY), Timestamp::GetCurrentTimestamp());
+	auto created = Timestamp::GetCurrentTimestamp();
+	auto window = timestamp_t(days * MICROS_PER_DAY);
+	// the reference carries the length of the window it belongs to: it is the one thing about the window that
+	// a crash before the next checkpoint leaves behind, and a restored window that has forgotten its length
+	// would keep nothing at all
+	transaction_manager.SetPitr(window, created, DuckTransactionManagerPitrLine(window));
+	// The window's reference is a row like any other reference now, written with ordinary DML in the
+	// caller's transaction, so it reaches the log. It used to be the checkpoint's registry block alone,
+	// which meant a crash before the next checkpoint lost the whole window: measured, a window opened,
+	// written to, and killed without a checkpoint came back as reference_held = false and the history it
+	// promised was then reclaimed. The engine still moves the reference *at* a checkpoint, where there is
+	// no transaction to write a row in, so the block keeps the newer pin and the load takes the newer of
+	// the two.
+	Git4DataSnapshot held;
+	if (!transaction_manager.snapshots.Get(DuckTransactionManager::PITR_REFERENCE, held)) {
+		return result;
+	}
+	auto escape = [](const string &value) {
+		return StringUtil::Replace(value, "'", "''");
+	};
+	auto name = string(DuckTransactionManager::PITR_REFERENCE);
+	context.client_data->git4data_added_records.push_back("snapshot\t" + name);
+	result += StringUtil::Format("DELETE FROM %s.%s WHERE name = '%s';\n", GIT4DATA_REGISTRY_SCHEMA,
+	                             GIT4DATA_SNAPSHOTS_TABLE, escape(name));
+	result += StringUtil::Format("INSERT INTO %s.%s VALUES ('%s', %llu, TIMESTAMP '%s', '%s');",
+	                             GIT4DATA_REGISTRY_SCHEMA, GIT4DATA_SNAPSHOTS_TABLE, escape(name), held.pin,
+	                             Timestamp::ToString(held.created), escape(held.line));
+	return result;
 }
 
-static void PragmaGit4DataPitrOff(ClientContext &context, const FunctionParameters &parameters) {
+static string PragmaGit4DataPitrOff(ClientContext &context, const FunctionParameters &parameters) {
 	GetGit4DataTransactionManager(context).ClearPitr();
+	// and the row goes with it, or the next open would bring the window back on a database that turned it off
+	if (!Git4DataRegistryTablesThere(context)) {
+		return string();
+	}
+	auto escape = [](const string &value) {
+		return StringUtil::Replace(value, "'", "''");
+	};
+	return StringUtil::Format("DELETE FROM %s.%s WHERE name = '%s';", GIT4DATA_REGISTRY_SCHEMA,
+	                          GIT4DATA_SNAPSHOTS_TABLE, escape(string(DuckTransactionManager::PITR_REFERENCE)));
 }
 
 static string PragmaGit4DataPitrState(ClientContext &context, const FunctionParameters &parameters) {
