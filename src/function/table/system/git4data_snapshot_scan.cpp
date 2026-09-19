@@ -509,6 +509,23 @@ static void Git4DataCheckDeltaColumns(TableCatalogEntry &source, TableCatalogEnt
 	}
 }
 
+//! Whether one table's columns are the first columns of another's: the same names and types, in the same order,
+//! and fewer of them. That is the shape a copy has when the table it was made from gained a column afterwards,
+//! and it is a different thing from a table of a different shape - there the columns a read maps by position
+//! really would be someone else's.
+static bool Git4DataDiffColumnsArePrefix(const vector<string> &names, const vector<LogicalType> &types,
+                                         const vector<string> &other_names, const vector<LogicalType> &other_types) {
+	if (names.size() >= other_names.size() || names.size() != types.size()) {
+		return false;
+	}
+	for (idx_t i = 0; i < names.size(); i++) {
+		if (names[i] != other_names[i] || types[i] != other_types[i]) {
+			return false;
+		}
+	}
+	return true;
+}
+
 static Git4DataLineState ResolveGit4DataLineState(ClientContext &context, DuckTransactionManager &transaction_manager,
                                                   const string &table_name, const Git4DataBranch &branch,
                                                   VisibilityBound at) {
@@ -525,8 +542,22 @@ static Git4DataLineState ResolveGit4DataLineState(ClientContext &context, DuckTr
 		{
 			auto &source_entry = Git4DataResolveTable(context, table_name);
 			auto &storage_entry = Git4DataResolveTable(context, storage);
-			if (storage_entry.GetColumns().GetColumnNames() != source_entry.GetColumns().GetColumnNames() ||
-			    storage_entry.GetColumns().GetColumnTypes() != source_entry.GetColumns().GetColumnTypes()) {
+			auto storage_names = storage_entry.GetColumns().GetColumnNames();
+			auto source_names = source_entry.GetColumns().GetColumnNames();
+			auto storage_types = storage_entry.GetColumns().GetColumnTypes();
+			auto source_types = source_entry.GetColumns().GetColumnTypes();
+			if (storage_names != source_names || storage_types != source_types) {
+				if (Git4DataDiffColumnsArePrefix(storage_names, storage_types, source_names, source_types)) {
+					// The table has the source's columns and not the ones added since: nothing is swapped,
+					// the read is simply short of them. What it needs is the columns themselves, which the
+					// caller can add to it and keep the branch's own line - the table is theirs.
+					throw InvalidInputException(
+					    "Branch \"%s\" reads table \"%s\" as its own line for \"%s\", which has columns that "
+					    "table does not, so a read of the branch would be short of them. Add them to it (ALTER "
+					    "TABLE \"%s\" ADD COLUMN ...), or copy the source's current shape with another "
+					    "git4data_materialize.",
+					    branch.name, storage, table_name, storage);
+				}
 				throw InvalidInputException(
 				    "Branch \"%s\" reads table \"%s\" as its own line for \"%s\", and that table no longer has "
 				    "that table's columns in that order - a read maps them by position, so the values would be "

@@ -306,3 +306,56 @@ query I
 SELECT v FROM bi_src AT (BRANCH => 'bi') WHERE k = 1
 ----
 777
+
+# ---------------------------------------------------------------------------------------------------------
+# A storage table that outlived its columns
+# ---------------------------------------------------------------------------------------------------------
+
+# The source gains a column after the copy was taken. The copy is the caller's own table, so this is allowed -
+# and the *read* is where it has to be caught, because the columns are mapped by position.
+statement ok
+CREATE TABLE late_src (k INTEGER PRIMARY KEY, v INTEGER)
+
+statement ok
+INSERT INTO late_src VALUES (1, 10), (2, 20)
+
+statement ok
+CHECKPOINT
+
+statement ok
+PRAGMA git4data_create_branch('late', '')
+
+statement ok
+PRAGMA git4data_materialize('late_src', 'late', 'late_copy')
+
+statement ok
+ALTER TABLE late_src ADD COLUMN w INTEGER DEFAULT 9
+
+# The message has to name something that works. It used to say "give the branch a table of its own again with
+# git4data_bind_branch_table" - and that table is short of a column, so binding it is refused for the same
+# reason: measured, the remedy in the message was one the engine itself rejects.
+statement error
+SELECT * FROM late_src AT (BRANCH => 'late')
+----
+<REGEX>:.*has columns that table does not.*ALTER TABLE "late_copy" ADD COLUMN.*
+
+# and what it names is enough: the table is the caller's, and adding the column to it is all it takes
+statement ok
+ALTER TABLE late_copy ADD COLUMN w INTEGER DEFAULT 9
+
+query III
+SELECT k, v, w FROM late_src AT (BRANCH => 'late') ORDER BY k
+----
+1	10	9
+2	20	9
+
+# A table of a *different* shape is the other case, and there the position-mapping warning is the true one.
+# (Not a dropped-and-recreated table: the branch records the oid it was given, and a table carrying the same
+# name is caught as that instead - measured, and its own message says so.)
+statement ok
+ALTER TABLE late_copy RENAME COLUMN k TO kk
+
+statement error
+SELECT * FROM late_src AT (BRANCH => 'late')
+----
+<REGEX>:.*columns in that order.*someone else's.*
