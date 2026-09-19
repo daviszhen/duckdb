@@ -571,6 +571,17 @@ void Git4DataCheckRegistrySchema(const string &schema) {
 	    schema);
 }
 
+void Git4DataCheckRegistryCreate(const string &schema, const string &table) {
+	if (!StringUtil::CIEquals(schema, GIT4DATA_REGISTRY_SCHEMA)) {
+		return;
+	}
+	throw InvalidInputException(
+	    "\"%s\" is in the schema the reference registry is kept in, and that schema is the feature's own: its "
+	    "tables are how a reference's state is kept, so a statement cannot create one there. Use the git4data_* "
+	    "pragmas.",
+	    table);
+}
+
 void Git4DataCheckRegistryTarget(const string &schema, const string &table) {
 	if (!StringUtil::CIEquals(schema, GIT4DATA_REGISTRY_SCHEMA)) {
 		return;

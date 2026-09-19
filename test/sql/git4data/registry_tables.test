@@ -199,6 +199,24 @@ ALTER TABLE git4data.snapshots ADD COLUMN extra INTEGER
 ----
 <REGEX>:.*is the schema the reference registry is kept in.*
 
+# And creating there is refused too, which DROP and ALTER were standing in for: measured,
+# `CREATE OR REPLACE TABLE git4data.snapshots (a INTEGER)` replaced the table and every reference with it -
+# the count below read 0 - and a caller's own table in the feature's schema went through as well.
+statement error
+CREATE TABLE git4data.mine (x INTEGER)
+----
+<REGEX>:.*is in the schema the reference registry is kept in.*
+
+statement error
+CREATE OR REPLACE TABLE git4data.snapshots (a INTEGER)
+----
+<REGEX>:.*is in the schema the reference registry is kept in.*
+
+statement error
+CREATE TABLE git4data.copy AS SELECT 1 AS a
+----
+<REGEX>:.*is in the schema the reference registry is kept in.*
+
 # and the references are untouched by all of it
 query II
 SELECT (SELECT count(*) FROM git4data.snapshots), (SELECT count(*) FROM git4data.branches)

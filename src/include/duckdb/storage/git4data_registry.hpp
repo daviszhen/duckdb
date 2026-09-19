@@ -59,6 +59,11 @@ void Git4DataCheckRegistryWrite(const TableCatalogEntry &table);
 //! The same for a schema a statement names: dropping the schema the registry lives in is another way to take
 //! every reference at once.
 void Git4DataCheckRegistrySchema(const string &schema);
+//! Throw when a statement creates a table in the schema the registry is kept in. DROP and ALTER are not the
+//! only ways to take it apart: measured, `CREATE OR REPLACE TABLE git4data.snapshots (a INTEGER)` replaced the
+//! table and every reference with it, and `CREATE TABLE git4data.mine (...)` put a caller's table in the
+//! feature's own schema - neither goes through the guard the write, drop and alter statements have.
+void Git4DataCheckRegistryCreate(const string &schema, const string &table);
 //! Rebuild the in-memory registries after a rollback. When the tables are there they are read again; when
 //! they are not and the file's records never came from them, the rollback took the tables with it - the very
 //! first reference of a database creates them in the same transaction - so the registries are emptied rather

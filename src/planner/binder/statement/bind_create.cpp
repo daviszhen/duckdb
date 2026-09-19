@@ -946,6 +946,13 @@ BoundStatement Binder::Bind(CreateStatement &stmt) {
 			}
 			break;
 		}
+		// The registry's schema is the feature's own, and creating over one of its tables is another way to
+		// take every reference at once - a way that goes through neither DROP nor ALTER
+		if (!internal_statement) {
+			auto &create_info = stmt.info->Cast<CreateTableInfo>();
+			Git4DataCheckRegistryCreate(create_info.GetQualifiedName().Schema().GetIdentifierName(),
+			                            create_info.GetQualifiedName().Name().GetIdentifierName());
+		}
 		auto bound_info = BindCreateTableInfo(std::move(stmt.info));
 		auto root = std::move(bound_info->query);
 
