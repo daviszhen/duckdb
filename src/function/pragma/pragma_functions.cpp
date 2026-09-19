@@ -1784,6 +1784,7 @@ static string PragmaGit4DataMerge(ClientContext &context, const FunctionParamete
 	string key_list_both;
 	string key_match_xy;
 	string key_match_by;
+	string key_match_x_by;
 	for (idx_t i = 0; i < key_columns.size(); i++) {
 		auto quoted = KeywordHelper::WriteOptionallyQuoted(key_columns[i]);
 		if (i > 0) {
@@ -1791,11 +1792,13 @@ static string PragmaGit4DataMerge(ClientContext &context, const FunctionParamete
 			key_list_both += ", ";
 			key_match_xy += " AND ";
 			key_match_by += " AND ";
+			key_match_x_by += " AND ";
 		}
 		key_list += quoted;
 		key_list_both += alias_both_rows + "." + quoted;
 		key_match_xy += alias_x + "." + quoted + " = " + alias_y + "." + quoted;
 		key_match_by += alias_y + "." + quoted + " = " + alias_both_rows + "." + quoted;
+		key_match_x_by += alias_x + "." + quoted + " = " + alias_both_rows + "." + quoted;
 	}
 	auto quoted_table = Git4DataTableSQLName(table_name);
 	auto quoted_into = Git4DataTableSQLName(merge_into);
@@ -1810,10 +1813,17 @@ static string PragmaGit4DataMerge(ClientContext &context, const FunctionParamete
 	    "CREATE OR REPLACE TEMP TABLE %s AS WITH %s AS (SELECT %s FROM %s), "
 	    "%s AS (SELECT %s FROM %s), %s AS (SELECT %s FROM %s INTERSECT SELECT %s FROM "
 	    "%s) SELECT %s FROM %s %s WHERE NOT EXISTS (SELECT 1 FROM (SELECT * FROM %s) "
-	    "%s JOIN (SELECT * FROM %s) %s ON (%s) WHERE %s AND (%s));\n",
+	    "%s JOIN (SELECT * FROM %s) %s ON (%s) WHERE %s AND (%s)) "
+	    // A key that both sides *removed* is agreement, not a conflict: the comparison above cannot say so,
+	    // because there is no row on either side to compare, and its NOT EXISTS is then true - measured, two
+	    // sides that had deleted the same row were refused as a conflict although nothing was left to
+	    // disagree about. A key both sides changed is only a conflict if a row survives on one of them.
+	    "AND (EXISTS (SELECT 1 FROM (SELECT * FROM %s) %s WHERE %s) OR EXISTS (SELECT 1 FROM (SELECT * FROM %s) "
+	    "%s WHERE %s));\n",
 	    conflict_name, alias_left, key_list, diff_left, alias_right, key_list, diff_right, alias_both, key_list,
 	    alias_left, key_list, alias_right, key_list_both, alias_both, alias_both_rows, quoted_into, alias_x,
-	    right_image, alias_y, key_match_xy, key_match_by, BuildGit4DataRowComparison(table, alias_x, alias_y));
+	    right_image, alias_y, key_match_xy, key_match_by, BuildGit4DataRowComparison(table, alias_x, alias_y),
+	    right_image, alias_x, key_match_x_by, quoted_into, alias_y, key_match_by);
 	if (policy == "fail") {
 		result += StringUtil::Format("SELECT CASE WHEN EXISTS (SELECT 1 FROM %s) THEN error('merge conflict: use "
 		                             "policy skip or accept, or resolve it first') ELSE 0 END;\n",

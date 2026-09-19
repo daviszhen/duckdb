@@ -235,3 +235,72 @@ query I
 SELECT v FROM tx_left_t WHERE k = 1
 ----
 111
+
+# Both sides removing the same row is agreement, not a conflict - there is no row left on either side for
+# them to disagree about. Measured before this was fixed: that case was refused with the conflict message,
+# so a caller with nothing to resolve was told to resolve something.
+statement ok
+CREATE TABLE g (k INTEGER PRIMARY KEY, v INTEGER)
+
+statement ok
+INSERT INTO g SELECT range, range FROM range(10)
+
+statement ok
+CHECKPOINT
+
+statement ok
+PRAGMA git4data_create_branch('ga', '')
+
+statement ok
+PRAGMA git4data_create_branch('ga1', 'ga')
+
+statement ok
+PRAGMA git4data_create_branch('ga2', 'ga')
+
+statement ok
+PRAGMA git4data_materialize('g', 'ga1', 'g_ga1')
+
+statement ok
+PRAGMA git4data_materialize('g', 'ga2', 'g_ga2')
+
+statement ok
+DELETE FROM g_ga1 WHERE k = 5
+
+statement ok
+DELETE FROM g_ga2 WHERE k = 5
+
+statement ok
+PRAGMA git4data_merge('g', 'ga1', 'ga2', 'fail')
+
+query I
+SELECT count(*) FROM g AT (BRANCH => 'ga1')
+----
+9
+
+# and the rule is not wider than that: removing the row on one side while the other changes it is still a
+# conflict, because the two sides did not end up with the same row
+statement ok
+PRAGMA git4data_create_branch('gb', '')
+
+statement ok
+PRAGMA git4data_create_branch('gb1', 'gb')
+
+statement ok
+PRAGMA git4data_create_branch('gb2', 'gb')
+
+statement ok
+PRAGMA git4data_materialize('g', 'gb1', 'g_gb1')
+
+statement ok
+PRAGMA git4data_materialize('g', 'gb2', 'g_gb2')
+
+statement ok
+DELETE FROM g_gb1 WHERE k = 6
+
+statement ok
+UPDATE g_gb2 SET v = 999 WHERE k = 6
+
+statement error
+PRAGMA git4data_merge('g', 'gb1', 'gb2', 'fail')
+----
+<REGEX>:.*merge conflict.*
