@@ -430,3 +430,68 @@ query II
 SELECT line IS NULL, identified IS NULL FROM git4data_snapshots() WHERE snapshot_name = 'plain_snap'
 ----
 true	true
+
+# `line` says which line a branch inherited, not that every read of it comes from that line: a mapping of its
+# own is read *instead of* the line for the source it covers, and which sources a branch is read through is the
+# caller's argument at read time - so the columns beside `line` (storage_source, storage_table, delta_source,
+# delta_added, delta_removed) are what say where the rest comes from. Measured: `ownline`, forked from a delta
+# branch, read five rows through the line; after binding a table of its own it read **two rows - only that
+# table** - while `line` still named the branch it inherited from.
+statement ok
+CREATE TABLE ol (k INTEGER PRIMARY KEY, v INTEGER)
+
+statement ok
+INSERT INTO ol SELECT range, range FROM range(5)
+
+statement ok
+PRAGMA git4data_create_branch('olb', '')
+
+statement ok
+CREATE TABLE olb_add (k INTEGER PRIMARY KEY, v INTEGER)
+
+statement ok
+CREATE TABLE olb_del (k INTEGER PRIMARY KEY)
+
+statement ok
+PRAGMA git4data_bind_branch_delta('ol', 'olb', 'olb_add', 'olb_del')
+
+statement ok
+INSERT INTO olb_add VALUES (100, 100)
+
+statement ok
+INSERT INTO olb_del VALUES (2)
+
+statement ok
+PRAGMA git4data_create_branch('ownline', 'olb')
+
+query IIII
+SELECT line, has_storage, storage_table,
+       (SELECT count(*) FROM ol AT (BRANCH => 'ownline'))
+FROM git4data_branches() WHERE branch_name = 'ownline'
+----
+olb	false	(empty)	5
+
+statement ok
+CREATE TABLE ownline_copy (k INTEGER PRIMARY KEY, v INTEGER)
+
+statement ok
+INSERT INTO ownline_copy VALUES (7, 700), (8, 800)
+
+statement ok
+PRAGMA git4data_bind_branch_table('ol', 'ownline', 'ownline_copy')
+
+# the line is still what it inherited, and the read is its own table - both facts are in the row
+query IIII
+SELECT line, storage_source, storage_table,
+       (SELECT count(*) FROM ol AT (BRANCH => 'ownline'))
+FROM git4data_branches() WHERE branch_name = 'ownline'
+----
+olb	ol	ownline_copy	2
+
+query IIII
+SELECT (SELECT count(*) FROM ol AT (BRANCH => 'ownline') WHERE k = 100),
+       (SELECT count(*) FROM ol AT (BRANCH => 'ownline') WHERE k = 2),
+       (SELECT count(*) FROM ol AT (BRANCH => 'ownline') WHERE k = 7),
+       (SELECT count(*) FROM ol AT (BRANCH => 'olb'))
+----
+0	0	1	5

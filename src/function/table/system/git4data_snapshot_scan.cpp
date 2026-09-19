@@ -2490,12 +2490,21 @@ static unique_ptr<FunctionData> Git4DataBranchesBind(ClientContext &context, Tab
 			auto resolved = Git4DataResolveTableName(context, entry.source, entry.source_oid);
 			delta_source += resolved.empty() ? entry.source : resolved;
 		}
-		// The line this branch reads, which is not the reference it was created from: a fork from a *snapshot* of
-		// a branch carries the snapshot as `parent` and that branch as its line. Measured (increment 3bt): a child
-		// forked from a snapshot of `b` reported `parent = cap`, `has_delta = false` and no delta tables, while it
-		// read five rows through `b`'s delta - so the row named neither the line nor the tables, and the
-		// `inherited_missing` column beside it referred to a line the row did not mention. NULL when the branch
-		// reads the source table itself, as the snapshots listing leaves its own `line` NULL.
+		// The line this branch **inherited**, which is not the reference it was created from: a fork from a
+		// *snapshot* of a branch carries the snapshot as `parent` and that branch as its line. Measured (increment
+		// 3bt): a child forked from a snapshot of `b` reported `parent = cap`, `has_delta = false` and no delta
+		// tables, while it read five rows through `b`'s delta - so the row named neither the line nor the tables,
+		// and the `inherited_missing` column beside it referred to a line the row did not mention. NULL when there
+		// is no such line, as the snapshots listing leaves its own `line` NULL.
+		//
+		// **What it is not, measured in increment 3bw**: it is not a claim that every read of this branch comes
+		// from that line. A branch's own mapping for a source is read *instead of* the line for that source (the
+		// resolver takes the copy or the delta first), and which sources a branch is read through is the caller's
+		// argument at read time, so no branch-wide column can say "for which sources the line is still live". The
+		// columns beside this one are what answer that: `storage_source`, `storage_table`, `delta_source`,
+		// `delta_added` and `delta_removed` name the sources it holds something of its own for. Measured: `b1`,
+		// forked from a delta branch, read 5 rows through the line; after `git4data_bind_branch_table('t','b1',
+		// 'b1_own')` it read **2 rows - only its own copy** - while this column still said `b0`.
 		Value line_value(LogicalType::VARCHAR);
 		if (!branch.base_line.empty()) {
 			line_value = Value(branch.base_line);
