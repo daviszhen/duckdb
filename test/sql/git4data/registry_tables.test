@@ -76,9 +76,13 @@ PRAGMA git4data_forget_internal('rt_only')
 ----
 <REGEX>:.*is not one of the references this feature manages for itself.*
 
-# A branch and the tables it reads are rows too, and they are written the same way - so they survive a
-# restart made *without* a checkpoint, which is the case the metadata block could not cover: it is written
-# by a checkpoint, and a session that only adds a branch has nothing else to make one run.
+# A branch and the tables it reads are rows too, and they are written the same way, so they survive a restart.
+# **What this restart does not stage is the *log* path**: the runner closes the database, and a close
+# checkpoints (measured: the file holds the copy's name afterwards and no log is left), so what carries these
+# rows here is the file. The case the metadata block could not cover - a session whose only change is a
+# reference, left in the log with nothing to make a checkpoint run - is staged by `git4data-crash-durability-
+# check.sh` in the workspace, which turns the shutdown checkpoint off and shows the file holding neither the
+# reference nor the copy while the log holds both.
 statement ok
 CREATE TABLE rt2 (k INTEGER PRIMARY KEY, v INTEGER)
 
