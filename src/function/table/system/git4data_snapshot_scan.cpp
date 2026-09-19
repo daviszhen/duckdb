@@ -2189,11 +2189,29 @@ static unique_ptr<FunctionData> Git4DataBranchesBind(ClientContext &context, Tab
 				delta_missing = true;
 			}
 		}
-		result->rows.push_back({Value(branch.name), Value::UBIGINT(branch.pin), Value(branch.parent),
-		                        Value::TIMESTAMP(branch.created), Value::BOOLEAN(!branch.storage_tables.empty()),
-		                        Value::BOOLEAN(!branch.deltas.empty()), Value::BOOLEAN(storage_missing),
-		                        Value::BOOLEAN(delta_missing), Value(Git4DataJoinedStorageTables(context, branch)),
-		                        Value(delta_added), Value(delta_removed)});
+		// Whether the tables this branch reads were identified in this session. The ids that follow a renamed
+		// table and refuse a replaced one belong to a *catalog*, and a catalog's ids do not survive a reopen
+		// (`catalog_entry.cpp:18` takes them from a process-wide counter, and the catalog is written without
+		// them): a mapping read back from disk is compared by name and shape instead, and that cannot tell a
+		// table from another table of the same name and shape created while the database was closed. It is a
+		// column rather than a footnote because it is the difference between a wrong answer and a refusal - a
+		// branch with no mappings has nothing to identify and says true.
+		bool identified = true;
+		for (auto &entry : branch.storage_tables) {
+			if (entry.oid == 0) {
+				identified = false;
+			}
+		}
+		for (auto &entry : branch.deltas) {
+			if (entry.added_oid == 0 || entry.removed_oid == 0) {
+				identified = false;
+			}
+		}
+		result->rows.push_back(
+		    {Value(branch.name), Value::UBIGINT(branch.pin), Value(branch.parent), Value::TIMESTAMP(branch.created),
+		     Value::BOOLEAN(!branch.storage_tables.empty()), Value::BOOLEAN(!branch.deltas.empty()),
+		     Value::BOOLEAN(storage_missing), Value::BOOLEAN(delta_missing), Value::BOOLEAN(identified),
+		     Value(Git4DataJoinedStorageTables(context, branch)), Value(delta_added), Value(delta_removed)});
 	}
 	names.emplace_back("branch_name");
 	return_types.emplace_back(LogicalType::VARCHAR);
@@ -2210,6 +2228,10 @@ static unique_ptr<FunctionData> Git4DataBranchesBind(ClientContext &context, Tab
 	names.emplace_back("storage_missing");
 	return_types.emplace_back(LogicalType::BOOLEAN);
 	names.emplace_back("delta_missing");
+	return_types.emplace_back(LogicalType::BOOLEAN);
+	//! Whether the ids of the tables it reads are known in this session, which is what a replacement is caught
+	//! by; after a reopen they are not, and only names and shapes are compared
+	names.emplace_back("identified");
 	return_types.emplace_back(LogicalType::BOOLEAN);
 	names.emplace_back("storage_table");
 	return_types.emplace_back(LogicalType::VARCHAR);

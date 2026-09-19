@@ -1,0 +1,90 @@
+# name: test/sql/git4data/storage_swap.test
+# description: What a branch reads when the table it was given is replaced, in the session and after a reopen
+# group: [git4data]
+
+# The table a branch was given is the caller's own, and the feature records the *id* of the table it was
+# given - which is what follows a renamed table and refuses a replacement. A catalog's ids come from a
+# process-wide counter and are not written to the file, so a mapping read back from disk is compared by name
+# and shape instead, and a table of the same name and shape that the caller created while the database was
+# closed is indistinguishable from the one the mapping meant. That boundary is asserted here rather than
+# described, because it is the difference between a refusal and a wrong answer.
+
+load {TEST_DIR}/storage_swap.db
+
+statement ok
+CREATE TABLE t (k INTEGER PRIMARY KEY, v INTEGER)
+
+statement ok
+INSERT INTO t VALUES (1, 10), (2, 20)
+
+statement ok
+CHECKPOINT
+
+statement ok
+PRAGMA git4data_create_branch('b', '')
+
+statement ok
+PRAGMA git4data_materialize('t', 'b', 't_b')
+
+query I
+SELECT sum(v) FROM t AT (BRANCH => 'b')
+----
+30
+
+# the mapping was made here, so the ids of the tables it names are known
+query II
+SELECT identified, storage_missing FROM git4data_branches() WHERE branch_name = 'b'
+----
+true	false
+
+# the caller drops the table the branch was given and puts another one of the same name and shape there
+statement ok
+DROP TABLE t_b
+
+statement ok
+CREATE TABLE t_b (k INTEGER PRIMARY KEY, v INTEGER)
+
+statement ok
+INSERT INTO t_b VALUES (1, 999), (2, 999)
+
+# the id it was given is known, so the replacement is caught - a table that is not the one it was given,
+# whatever it is called
+statement error
+SELECT sum(v) FROM t AT (BRANCH => 'b')
+----
+<REGEX>:.*the table carrying that name now is not it.*
+
+# After a reopen the ids are gone, and the listing says so: the mapping is known by name and shape only, and
+# the table standing under that name is what the branch reads - here the one the caller created above, whose
+# two rows hold 999 each. It is a boundary and not a defect: the tables are the caller's, and what the branch
+# reads is the table it was pointed at by name.
+restart
+
+query II
+SELECT identified, storage_missing FROM git4data_branches() WHERE branch_name = 'b'
+----
+false	false
+
+query I
+SELECT sum(v) FROM t AT (BRANCH => 'b')
+----
+1998
+
+# The shape check is the half that does survive a reopen, and it is what catches a replacement of a different
+# shape rather than of the same one
+statement ok
+ALTER TABLE t_b RENAME COLUMN k TO kk
+
+statement error
+SELECT sum(v) FROM t AT (BRANCH => 'b')
+----
+<REGEX>:.*columns in that order.*
+
+# and a branch nothing was ever mapped for has nothing to identify
+statement ok
+PRAGMA git4data_create_branch('plain', '')
+
+query I
+SELECT identified FROM git4data_branches() WHERE branch_name = 'plain'
+----
+true
