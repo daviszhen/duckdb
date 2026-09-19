@@ -185,3 +185,52 @@ statement error
 PRAGMA git4data_drop_branch('flc')
 ----
 <REGEX>:.*descending from it\. Drop those branches first\..*
+
+# The drop guard's second refusal is about a branch's **line**, not its storage: a branch that differs by a delta
+# has no storage at all, and a dependent reached through a snapshot that captured its line reads that delta.
+# Measured before the wording changed: the refusal said the dependents "read this one's storage at their fork
+# pin" about a branch whose `has_storage` is false and whose `delta_added` is `lr_add` - and the dependent read
+# five rows through it.
+statement ok
+CREATE TABLE lr (k INTEGER PRIMARY KEY, v INTEGER)
+
+statement ok
+INSERT INTO lr SELECT range, range FROM range(4)
+
+statement ok
+PRAGMA git4data_create_branch('lr0', '')
+
+statement ok
+CREATE TABLE lr_add (k INTEGER PRIMARY KEY, v INTEGER)
+
+statement ok
+CREATE TABLE lr_del (k INTEGER PRIMARY KEY)
+
+statement ok
+PRAGMA git4data_bind_branch_delta('lr', 'lr0', 'lr_add', 'lr_del')
+
+statement ok
+INSERT INTO lr_add VALUES (100, 100)
+
+statement ok
+PRAGMA git4data_create_snapshot('lr_cap', 'lr0')
+
+statement ok
+PRAGMA git4data_create_branch('lr1', 'lr_cap')
+
+# the parent has no storage, and the dependent reads its line
+query III
+SELECT has_storage, storage_table, delta_added FROM git4data_branches() WHERE branch_name = 'lr0'
+----
+false	(empty)	lr_add
+
+query II
+SELECT (SELECT count(*) FROM lr AT (BRANCH => 'lr1')), (SELECT count(*) FROM lr AT (BRANCH => 'lr1') WHERE k = 100)
+----
+5	1
+
+# so the refusal is about the line, and it says so
+statement error
+PRAGMA git4data_drop_branch('lr0')
+----
+<REGEX>:.*captured its line, and they read it at their fork pin\. Drop those branches first\..*

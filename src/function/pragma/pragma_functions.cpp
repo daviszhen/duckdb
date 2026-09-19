@@ -2083,9 +2083,14 @@ static string PragmaGit4DataDropBranch(ClientContext &context, const FunctionPar
 		                            name);
 	}
 	if (transaction_manager.branches.HasLineDependents(name)) {
-		// those branches read this one's storage at their fork pin, which dropping it would take away
+		// Those branches read this one's **line** at their fork pin, which dropping it would take away. The
+		// message said "storage" until increment 3ce, and that is false for the shape that reaches it most
+		// easily - measured: with a delta-only parent (`has_storage = false`, `delta_added = s0_add`) reached
+		// through a snapshot that captured its line, the dependent reads the *delta*, 5 rows with its added key,
+		// and the refusal told the caller about a table the branch does not have. "Line" is the word the rest of
+		// this file uses for a copy or a delta, and it is true of both.
 		throw InvalidInputException("Branch \"%s\" still has branches forked from a reference that captured its "
-		                            "line. Drop those branches first.",
+		                            "line, and they read it at their fork pin. Drop those branches first.",
 		                            name);
 	}
 	for (auto &snapshot : transaction_manager.snapshots.List()) {
