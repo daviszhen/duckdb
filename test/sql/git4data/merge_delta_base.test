@@ -1,0 +1,100 @@
+# name: test/sql/git4data/merge_delta_base.test
+# description: An ancestor that differs by a delta is not the state the two sides parted at either
+# group: [git4data]
+
+# The same question as `merge_line_base.test`, for the other way an ancestor stops reading as its state at the
+# pin: a delta on the source is the ancestor's own change to it, so its name reads as its line *now*. The base
+# has to be named by its pin (and by the line it inherited), or the ancestor's own change is inside the base
+# and comes out of the merge looking like no change at all - a merge that silently drops the other side's edit.
+# Measured before the fix: the row B had changed stayed at its old value on C.
+
+load {TEST_DIR}/merge_delta_base.db
+
+statement ok
+CREATE TABLE t (k INTEGER PRIMARY KEY, v INTEGER)
+
+statement ok
+INSERT INTO t VALUES (1, 10), (2, 20), (3, 30)
+
+statement ok
+CHECKPOINT
+
+statement ok
+PRAGMA git4data_create_branch('A', '')
+
+statement ok
+PRAGMA git4data_materialize('t', 'A', 'a_copy')
+
+statement ok
+UPDATE a_copy SET v = 111 WHERE k = 1
+
+# B forks from A's captured line, and differs from it by a delta rather than holding a copy
+statement ok
+PRAGMA git4data_create_snapshot('S', 'A')
+
+statement ok
+PRAGMA git4data_create_branch('B', 'S')
+
+query II
+SELECT k, v FROM t AT (BRANCH => 'B') ORDER BY k
+----
+1	111
+2	20
+3	30
+
+statement ok
+CREATE TABLE b_add (k INTEGER PRIMARY KEY, v INTEGER)
+
+statement ok
+CREATE TABLE b_del (k INTEGER PRIMARY KEY)
+
+statement ok
+PRAGMA git4data_bind_branch_delta('t', 'B', 'b_add', 'b_del')
+
+# C forks from B and takes a copy of that state, so the two sides can move apart
+statement ok
+PRAGMA git4data_create_branch('C', 'B')
+
+statement ok
+PRAGMA git4data_materialize('t', 'C', 'c_copy')
+
+statement ok
+UPDATE c_copy SET v = 999 WHERE k = 1
+
+# and B changes a row C never touched, through its delta, after C's fork
+statement ok
+PRAGMA git4data_apply('t', 'B', 'UPDATE t SET v = 333 WHERE k = 3')
+
+query II
+SELECT k, v FROM t AT (BRANCH => 'B') ORDER BY k
+----
+1	111
+2	20
+3	333
+
+# The base is B's line at its pin, which held 3 -> 30: only B changed that row, and only C changed k = 1, so
+# the merge brings B's row over. Read as B's line *now* - what naming the branch would do - the base already
+# holds 3 -> 333 and the merge has nothing to bring.
+statement ok
+PRAGMA git4data_merge('t', 'C', 'B', 'fail')
+
+query II
+SELECT k, v FROM t AT (BRANCH => 'C') ORDER BY k
+----
+1	999
+2	20
+3	333
+
+query II
+SELECT k, v FROM t AT (BRANCH => 'B') ORDER BY k
+----
+1	111
+2	20
+3	333
+
+query II
+SELECT k, v FROM t ORDER BY k
+----
+1	10
+2	20
+3	30

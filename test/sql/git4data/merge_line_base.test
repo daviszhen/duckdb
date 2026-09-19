@@ -1,0 +1,91 @@
+# name: test/sql/git4data/merge_line_base.test
+# description: The base of a merge whose ancestor inherited a line is that line, not the source table
+# group: [git4data]
+
+# A three-way merge needs the state the two sides parted at. An ancestor without a line of its own already
+# reads as that state - its name resolves to its pinned image - but an ancestor that has written since reads
+# as its line *now*, so the base is named by its pin instead. That pin alone names the *source table* at that
+# commit, and a branch forked from a captured line was not reading the source table: it was reading the line it
+# inherited. Measured before the line went with the pin: this merge reported a conflict on `k = 1`, a row only
+# the left side had touched, because the base said the right side had changed it too - the base held the
+# source's value where the inherited line held another.
+
+load {TEST_DIR}/merge_line_base.db
+
+statement ok
+CREATE TABLE t (k INTEGER PRIMARY KEY, v INTEGER)
+
+statement ok
+INSERT INTO t VALUES (1, 10), (2, 20), (3, 30)
+
+statement ok
+CHECKPOINT
+
+# a branch with a copy of the table, and a change of its own
+statement ok
+PRAGMA git4data_create_branch('A', '')
+
+statement ok
+PRAGMA git4data_materialize('t', 'A', 'a_copy')
+
+statement ok
+UPDATE a_copy SET v = 111 WHERE k = 1
+
+# a snapshot captures A's line, and B forks from what it captured, so B's own base is A's line at that commit
+statement ok
+PRAGMA git4data_create_snapshot('S', 'A')
+
+statement ok
+PRAGMA git4data_create_branch('B', 'S')
+
+query II
+SELECT k, v FROM t AT (BRANCH => 'B') ORDER BY k
+----
+1	111
+2	20
+3	30
+
+# B is given a copy of its own, and C forks from B
+statement ok
+PRAGMA git4data_materialize('t', 'B', 'b_copy')
+
+statement ok
+PRAGMA git4data_create_branch('C', 'B')
+
+statement ok
+PRAGMA git4data_materialize('t', 'C', 'c_copy')
+
+# the two sides now change different rows: the left one k = 1, the right one k = 3
+statement ok
+UPDATE c_copy SET v = 999 WHERE k = 1
+
+statement ok
+UPDATE b_copy SET v = 333 WHERE k = 3
+
+# The base is A's line at S's pin, where k = 1 held 111: only C changed it, and only B changed k = 3, so this
+# merge has nothing to conflict about. Read as the source table's 10 it would look like both sides changed
+# k = 1 to different values.
+statement ok
+PRAGMA git4data_merge('t', 'C', 'B', 'fail')
+
+query II
+SELECT k, v FROM t AT (BRANCH => 'C') ORDER BY k
+----
+1	999
+2	20
+3	333
+
+# the right side is untouched by a merge into the left, and the live table never moved
+query II
+SELECT k, v FROM t AT (BRANCH => 'B') ORDER BY k
+----
+1	111
+2	20
+3	333
+
+query II
+SELECT k, v FROM t ORDER BY k
+----
+1	10
+2	20
+3	30

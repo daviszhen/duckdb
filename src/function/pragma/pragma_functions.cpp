@@ -1542,6 +1542,32 @@ static string PragmaGit4DataMerge(ClientContext &context, const FunctionParamete
 	string base_reference = ancestor;
 	bool drop_merge_base = false;
 	if (transaction_manager.branches.Get(ancestor, ancestor_branch)) {
+		// Naming the ancestor's pin as the base, which is what the cases below end in. The line it inherited
+		// goes with the pin: a branch forked from a captured line reads *that* line, so its pin alone names
+		// the source table at that commit - the state it parted at is that line as it stood then, which is
+		// what the reference below has to name. Measured: without the line, a merge whose ancestor had a copy
+		// of its own read the source's values as the base and reported a conflict on a row only one side had
+		// touched.
+		auto name_pin_as_base = [&]() {
+			transaction_manager.snapshots.Drop(DuckTransactionManager::MERGE_BASE_REFERENCE);
+			if (!transaction_manager.snapshots.Create(DuckTransactionManager::MERGE_BASE_REFERENCE,
+			                                          ancestor_branch.pin, Timestamp::GetCurrentTimestamp(),
+			                                          ancestor_branch.base_line)) {
+				throw InternalException("Could not create the internal merge base reference");
+			}
+			base_reference = DuckTransactionManager::MERGE_BASE_REFERENCE;
+			drop_merge_base = true;
+		};
+		// A delta is the ancestor's own change to the source, so its name reads as its line *now*; whether its
+		// two tables are empty yet is not asked, because naming the pin is right either way.
+		// A delta is the ancestor's own change to the source, so its name reads as its line *now*; whether its
+		// two tables are empty yet is not asked, because naming the pin is right either way.
+		for (auto &delta_entry : ancestor_branch.deltas) {
+			if (Git4DataSourceKeyMatches(context, delta_entry.source, merge_key) ||
+			    (delta_entry.source_oid != 0 && delta_entry.source_oid == merge_source.oid)) {
+				name_pin_as_base();
+			}
+		}
 		for (auto &storage_entry : ancestor_branch.storage_tables) {
 			if (!Git4DataSourceKeyMatches(context, storage_entry.source, merge_key) &&
 			    (storage_entry.source_oid == 0 || storage_entry.source_oid != merge_source.oid)) {
@@ -1602,20 +1628,10 @@ static string PragmaGit4DataMerge(ClientContext &context, const FunctionParamete
 				}
 			}
 			if (!unwritten) {
-				// Written to since. The state a three-way merge needs is the one the two lines parted
-				// at, and for a branch that has a table of its own that state is still namable: a
-				// branch with storage cannot be forked from at all, so both lines here must have been
-				// forked before this table was given - which makes the state they parted at exactly
-				// this branch's pinned image, a commit a reference can name. What the table holds now
-				// is that image plus this branch's own changes since, and reading it as the base is
-				// what would apply those changes backwards; naming the pin instead is the fix.
-				transaction_manager.snapshots.Drop(DuckTransactionManager::MERGE_BASE_REFERENCE);
-				if (!transaction_manager.snapshots.Create(DuckTransactionManager::MERGE_BASE_REFERENCE,
-				                                          ancestor_branch.pin, Timestamp::GetCurrentTimestamp())) {
-					throw InternalException("Could not create the internal merge base reference");
-				}
-				base_reference = DuckTransactionManager::MERGE_BASE_REFERENCE;
-				drop_merge_base = true;
+				// Written to since: what the table holds now is the pinned image plus this branch's own
+				// changes since, and reading it as the base would apply those changes backwards. Naming the
+				// pin (and the line it inherited, if it inherited one) is the fix.
+				name_pin_as_base();
 			}
 		}
 	}
