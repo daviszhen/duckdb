@@ -57,7 +57,6 @@ void Git4DataCheckRegistrySchema(const string &schema);
 //! they are not and the file's records never came from them, the rollback took the tables with it - the very
 //! first reference of a database creates them in the same transaction - so the registries are emptied rather
 //! than left holding references that are no longer anywhere on disk.
-void Git4DataReloadRegistry(AttachedDatabase &db);
 //! Rebuild after a rollback on the connection that made it. What that transaction added is dropped, what the
 //! tables hold is put back, and anything else in memory is left alone: another connection's uncommitted
 //! records are not this one's to remove, which a clear-and-reload would do - measured, with two connections,

@@ -302,7 +302,6 @@ public:
 	//! Pinned snapshots keep superseded versions readable
 	//! Set by a rollback, consumed by the next operation that touches the registries
 	std::atomic<bool> registry_reload_needed {false};
-	bool registry_from_block = false;
 	SnapshotRegistry snapshots;
 
 	//! The highest bound any reference is pinned at, read from the registries rather than cached: a row
@@ -318,16 +317,6 @@ public:
 	//! Whether a rebuild is due, clearing the flag. One rebuild serves every flag set before it.
 	bool ConsumeRegistryReloadNeeded() noexcept {
 		return registry_reload_needed.exchange(false);
-	}
-	//! Whether the registries were loaded from the checkpoint's metadata block because this file has no
-	//! registry tables (a file written before them). A rebuild then has nothing to read and must leave what is
-	//! in memory alone: those references are committed, and only a file whose records are in tables can be
-	//! rebuilt - or, when its tables were rolled away with the change, cleared.
-	bool RegistryFromBlock() const noexcept {
-		return registry_from_block;
-	}
-	void SetRegistryFromBlock(bool value) noexcept {
-		registry_from_block = value;
 	}
 	//! Whether no transaction that started before the last commit is still active. Such a transaction
 	//! reads rows the last commit has already deleted, so it is the one reader a reference's bounds say

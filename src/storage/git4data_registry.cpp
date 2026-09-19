@@ -165,18 +165,6 @@ static void Git4DataScanRegistryTable(AttachedDatabase &db, TableCatalogEntry &t
 	}
 }
 
-void Git4DataReloadRegistry(AttachedDatabase &db) {
-	auto &transaction_manager = DuckTransactionManager::Get(db);
-	if (Git4DataRegistryTablesExist(db)) {
-		Git4DataLoadRegistry(db);
-		return;
-	}
-	if (!transaction_manager.RegistryFromBlock()) {
-		// the rollback took the tables as well, so nothing is committed and nothing may stay in memory
-		transaction_manager.snapshots.Clear();
-		transaction_manager.branches.Clear();
-	}
-}
 
 //! Whether this transaction added the record the key names
 static bool Git4DataAddedByThisTransaction(const vector<string> &added, const string &kind, const string &key) {
@@ -261,8 +249,8 @@ void Git4DataReconcileRegistry(AttachedDatabase &db, const vector<string> &added
 
 void Git4DataLoadRegistry(AttachedDatabase &db) {
 	if (!Git4DataRegistryTablesExist(db)) {
-		// an older file, whose records are in the checkpoint's metadata block and are already loaded
-		DuckTransactionManager::Get(db).SetRegistryFromBlock(true);
+		// an older file, whose records are in the checkpoint's metadata block: they were loaded by the block
+		// reader, and there is nothing here to read
 		return;
 	}
 	auto &transaction_manager = DuckTransactionManager::Get(db);
