@@ -350,6 +350,10 @@ public:
 	//! at. It exists for the length of one merge; a merge that fails leaves it, which is why it is not
 	//! counted against the quota and not listed - it is not a reference the user asked for.
 	static constexpr const char *MERGE_BASE_REFERENCE = "__merge_base__";
+	//! The name a read uses for the table as it stands now, through the caller's own transaction - the live
+	//! side of a diff. It is a name the registries never hold: it is resolved before they are looked in, and
+	//! the reserved prefix is what keeps a caller from taking it.
+	static constexpr const char *LIVE_REFERENCE = "__live__";
 	void SetPitr(timestamp_t window, timestamp_t now);
 	//! Put a window read from disk back in place without touching the reference it moves
 	void RestorePitr(timestamp_t window) {

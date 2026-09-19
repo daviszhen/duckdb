@@ -1,0 +1,120 @@
+# name: test/sql/git4data/live_diff.test
+# description: A diff against the table as it stands now, without taking a reference first
+# group: [git4data]
+
+# A diff's two sides are references, and a caller asking what a branch has that the table does not would have
+# to take one first - and a reference pins the timeline, keeping history alive for a question about *now*. The
+# table as it stands now is therefore a side of its own, named `__live__`: it is read through the caller's own
+# transaction (rows it has not committed included), at everything committed, and it is the only side that is
+# not a reference. The name is inside the prefix the feature reserves, so no caller can take it.
+
+load {TEST_DIR}/live_diff.db
+
+statement ok
+CREATE TABLE t (k INTEGER PRIMARY KEY, v INTEGER)
+
+statement ok
+INSERT INTO t VALUES (1, 10), (2, 20)
+
+statement ok
+CHECKPOINT
+
+statement ok
+PRAGMA git4data_create_snapshot('s')
+
+statement ok
+PRAGMA git4data_create_branch('b', '')
+
+statement ok
+PRAGMA git4data_materialize('t', 'b', 't_b')
+
+# the table moves on: a row updated and a row added, after the branch copied it
+statement ok
+UPDATE t SET v = 99 WHERE k = 1
+
+statement ok
+INSERT INTO t VALUES (3, 30)
+
+# live against the branch's own copy: the branch has the older value and not the new row, so the live side
+# has a change and a removal - the removal being the row the *branch* does not have
+query III
+SELECT g4d_change, k, g4d_row_id FROM git4data_diff('t', '__live__', 'b') ORDER BY g4d_change, k
+----
+changed	1	2
+removed	3	3
+
+# the other way round the same two rows are the branch's additions and its change
+query II
+SELECT g4d_change, k FROM git4data_diff('t', 'b', '__live__') ORDER BY g4d_change, k
+----
+added	3
+changed	1
+
+# live against a pin: both sides read the same table, so the comparison is by row id, and the pin's row for
+# the updated key is the one the update replaced
+query III
+SELECT g4d_change, k, g4d_counterpart_row_id FROM git4data_diff('t', '__live__', 's') WHERE k = 1
+----
+changed	1	0
+
+# the table against itself has nothing to report, live side or not
+query I
+SELECT count(*) FROM git4data_diff('t', '__live__', '__live__')
+----
+0
+
+# A reference that reads the table's pinned image and the live side of the same table still differ by the
+# rows the pin holds and the table does not: nothing here, because the pin is newer than the copy and the row
+# added above came after it
+query II
+SELECT g4d_change, k FROM git4data_diff('t', 's', '__live__') ORDER BY g4d_change, k
+----
+added	3
+changed	1
+
+# Rows the caller has written but not committed are part of the live side, which is what makes it the live
+# one: this is the same diff as above with a fourth row in it, inside the transaction that wrote it
+statement ok
+BEGIN
+
+statement ok
+INSERT INTO t VALUES (4, 40)
+
+query II
+SELECT g4d_change, k FROM git4data_diff('t', 's', '__live__') ORDER BY g4d_change, k
+----
+added	3
+added	4
+changed	1
+
+statement ok
+ROLLBACK
+
+query I
+SELECT count(*) FROM t
+----
+3
+
+# The name belongs to the feature: a caller cannot take it, for a snapshot or for a branch
+statement error
+PRAGMA git4data_create_snapshot('__live__')
+----
+<REGEX>:.*begins with two underscores.*
+
+statement error
+PRAGMA git4data_create_branch('__live__', '')
+----
+<REGEX>:.*begins with two underscores.*
+
+# And it is a *diff* side, not a read: a plain read of the table is the live state already, so the name is not
+# resolved by the reference syntax, which looks in the two registries and says so
+statement error
+SELECT count(*) FROM t AT (SNAPSHOT => '__live__')
+----
+<REGEX>:.*Snapshot "__live__" does not exist.*
+
+# An unknown name is still an unknown name, and the message says what the live one is called
+statement error
+SELECT count(*) FROM git4data_diff('t', '__nope__', 's')
+----
+<REGEX>:.*neither a snapshot nor a branch.*the table as it stands now is named "__live__".*

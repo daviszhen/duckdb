@@ -693,6 +693,20 @@ static void ResolveGit4DataRead(ClientContext &context, DuckTransactionManager &
 static Git4DataReadPlan ResolveGit4DataReferencePlan(ClientContext &context,
                                                      DuckTransactionManager &transaction_manager,
                                                      const string &table_name, const string &name) {
+	if (name == DuckTransactionManager::LIVE_REFERENCE) {
+		// The table as it stands now, read through the caller's own transaction - including rows it has not
+		// committed, which is what "the live table" means everywhere else in this feature. A caller asking
+		// what a branch has that the table does not would otherwise have to take a reference first, and a
+		// reference pins the timeline: the answer is about *now*, so keeping history alive for it would be a
+		// cost paid for a question that needs none. Its bound is everything committed, and the side is read
+		// as the caller's own table so that its uncommitted rows are part of it.
+		Git4DataReadPlan live;
+		live.table_name = table_name;
+		live.own_storage = true;
+		live.bound = VisibilityBound::AllCommitted();
+		live.delta_bound = live.bound;
+		return live;
+	}
 	Git4DataRefKind kind;
 	if (transaction_manager.snapshots.GetPin(name).IsValid()) {
 		kind = Git4DataRefKind::SNAPSHOT;
@@ -701,7 +715,9 @@ static Git4DataReadPlan ResolveGit4DataReferencePlan(ClientContext &context,
 		// told that rather than which of the two was looked in
 		Git4DataBranch branch;
 		if (!transaction_manager.branches.Get(name, branch)) {
-			throw InvalidInputException("Reference \"%s\" is neither a snapshot nor a branch", name);
+			throw InvalidInputException("Reference \"%s\" is neither a snapshot nor a branch (the table as it "
+			                            "stands now is named \"%s\")",
+			                            name, DuckTransactionManager::LIVE_REFERENCE);
 		}
 		kind = Git4DataRefKind::BRANCH;
 	}
