@@ -98,3 +98,33 @@ query I
 SELECT count(*) FROM git4data_diff('t', 's', 'after_drop')
 ----
 0
+
+# A restore reaches the reference through the same scan a read does, so it is refused for the same reason -
+# and refused *rather than applied*, which is what keeps a generated column from being written back as its
+# slot. Measured: without the refusal the restore runs and rewrites the table from a read whose generated
+# column is the row's index.
+statement ok
+CREATE TABLE g2 (k INTEGER PRIMARY KEY, v INTEGER, doubled INTEGER GENERATED ALWAYS AS (v * 2))
+
+statement ok
+INSERT INTO g2 (k, v) VALUES (1, 10), (2, 20)
+
+statement ok
+CHECKPOINT
+
+statement ok
+PRAGMA git4data_create_snapshot('g2s')
+
+statement ok
+UPDATE g2 SET v = 100 WHERE k = 1
+
+statement error
+PRAGMA git4data_restore('g2', 'g2s')
+----
+<REGEX>:.*generated column.*
+
+# and the table is left exactly as the failed restore found it
+query II
+SELECT count(*), sum(v) FROM g2
+----
+2	120

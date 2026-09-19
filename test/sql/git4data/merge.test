@@ -608,3 +608,101 @@ query I
 SELECT count(*) FROM ck
 ----
 20
+
+# The conflict policies work on a composite key as well: skip leaves the left's version of the whole key and
+# accept takes the right's, on a delta target with a two-column key.
+statement ok
+CREATE TABLE cp (a INTEGER, b INTEGER, v INTEGER, PRIMARY KEY (a, b))
+
+statement ok
+INSERT INTO cp SELECT range // 5, range % 5, range FROM range(20)
+
+statement ok
+CHECKPOINT
+
+statement ok
+CREATE TABLE cp_add1 (a INTEGER, b INTEGER, v INTEGER, PRIMARY KEY (a, b))
+
+statement ok
+CREATE TABLE cp_del1 (a INTEGER, b INTEGER, PRIMARY KEY (a, b))
+
+statement ok
+CREATE TABLE cp_add2 (a INTEGER, b INTEGER, v INTEGER, PRIMARY KEY (a, b))
+
+statement ok
+CREATE TABLE cp_del2 (a INTEGER, b INTEGER, PRIMARY KEY (a, b))
+
+statement ok
+CREATE TABLE cp_add3 (a INTEGER, b INTEGER, v INTEGER, PRIMARY KEY (a, b))
+
+statement ok
+CREATE TABLE cp_del3 (a INTEGER, b INTEGER, PRIMARY KEY (a, b))
+
+statement ok
+CREATE TABLE cp_add4 (a INTEGER, b INTEGER, v INTEGER, PRIMARY KEY (a, b))
+
+statement ok
+CREATE TABLE cp_del4 (a INTEGER, b INTEGER, PRIMARY KEY (a, b))
+
+statement ok
+PRAGMA git4data_create_branch('cps1', '')
+
+statement ok
+PRAGMA git4data_create_branch('cpl1', 'cps1')
+
+statement ok
+PRAGMA git4data_create_branch('cpr1', 'cps1')
+
+statement ok
+PRAGMA git4data_create_branch('cps2', '')
+
+statement ok
+PRAGMA git4data_create_branch('cpl2', 'cps2')
+
+statement ok
+PRAGMA git4data_create_branch('cpr2', 'cps2')
+
+statement ok
+PRAGMA git4data_bind_branch_delta('cp', 'cpl1', 'cp_add1', 'cp_del1')
+
+statement ok
+PRAGMA git4data_bind_branch_delta('cp', 'cpr1', 'cp_add2', 'cp_del2')
+
+statement ok
+PRAGMA git4data_bind_branch_delta('cp', 'cpl2', 'cp_add3', 'cp_del3')
+
+statement ok
+PRAGMA git4data_bind_branch_delta('cp', 'cpr2', 'cp_add4', 'cp_del4')
+
+statement ok
+PRAGMA git4data_apply('cp', 'cpl1', 'UPDATE cp SET v = 111 WHERE a = 1 AND b = 1')
+
+statement ok
+PRAGMA git4data_apply('cp', 'cpr1', 'UPDATE cp SET v = 222 WHERE a = 1 AND b = 1')
+
+statement ok
+PRAGMA git4data_apply('cp', 'cpl2', 'UPDATE cp SET v = 111 WHERE a = 1 AND b = 1')
+
+statement ok
+PRAGMA git4data_apply('cp', 'cpr2', 'UPDATE cp SET v = 222 WHERE a = 1 AND b = 1')
+
+statement error
+PRAGMA git4data_merge('cp', 'cpl1', 'cpr1', 'fail')
+----
+<REGEX>:.*merge conflict.*
+
+statement ok
+PRAGMA git4data_merge('cp', 'cpl1', 'cpr1', 'skip')
+
+query I
+SELECT v FROM cp AT (BRANCH => 'cpl1') WHERE a = 1 AND b = 1
+----
+111
+
+statement ok
+PRAGMA git4data_merge('cp', 'cpl2', 'cpr2', 'accept')
+
+query I
+SELECT v FROM cp AT (BRANCH => 'cpl2') WHERE a = 1 AND b = 1
+----
+222
