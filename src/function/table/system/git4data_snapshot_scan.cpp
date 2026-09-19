@@ -2309,6 +2309,51 @@ static string Git4DataJoinedStorageTables(ClientContext &context, const Git4Data
 	return result;
 }
 
+//! Whether a table any of *this* branch's own mappings names cannot be resolved. A read falls back to the
+//! pinned image when one cannot - whole, for a delta, which needs both of its tables - so this is the
+//! difference between what a branch reads and what its row says.
+static bool Git4DataOwnMappingsMissing(ClientContext &context, const Git4DataBranch &branch) {
+	for (auto &entry : branch.storage_tables) {
+		if (Git4DataResolveTableName(context, entry.storage, entry.oid).empty()) {
+			return true;
+		}
+	}
+	for (auto &entry : branch.deltas) {
+		if (Git4DataResolveTableName(context, entry.added, entry.added_oid).empty() ||
+		    Git4DataResolveTableName(context, entry.removed, entry.removed_oid).empty()) {
+			return true;
+		}
+	}
+	return false;
+}
+
+//! Whether a table the *line* of this branch names cannot be resolved: the branch's own mappings and every
+//! line it inherited, walked through `base_line` (which is always a branch name) and stopping if a name
+//! repeats. A reference that reads that line - the branch itself, or a snapshot that captured it - reads the
+//! pinned image where a table is gone, so this is the signal that says a read has changed under it.
+static bool Git4DataLineMissing(ClientContext &context, DuckTransactionManager &transaction_manager,
+                                const Git4DataBranch &branch) {
+	if (Git4DataOwnMappingsMissing(context, branch)) {
+		return true;
+	}
+	vector<string> visited;
+	for (auto line = branch.base_line; !line.empty();) {
+		if (std::find(visited.begin(), visited.end(), line) != visited.end()) {
+			break;
+		}
+		visited.push_back(line);
+		Git4DataBranch ancestor;
+		if (!transaction_manager.branches.Get(line, ancestor)) {
+			break;
+		}
+		if (Git4DataOwnMappingsMissing(context, ancestor)) {
+			return true;
+		}
+		line = ancestor.base_line;
+	}
+	return false;
+}
+
 static unique_ptr<FunctionData> Git4DataBranchesBind(ClientContext &context, TableFunctionBindInput &,
                                                      vector<LogicalType> &return_types, vector<Identifier> &names) {
 	auto result = make_uniq<Git4DataListingBindData>();
@@ -2365,18 +2410,8 @@ static unique_ptr<FunctionData> Git4DataBranchesBind(ClientContext &context, Tab
 			if (!transaction_manager.branches.Get(line, ancestor)) {
 				break;
 			}
-			for (auto &entry : ancestor.storage_tables) {
-				if (Git4DataResolveTableName(context, entry.storage, entry.oid).empty()) {
-					inherited_missing = true;
-				}
-			}
-			for (auto &entry : ancestor.deltas) {
-				if (Git4DataResolveTableName(context, entry.added, entry.added_oid).empty() ||
-				    Git4DataResolveTableName(context, entry.removed, entry.removed_oid).empty()) {
-					inherited_missing = true;
-				}
-			}
-			if (inherited_missing) {
+			if (Git4DataOwnMappingsMissing(context, ancestor)) {
+				inherited_missing = true;
 				break;
 			}
 			line = ancestor.base_line;
@@ -2467,10 +2502,25 @@ static unique_ptr<FunctionData> Git4DataSnapshotsBind(ClientContext &context, Ta
 			// which is why it is neither counted nor shown
 			continue;
 		}
+		// Whether a table of the line this capture names is gone, which is the same signal the branches listing
+		// carries for a branch that inherited one: a capture reads that line, so a dropped table of it changes
+		// what the capture reads. Measured (increment 3br): `cap` captured the line of a delta branch and read
+		// six rows with the branch's added key; after `DROP TABLE` of that branch's added table it read the
+		// same six rows without the key, and the row here named the line and nothing else. A line whose branch
+		// cannot be found counts as missing, because the read then falls back to the pinned image - which is
+		// what the resolution does when the name is not a branch.
+		Value line_missing(LogicalType::BOOLEAN);
+		if (!snapshot.line.empty()) {
+			Git4DataBranch captured;
+			line_missing = Value::BOOLEAN(!transaction_manager.branches.Get(snapshot.line, captured) ||
+			                              Git4DataLineMissing(context, transaction_manager, captured));
+		}
 		// NULL rather than an empty string for the main line, so a listing says which references capture a
-		// branch's own state and which are the table at a commit
+		// branch's own state and which are the table at a commit - and NULL for this column with it, since a
+		// capture of the table itself has no line whose tables could be gone
 		result->rows.push_back({Value(snapshot.name), Value::UBIGINT(snapshot.pin), Value::TIMESTAMP(snapshot.created),
-		                        snapshot.line.empty() ? Value(LogicalType::VARCHAR) : Value(snapshot.line)});
+		                        snapshot.line.empty() ? Value(LogicalType::VARCHAR) : Value(snapshot.line),
+		                        line_missing});
 	}
 	names.emplace_back("snapshot_name");
 	return_types.emplace_back(LogicalType::VARCHAR);
@@ -2480,6 +2530,8 @@ static unique_ptr<FunctionData> Git4DataSnapshotsBind(ClientContext &context, Ta
 	return_types.emplace_back(LogicalType::TIMESTAMP);
 	names.emplace_back("line");
 	return_types.emplace_back(LogicalType::VARCHAR);
+	names.emplace_back("line_missing");
+	return_types.emplace_back(LogicalType::BOOLEAN);
 	return std::move(result);
 }
 

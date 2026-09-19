@@ -221,3 +221,74 @@ query II
 SELECT delta_missing, inherited_missing FROM git4data_branches() WHERE branch_name = 'di'
 ----
 true	false
+
+# A capture that named a branch's line reads that line, so a table of it being dropped changes what the
+# capture reads - and the row here named the line and nothing else. Measured before `line_missing` was added:
+# `dl_cap` read five rows with the branch's added key, and after `DROP TABLE dlp_add` it read four without it,
+# while `git4data_snapshots()` said only `line = dlp`.
+statement ok
+CREATE TABLE dl (k INTEGER PRIMARY KEY, v INTEGER)
+
+statement ok
+INSERT INTO dl SELECT range, range FROM range(5)
+
+statement ok
+PRAGMA git4data_create_branch('dlp', '')
+
+statement ok
+CREATE TABLE dlp_add (k INTEGER PRIMARY KEY, v INTEGER)
+
+statement ok
+CREATE TABLE dlp_del (k INTEGER PRIMARY KEY)
+
+statement ok
+PRAGMA git4data_bind_branch_delta('dl', 'dlp', 'dlp_add', 'dlp_del')
+
+statement ok
+INSERT INTO dlp_add VALUES (100, 100)
+
+statement ok
+INSERT INTO dlp_del VALUES (2)
+
+statement ok
+PRAGMA git4data_create_snapshot('dl_cap', 'dlp')
+
+query III
+SELECT (SELECT count(*) FROM dl AT (SNAPSHOT => 'dl_cap')),
+       (SELECT count(*) FROM dl AT (SNAPSHOT => 'dl_cap') WHERE k = 100),
+       (SELECT count(*) FROM dl AT (SNAPSHOT => 'dl_cap') WHERE k = 2)
+----
+5	1	0
+
+query II
+SELECT line, line_missing FROM git4data_snapshots() WHERE snapshot_name = 'dl_cap'
+----
+dlp	false
+
+# a capture of the table itself has no line, and nothing whose tables could be gone: both columns are NULL
+# rather than an empty string and a false
+query II
+SELECT line IS NULL, line_missing IS NULL FROM git4data_snapshots() WHERE snapshot_name = 'plain_snap'
+----
+true	true
+
+statement ok
+DROP TABLE dlp_add
+
+query III
+SELECT (SELECT count(*) FROM dl AT (SNAPSHOT => 'dl_cap')),
+       (SELECT count(*) FROM dl AT (SNAPSHOT => 'dl_cap') WHERE k = 100),
+       (SELECT count(*) FROM dl AT (SNAPSHOT => 'dl_cap') WHERE k = 2)
+----
+5	0	1
+
+query II
+SELECT line, line_missing FROM git4data_snapshots() WHERE snapshot_name = 'dl_cap'
+----
+dlp	true
+
+# the branch that owns the table says it in its own column, which is what a reader of the two listings joins
+query II
+SELECT delta_missing, inherited_missing FROM git4data_branches() WHERE branch_name = 'dlp'
+----
+true	false
