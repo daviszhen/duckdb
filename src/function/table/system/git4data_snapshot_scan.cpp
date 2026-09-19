@@ -989,31 +989,27 @@ public:
 		return index < present.size() && present[index];
 	}
 
+	//! Where this row's key is, for the two shapes a key can have: with one integer key column the value *is*
+	//! the key's 64-bit pattern, and with a composite key it is the row's position in the left key blocks. A
+	//! row has one or the other and never both, which is what the two setters say.
 	void SetKeyBits(row_t row_id, uint64_t bits) {
-		if (row_id < 0 || row_id >= MAX_ROW_ID) {
-			local_key_bits[row_id] = bits;
-			return;
-		}
-		Reserve(NumericCast<idx_t>(row_id) + 1);
-		auto index = NumericCast<idx_t>(row_id);
-		key_bits[index] = bits;
-		key_known[index] = true;
+		SetKeyRef(row_id, bits);
 	}
 
 	bool GetKeyBits(row_t row_id, uint64_t &bits) const {
-		if (row_id < 0 || row_id >= MAX_ROW_ID) {
-			auto entry = local_key_bits.find(row_id);
-			if (entry == local_key_bits.end()) {
-				return false;
-			}
-			bits = entry->second;
-			return true;
-		}
-		auto index = NumericCast<idx_t>(row_id);
-		if (index >= key_bits.size() || !key_known[index]) {
+		return GetKeyRef(row_id, bits);
+	}
+
+	void SetKeyIndex(row_t row_id, idx_t index) {
+		SetKeyRef(row_id, NumericCast<uint64_t>(index));
+	}
+
+	bool GetKeyIndex(row_t row_id, idx_t &index) const {
+		uint64_t value = 0;
+		if (!GetKeyRef(row_id, value)) {
 			return false;
 		}
-		bits = key_bits[index];
+		index = NumericCast<idx_t>(value);
 		return true;
 	}
 
@@ -1034,13 +1030,41 @@ public:
 
 	void Clear() {
 		present.clear();
-		key_bits.clear();
+		key_ref.clear();
 		key_known.clear();
 		local_present.clear();
-		local_key_bits.clear();
+		local_key_ref.clear();
 	}
 
 private:
+	void SetKeyRef(row_t row_id, uint64_t value) {
+		if (row_id < 0 || row_id >= MAX_ROW_ID) {
+			local_key_ref[row_id] = value;
+			return;
+		}
+		Reserve(NumericCast<idx_t>(row_id) + 1);
+		auto index = NumericCast<idx_t>(row_id);
+		key_ref[index] = value;
+		key_known[index] = true;
+	}
+
+	bool GetKeyRef(row_t row_id, uint64_t &value) const {
+		if (row_id < 0 || row_id >= MAX_ROW_ID) {
+			auto entry = local_key_ref.find(row_id);
+			if (entry == local_key_ref.end()) {
+				return false;
+			}
+			value = entry->second;
+			return true;
+		}
+		auto index = NumericCast<idx_t>(row_id);
+		if (index >= key_ref.size() || !key_known[index]) {
+			return false;
+		}
+		value = key_ref[index];
+		return true;
+	}
+
 	void Reserve(idx_t rows) {
 		if (rows <= present.size()) {
 			return;
@@ -1048,20 +1072,20 @@ private:
 		// doubling: the ids arrive in ascending order, so growing by one would copy the bits a million times
 		auto capacity = MaxValue<idx_t>(rows, present.size() * 2 + 1024);
 		present.resize(capacity, false);
-		key_bits.resize(capacity, 0);
+		key_ref.resize(capacity, 0);
 		key_known.resize(capacity, false);
 	}
 
 private:
 	//! One bit a row, for the ids a table's own scan hands back
 	vector<bool> present;
-	//! The key pattern of a left row, and whether that row has one - the pattern has no spare value to mean
-	//! "unset", a key being as likely to be zero as anything else
-	vector<uint64_t> key_bits;
+	//! Where a row's key is, and whether it has one - there is no spare value to mean "unset", a key pattern
+	//! being as likely to be zero as anything else
+	vector<uint64_t> key_ref;
 	vector<bool> key_known;
 	//! The rows a transaction added to the table itself, which carry ids near the top of the range
 	unordered_set<row_t> local_present;
-	unordered_map<row_t, uint64_t> local_key_bits;
+	unordered_map<row_t, uint64_t> local_key_ref;
 };
 
 struct Git4DataDiffState : public GlobalTableFunctionState {
@@ -1112,7 +1136,11 @@ struct Git4DataDiffState : public GlobalTableFunctionState {
 	//! which case `left_key_bits` holds it and this map stays empty: a key vector per left row was one
 	//! allocation per row over the whole side, which is what made two reads of one table cost 2.630 s for a
 	//! million rows (increment 3s).
-	unordered_map<row_t, vector<Value>> left_keys;
+	//! The left rows' own keys, in blocks of the key columns, for a row-id diff whose key is composite. The
+	//! map this replaces held one `vector<Value>` per row - about 190 MiB for a million composite-key rows,
+	//! measured - and a key is only ever read back for the rows that turn out to be *removed*.
+	vector<unique_ptr<DataChunk>> left_key_blocks;
+	idx_t left_key_block_rows = 0;
 	//! The key's type, so a key can be built back from its bits for the rows that are reported
 	LogicalType integer_key_type;
 	//! Whether the two sides are two different tables, in which case the comparison is made on the
@@ -1402,6 +1430,42 @@ static bool Git4DataDiffSameStoredValues(const Git4DataDiffState &state, const G
 		}
 	}
 	return true;
+}
+
+//! Keep a left row's own key for a row-id diff, and say where it landed. Every block but the last is full, so
+//! a position is enough to find it again: the block is the position divided by `STANDARD_VECTOR_SIZE` and the
+//! row inside it is the remainder.
+static idx_t Git4DataDiffStoreLeftKey(Git4DataDiffState &state, ClientContext &context, DataChunk &chunk, idx_t row) {
+	if (state.left_key_blocks.empty() || state.left_key_block_rows == STANDARD_VECTOR_SIZE) {
+		auto block = make_uniq<DataChunk>();
+		vector<LogicalType> key_types;
+		for (idx_t i = 0; i < state.key_count; i++) {
+			key_types.push_back(state.scan_types[i]);
+		}
+		block->Initialize(Allocator::Get(context), key_types);
+		block->SetCardinality(STANDARD_VECTOR_SIZE);
+		state.left_key_blocks.push_back(std::move(block));
+		state.left_key_block_rows = 0;
+	}
+	auto position = (state.left_key_blocks.size() - 1) * STANDARD_VECTOR_SIZE + state.left_key_block_rows;
+	auto &block = *state.left_key_blocks.back();
+	for (idx_t i = 0; i < state.key_count; i++) {
+		block.data[i].SetValue(state.left_key_block_rows, chunk.GetValue(i, row));
+	}
+	state.left_key_block_rows++;
+	return position;
+}
+
+//! One of those keys back, as the vector a change carries out
+static vector<Value> Git4DataDiffStoredLeftKey(const Git4DataDiffState &state, idx_t position) {
+	auto &block = *state.left_key_blocks[position / STANDARD_VECTOR_SIZE];
+	auto row = position % STANDARD_VECTOR_SIZE;
+	vector<Value> key;
+	key.reserve(state.key_count);
+	for (idx_t i = 0; i < state.key_count; i++) {
+		key.push_back(block.GetValue(i, row));
+	}
+	return key;
 }
 
 //! A fresh block for the change keys, when the last one is full. A table with no primary key has no key
@@ -1868,7 +1932,7 @@ static void Git4DataDiffFunction(ClientContext &context, TableFunctionInput &dat
 				    if (state.key_is_integer && Git4DataDiffChunkKeyBits(chunk, row, key_bits)) {
 					    state.left_rows.SetKeyBits(row_id, key_bits);
 				    } else {
-					    state.left_keys.emplace(row_id, Git4DataDiffRowKey(chunk, state.key_count, row));
+					    state.left_rows.SetKeyIndex(row_id, Git4DataDiffStoreLeftKey(state, context, chunk, row));
 				    }
 			    }
 		    });
@@ -1896,12 +1960,12 @@ static void Git4DataDiffFunction(ClientContext &context, TableFunctionInput &dat
 				                          vector<Value> {Git4DataDiffKeyFromBits(state.integer_key_type, bits)});
 				return;
 			}
-			auto key = state.left_keys.find(row_id);
-			if (key == state.left_keys.end()) {
-				removed_rows.emplace_back(row_id, vector<Value>());
-			} else {
-				removed_rows.emplace_back(row_id, key->second);
+			idx_t position = 0;
+			if (state.left_rows.GetKeyIndex(row_id, position)) {
+				removed_rows.emplace_back(row_id, Git4DataDiffStoredLeftKey(state, position));
+				return;
 			}
+			removed_rows.emplace_back(row_id, vector<Value>());
 		});
 		// With a primary key, an addition that carries the key of a removal is that same row after an
 		// update rather than two unrelated changes.
@@ -1949,7 +2013,8 @@ static void Git4DataDiffFunction(ClientContext &context, TableFunctionInput &dat
 		// the row sets and the keys are only needed to work out the three lists
 		state.left_rows.Clear();
 		state.right_rows.Clear();
-		state.left_keys.clear();
+		state.left_key_blocks.clear();
+		state.left_key_block_rows = 0;
 		state.phase = Git4DataDiffState::Phase::EMIT;
 	}
 	auto emitted = Git4DataDiffEmit(output, state, state.changed, state.changed_cursor, "changed");
