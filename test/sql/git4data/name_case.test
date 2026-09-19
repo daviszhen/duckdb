@@ -149,7 +149,9 @@ SELECT (SELECT v FROM zc AT (BRANCH => 'zcb') WHERE k = 1), (SELECT count(*) FRO
 ----
 111	4
 
-# and a delta over the source an inherited line already differs by is refused under either spelling
+# A delta over the source an inherited line already differs by is *accepted* now, and the two overlays are
+# found under any spelling of the source's name: the branch reads the line it inherited and its own delta on
+# top of it, so a key the inherited line added can be taken away again by the branch's own delta.
 statement ok
 CREATE TABLE zd (k INTEGER PRIMARY KEY, v INTEGER)
 
@@ -172,6 +174,12 @@ statement ok
 PRAGMA git4data_bind_branch_delta('zd', 'zdb', 'zd_add', 'zd_del')
 
 statement ok
+INSERT INTO zd_add VALUES (100, 100)
+
+statement ok
+INSERT INTO zd_del VALUES (2)
+
+statement ok
 PRAGMA git4data_create_branch('zdb_child', 'zdb')
 
 statement ok
@@ -180,10 +188,22 @@ CREATE TABLE zdc_add (k INTEGER PRIMARY KEY, v INTEGER)
 statement ok
 CREATE TABLE zdc_del (k INTEGER PRIMARY KEY)
 
-statement error
+statement ok
 PRAGMA git4data_bind_branch_delta('ZD', 'zdb_child', 'zdc_add', 'zdc_del')
+
+statement ok
+INSERT INTO zdc_add VALUES (200, 200)
+
+statement ok
+INSERT INTO zdc_del VALUES (100)
+
+query IIII
+SELECT (SELECT count(*) FROM zd AT (BRANCH => 'zdb_child')),
+       (SELECT count(*) FROM zd AT (BRANCH => 'zdb_child') WHERE k = 100),
+       (SELECT count(*) FROM zd AT (BRANCH => 'zdb_child') WHERE k = 200),
+       (SELECT count(*) FROM zd AT (BRANCH => 'zdb_child') WHERE k = 2)
 ----
-<REGEX>:.*inherits a line that differs by a delta.*
+4	0	1	0
 
 # a merge lands in the branch's own table, and finds it under any spelling of the source's name
 statement ok

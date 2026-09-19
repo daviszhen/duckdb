@@ -969,27 +969,9 @@ static string PragmaGit4DataBindBranchDelta(ClientContext &context, const Functi
 		                            "from it: the two sides mean opposite things. Name two tables.",
 		                            added_table, source_table);
 	}
-	// A branch that inherited a line which differs by a delta would have to apply two of them, and a read
-	// cannot. Refusing here rather than at the first read is the same rule the rest of this file follows:
-	// nothing is promised that the reads cannot deliver.
-	if (!branch.base_line.empty()) {
-		Git4DataBranch line_branch;
-		if (transaction_manager.branches.Get(branch.base_line, line_branch)) {
-			for (auto &line_delta : line_branch.deltas) {
-				// a source that has been renamed matches by its oid, exactly as a read matches it: the stored
-				// name is the one it had when the delta was bound, and the key is the one it has now
-				if (!Git4DataSourceKeyMatches(context, line_delta.source, source_key) &&
-				    (line_delta.source_oid == 0 || line_delta.source_oid != source.oid)) {
-					continue;
-				}
-				throw InvalidInputException(
-				    "Branch \"%s\" inherits a line that differs by a delta, so a delta of its own "
-				    "would be a second one over the same source and a read would have to apply both. "
-				    "Materialize one of the two lines first.",
-				    branch_name);
-			}
-		}
-	}
+	// A branch that inherited a line which differs by a delta may be given one of its own: the two
+	// overlays apply in order, the inherited one at the commit the branch forked at and this one as of
+	// now, which is what a read of it walks. Nothing is refused here for that shape any more.
 	for (auto &storage_entry : branch.storage_tables) {
 		if (!Git4DataSourceKeyMatches(context, storage_entry.source, source_key) &&
 		    (storage_entry.source_oid == 0 || storage_entry.source_oid != source.oid)) {
@@ -1655,6 +1637,14 @@ static string PragmaGit4DataMerge(ClientContext &context, const FunctionParamete
 			transaction_t fork = 0;
 			Git4DataBranch fork_branch;
 			for (auto &side : {left_name, right_name}) {
+				// The ancestor's own pin is where the *ancestor* started, not where the two sides parted. When
+				// one of the two *is* the ancestor - merging a child back into its parent - the commit that
+				// names the parting state is the other side's fork pin. Measured: taking the ancestor's own pin
+				// there read its line at the commit it was created at, so a parent that differs by a delta read
+				// as the raw source, with its own additions and removals missing from the base.
+				if (side == ancestor) {
+					continue;
+				}
 				if (transaction_manager.branches.Get(side, fork_branch)) {
 					fork = fork_branch.pin;
 					break;
@@ -1696,7 +1686,14 @@ static string PragmaGit4DataMerge(ClientContext &context, const FunctionParamete
 		for (auto &delta_entry : ancestor_branch.deltas) {
 			if (Git4DataSourceKeyMatches(context, delta_entry.source, merge_key) ||
 			    (delta_entry.source_oid != 0 && delta_entry.source_oid == merge_source.oid)) {
-				name_the_parting_state();
+				// A delta is the ancestor's own change to the source and lives in two tables, which no pin
+				// points at, so the base has to name the ancestor's *line* at the commit the sides parted at -
+				// not the ancestor's pin against the line it inherited. Measured: with that pair the base was
+				// the raw source at the ancestor's own start commit, so the ancestor's own additions and
+				// removals came back as the other side's changes - a merge into it reported "removed 3" (a key
+				// the ancestor itself had removed) and never saw the key the other side had really removed,
+				// which then stayed in the target while the merge reported success.
+				name_line_as_base();
 			}
 		}
 		for (auto &storage_entry : ancestor_branch.storage_tables) {

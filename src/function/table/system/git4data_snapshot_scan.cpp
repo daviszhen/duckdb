@@ -44,21 +44,27 @@ struct Git4DataRemovedKeys {
 	}
 };
 
+//! One overlay on a line: the table holding the rows the reference has that its base does not, and the
+//! table holding the keys it took away from the base. Both are the caller's tables, read at the commit
+//! the line that carries them was pinned at - which is why the commit travels with the overlay rather
+//! than with the read: a branch that inherited a line reads the inherited overlay at its own pin and
+//! its own overlay as of now, and the two are different commits.
+struct Git4DataDeltaLayer {
+	string added;
+	string removed;
+	VisibilityBound bound;
+};
+
 struct Git4DataSnapshotScanBindData : public TableFunctionData {
 	string table_name;
 	string reference_name;
 	Git4DataRefKind kind;
 	VisibilityBound bound;
-	//! The rows the reference added to its base and the keys it removed, empty when it holds a copy of
-	//! its base instead of differing from it
-	string delta_added;
-	string delta_removed;
+	//! The overlays standing between the base and what this reference holds, in the order they apply -
+	//! empty when it holds a copy of its base, or a pin of the table itself
+	vector<Git4DataDeltaLayer> deltas;
 	//! Whether the table this read scans is a branch's own copy rather than the source table
 	bool own_storage = false;
-	//! The keys that delta removed, in the form the base is filtered with
-	Git4DataRemovedKeys removed;
-	//! The commit this reference's delta is read at: its own pin, or the pin it captured a line at
-	VisibilityBound delta_bound;
 };
 
 static void Git4DataDiffPrimaryKey(TableCatalogEntry &table, vector<StorageIndex> &columns, vector<LogicalType> &types,
@@ -295,22 +301,116 @@ static void Git4DataCollectRemovedKeys(ClientContext &context, const string &rem
 	}
 }
 
+//! One overlay as a read has it set up: the table holding its added rows, the commit it is read at, the
+//! keys it removed (read in full while the read is set up - a delta removes what it removes, which is the
+//! smaller side by construction), and the scan over its added rows. A scan is consumed as it walks, so
+//! every side of a diff needs its own - which is why the scan lives here rather than in the read.
+struct Git4DataDeltaRead {
+	Git4DataDeltaLayer layer;
+	Git4DataRemovedKeys removed;
+	unique_ptr<TableScanState> scan;
+	//! A chunk cannot be moved, so it is held behind a pointer like the scan
+	unique_ptr<DataChunk> chunk;
+	//! The added table itself, for the scan of the caller's own uncommitted rows, and the database it
+	//! lives in
+	optional_ptr<DataTable> storage;
+	optional_ptr<AttachedDatabase> database;
+	bool rows_done = false;
+	bool local_open = false;
+
+	//! Read this overlay's next chunk of added rows: the committed ones out of its row groups first, then
+	//! the rows the caller has written to that table and not committed, which are in its local storage.
+	//! False once the overlay has no rows left.
+	bool Next(ClientContext &context, const vector<StorageIndex> &column_ids, DataChunk &target) {
+		while (true) {
+			target.Reset();
+			if (local_open) {
+				auto &transaction = DuckTransaction::Get(context, *database);
+				LocalStorage::Get(transaction).Scan(scan->local_state, column_ids, target);
+				return target.size() != 0;
+			}
+			if (rows_done) {
+				return false;
+			}
+			ScanOptions options(Git4DataDeltaTransactionData(context, database, layer.bound));
+			scan->table_state.Scan(options, target);
+			if (target.size() != 0) {
+				return true;
+			}
+			rows_done = true;
+			if (!storage || !database) {
+				return false;
+			}
+			auto &transaction = DuckTransaction::Get(context, *database);
+			LocalStorage::Get(transaction).InitializeScan(*storage, scan->local_state, nullptr);
+			local_open = true;
+		}
+	}
+};
+
+//! The hash of a row's key for every removal set that uses hashes, so the per-row loop below can look a
+//! row up in each of them. It is one column per key column per set, computed for the chunk rather than
+//! for a row, which is what keeps a filter over two sets from costing two string builds a row.
+static void Git4DataHashForRemovals(const vector<Git4DataRemovedKeys> &removals,
+                                    vector<unique_ptr<DataChunk>> &hashes, idx_t from, DataChunk &chunk,
+                                    const vector<idx_t> &key_positions) {
+	for (idx_t i = from; i < removals.size(); i++) {
+		if (!removals[i].Empty() && !removals[i].typed && removals[i].hashes_usable) {
+			Git4DataHashKeyColumns(chunk, key_positions, *hashes[i]);
+		}
+	}
+}
+
+//! The rows of `chunk` that none of the removal sets from `from` on holds, as a selection. A read keeps a
+//! row when every overlay that comes after the one it came from leaves it alone: the base is filtered by
+//! all of them, and an overlay's own added rows only by the overlays that come after it - a key an overlay
+//! removed is gone from everything below it, and a row added on top of that is there again.
+static idx_t Git4DataKeepRows(ClientContext &context, const vector<Git4DataRemovedKeys> &removals,
+                              vector<unique_ptr<DataChunk>> &hashes, idx_t from, DataChunk &chunk,
+                              const vector<idx_t> &key_positions, SelectionVector &kept) {
+	auto count = chunk.size();
+	bool any = false;
+	for (idx_t i = from; i < removals.size(); i++) {
+		if (!removals[i].Empty()) {
+			any = true;
+			break;
+		}
+	}
+	if (!any) {
+		return count;
+	}
+	Git4DataHashForRemovals(removals, hashes, from, chunk, key_positions);
+	idx_t kept_count = 0;
+	for (idx_t row = 0; row < count; row++) {
+		bool removed = false;
+		for (idx_t i = from; i < removals.size(); i++) {
+			if (Git4DataRowWasRemoved(removals[i], chunk, key_positions, *hashes[i], row)) {
+				removed = true;
+				break;
+			}
+		}
+		if (!removed) {
+			kept.set_index(kept_count++, row);
+		}
+	}
+	return kept_count;
+}
+
 struct Git4DataSnapshotScanState : public GlobalTableFunctionState {
 	TableScanState scan_state;
-	//! The rows the reference added, scanned once the base is exhausted
-	TableScanState added_scan;
-	//! The removed keys, read in full while the scan is set up - a delta removes what it removes, which
-	//! is the smaller side by construction
-	TableScanState removed_scan;
 	DataChunk scan_chunk;
-	DataChunk added_chunk;
-	DataChunk removed_chunk;
 	vector<StorageIndex> column_ids;
 	//! Where the key columns sit in the scanned columns, so a row's key can be built from a chunk
 	vector<idx_t> key_positions;
-	//! The keys this reference's delta removed, in the form the base is filtered with
-	Git4DataRemovedKeys removed;
-	DataChunk key_hashes;
+	//! The overlays this read applies, in the order they apply, with the keys each removed
+	vector<Git4DataDeltaRead> deltas;
+	//! The removals of every overlay, one bucket each, because the base is filtered by all of them
+	vector<Git4DataRemovedKeys> removals;
+	vector<unique_ptr<DataChunk>> removal_hashes;
+	//! The overlay whose added rows are being read, and once the base is behind this read
+	idx_t delta_index = 0;
+	bool base_done = false;
+	bool finished = false;
 	//! The database the delta's tables live in, so a scan of them can run under the caller's transaction
 	optional_ptr<AttachedDatabase> delta_database;
 	//! The table this read scans, when it is a branch's own copy, and whether its local rows have been
@@ -318,15 +418,9 @@ struct Git4DataSnapshotScanState : public GlobalTableFunctionState {
 	optional_ptr<DataTable> base_storage;
 	bool own_storage = false;
 	bool reading_local_base = false;
-	//! The added table itself, for the scan of the caller's own uncommitted rows
-	optional_ptr<DataTable> added_storage;
-	//! Whether the added rows are being read from the caller's local storage rather than the row groups
-	bool reading_local_added = false;
-	VisibilityBound delta_bound;
+	//! The commit the base is read at: everything committed for a branch read as of now, and the commit
+	//! a reference captured
 	VisibilityBound bound;
-	bool has_delta = false;
-	bool reading_added = false;
-	bool finished = false;
 
 	idx_t MaxThreads() const override {
 		return 1;
@@ -431,40 +525,34 @@ static string Git4DataBranchStorageTable(ClientContext &context, const Git4DataB
 	return string();
 }
 
-//! How a reference is read: the table to scan, the bound to scan it at, and - when the reference
-//! differs from its base through a delta rather than through a copy of it - the two tables that say
-//! how: the rows it has that the base does not, and the keys it has removed from the base.
+//! How a reference is read: the table to scan, the bound to scan it at, and the overlays that stand
+//! between the two. Usually none (a pin of a table, or a copy of it), one for a branch that differs by a
+//! delta - and **two** for a branch that inherited a line which differs by a delta and has one of its
+//! own, which apply in order: the inherited line first, then what the branch has done since.
 struct Git4DataReadPlan {
 	string table_name;
 	VisibilityBound bound;
-	string delta_added;
-	string delta_removed;
-	//! The commit the delta itself is read at: everything committed for a branch reading its own line,
-	//! and the commit a reference captured when what it names is that line as it stood then. A base does
-	//! not move and a delta does, which is why the two are read at different bounds.
-	VisibilityBound delta_bound;
+	vector<Git4DataDeltaLayer> deltas;
 	//! Whether the table being read is a branch's *own* copy rather than the source. A copy is the
 	//! caller's table like any other, so a read of it sees what that transaction has written to it -
 	//! including rows it has not committed, which live in its local storage rather than in row groups.
 	bool own_storage = false;
 
 	bool HasDelta() const {
-		return !delta_added.empty() || !delta_removed.empty();
+		return !deltas.empty();
 	}
 };
 
 //! Where a branch's line lives at a commit, and what it differs by. A branch is a pin plus what it
 //! inherits, so its state at a commit is one table read at a bound - the base, which does not move -
-//! plus at most one delta read at that same commit. AllCommitted as the bound means the state now.
+//! plus the overlays it carries, each read at the commit its own line pinned. AllCommitted as the bound
+//! means the state now.
 struct Git4DataLineState {
 	string base_table;
 	//! Whether `base_table` is a branch's own copy rather than the source table
 	bool own_storage = false;
 	VisibilityBound base_bound;
-	string delta_added;
-	string delta_removed;
-	VisibilityBound delta_bound;
-	bool has_delta = false;
+	vector<Git4DataDeltaLayer> deltas;
 };
 
 //! A delta's two tables have to be able to stand in for the source: the added rows are read as rows of
@@ -531,7 +619,6 @@ static Git4DataLineState ResolveGit4DataLineState(ClientContext &context, DuckTr
                                                   VisibilityBound at) {
 	Git4DataLineState state;
 	state.base_bound = at;
-	state.delta_bound = at;
 	auto storage = Git4DataBranchStorageTable(context, branch, table_name);
 	if (!storage.empty()) {
 		// the branch's own line is a table: read as it is now, or as it stood at the commit asked for.
@@ -577,10 +664,9 @@ static Git4DataLineState ResolveGit4DataLineState(ClientContext &context, DuckTr
 			state.base_table = inherited.base_table;
 			state.own_storage = inherited.own_storage;
 			state.base_bound = inherited.base_bound;
-			state.delta_added = inherited.delta_added;
-			state.delta_removed = inherited.delta_removed;
-			state.delta_bound = inherited.delta_bound;
-			state.has_delta = inherited.has_delta;
+			// the line it inherited carries its own overlays, at the commits *it* pinned them - the
+			// branch's own delta is appended after them below, so they are applied first
+			state.deltas = inherited.deltas;
 		}
 	}
 	if (state.base_table.empty()) {
@@ -589,8 +675,8 @@ static Git4DataLineState ResolveGit4DataLineState(ClientContext &context, DuckTr
 		state.base_bound = VisibilityBound::Through(branch.pin);
 	}
 	// the branch's own delta, read at the commit whose state was asked for
-	string added;
-	string removed;
+	Git4DataDeltaLayer own;
+	own.bound = at;
 	for (auto &delta : branch.deltas) {
 		// the source's name can change under the mapping, and its oid is what survives that
 		auto &requested = Git4DataResolveTable(context, table_name);
@@ -621,23 +707,15 @@ static Git4DataLineState ResolveGit4DataLineState(ClientContext &context, DuckTr
 			}
 			auto &source = Git4DataResolveTable(context, table_name);
 			Git4DataCheckDeltaColumns(source, *added_table, *removed_table);
-			added = Git4DataTableName(*added_table);
-			removed = Git4DataTableName(*removed_table);
+			own.added = Git4DataTableName(*added_table);
+			own.removed = Git4DataTableName(*removed_table);
 		}
 	}
-	if (!added.empty() || !removed.empty()) {
-		if (state.has_delta) {
-			// the inherited delta says what the line it took looks like, and the branch's own says what it
-			// has done since; a read would have to apply both, which is not built
-			throw InvalidInputException(
-			    "Branch \"%s\" inherits a line that differs by a delta and has a delta of its own, and a read of it "
-			    "would have to apply both. Materialize one of the two lines first.",
-			    branch.name);
-		}
-		state.delta_added = added;
-		state.delta_removed = removed;
-		state.delta_bound = at;
-		state.has_delta = true;
+	if (!own.added.empty() || !own.removed.empty()) {
+		// The overlays apply in order, the inherited ones first: what the line it took looks like, then
+		// what the branch has done since. Each is read at the commit its own line pinned, which is why
+		// they cannot be collapsed into one - the inherited one does not move with the branch.
+		state.deltas.push_back(own);
 	}
 	return state;
 }
@@ -655,10 +733,9 @@ static void ResolveGit4DataRead(ClientContext &context, DuckTransactionManager &
 		}
 		plan.table_name = table_name;
 		plan.bound = VisibilityBound::Through(snapshot.pin);
-		plan.delta_bound = VisibilityBound::Through(snapshot.pin);
 		if (!snapshot.line.empty()) {
 			// It captured a branch's own line, so what it names is that line as it stood at the pin -
-			// which is a base that does not move plus that branch's delta read at the pin. A line whose
+			// which is a base that does not move plus that branch's overlays read at the pin. A line whose
 			// branch is gone falls back to the pinned image, the way a branch whose storage was dropped
 			// does.
 			Git4DataBranch line_branch;
@@ -668,9 +745,7 @@ static void ResolveGit4DataRead(ClientContext &context, DuckTransactionManager &
 				plan.table_name = state.base_table;
 				plan.own_storage = state.own_storage;
 				plan.bound = state.base_bound;
-				plan.delta_added = state.delta_added;
-				plan.delta_removed = state.delta_removed;
-				plan.delta_bound = state.delta_bound;
+				plan.deltas = state.deltas;
 			}
 		}
 		return;
@@ -685,9 +760,7 @@ static void ResolveGit4DataRead(ClientContext &context, DuckTransactionManager &
 	plan.table_name = state.base_table;
 	plan.own_storage = state.own_storage;
 	plan.bound = state.base_bound;
-	plan.delta_added = state.delta_added;
-	plan.delta_removed = state.delta_removed;
-	plan.delta_bound = state.delta_bound;
+	plan.deltas = state.deltas;
 }
 
 static Git4DataReadPlan ResolveGit4DataReferencePlan(ClientContext &context,
@@ -704,7 +777,6 @@ static Git4DataReadPlan ResolveGit4DataReferencePlan(ClientContext &context,
 		live.table_name = table_name;
 		live.own_storage = true;
 		live.bound = VisibilityBound::AllCommitted();
-		live.delta_bound = live.bound;
 		return live;
 	}
 	Git4DataRefKind kind;
@@ -779,9 +851,7 @@ unique_ptr<FunctionData> Git4DataSnapshotScanFun::CreateBindData(ClientContext &
 	result->table_name = plan.table_name;
 	result->own_storage = plan.own_storage;
 	result->bound = plan.bound;
-	result->delta_added = plan.delta_added;
-	result->delta_removed = plan.delta_removed;
-	result->delta_bound = plan.delta_bound;
+	result->deltas = plan.deltas;
 	return std::move(result);
 }
 
@@ -804,7 +874,6 @@ static unique_ptr<GlobalTableFunctionState> Git4DataSnapshotScanInit(ClientConte
 	auto &bind_data = input.bind_data->Cast<Git4DataSnapshotScanBindData>();
 	auto result = make_uniq<Git4DataSnapshotScanState>();
 	result->bound = bind_data.bound;
-	result->delta_bound = bind_data.delta_bound;
 
 	auto &table = Git4DataResolveTable(context, bind_data.table_name);
 	auto &storage = table.GetStorage();
@@ -829,12 +898,12 @@ static unique_ptr<GlobalTableFunctionState> Git4DataSnapshotScanInit(ClientConte
 	QueryContext query_context;
 	row_groups.InitializeScan(query_context, result->scan_state.table_state, result->column_ids, nullptr);
 
-	if (bind_data.delta_added.empty() && bind_data.delta_removed.empty()) {
+	if (bind_data.deltas.empty()) {
 		return std::move(result);
 	}
-	// A delta: the base is read minus the keys it removed, and the rows it added follow. Both tables
-	// carry the source's columns in the same order, so the same column list serves for all three.
-	result->has_delta = true;
+	// Overlays: the base is read minus the keys they removed, and the rows they added follow, in the
+	// order the overlays apply. All the tables carry the source's columns in the same order, so the
+	// same column list serves for all of them.
 	vector<StorageIndex> key_columns;
 	vector<LogicalType> key_types;
 	vector<Identifier> key_names;
@@ -852,30 +921,45 @@ static unique_ptr<GlobalTableFunctionState> Git4DataSnapshotScanInit(ClientConte
 			ordered_key_types.push_back(column.Type());
 		}
 	}
-	if (!bind_data.delta_added.empty()) {
-		auto &added_table = Git4DataResolveTable(context, bind_data.delta_added);
-		result->added_chunk.Initialize(Allocator::Get(context), scan_types);
-		result->added_scan.Initialize(result->column_ids, nullptr);
-		added_table.GetStorage().GetRowGroupCollection()->InitializeScan(query_context, result->added_scan.table_state,
-		                                                                 result->column_ids, nullptr);
-		result->added_storage = added_table.GetStorage();
-	}
-	Git4DataCollectRemovedKeys(context, bind_data.delta_removed, ordered_key_types, key_columns.size(),
-	                           bind_data.delta_bound, result->removed);
-	// the delta's own tables are read as the caller has them, so their database is remembered here
-	if (!bind_data.delta_removed.empty()) {
-		auto &removed_entry = Git4DataResolveTable(context, bind_data.delta_removed);
-		result->delta_database = removed_entry.GetStorage().GetAttached();
-	} else if (!bind_data.delta_added.empty()) {
-		auto &added_entry = Git4DataResolveTable(context, bind_data.delta_added);
-		result->delta_database = added_entry.GetStorage().GetAttached();
-	}
-	// one hash column per key column, filled per chunk so the filter below needs no allocation per row
+	// one hash column per key column per overlay, filled per chunk so the filter below needs no
+	// allocation per row
 	vector<LogicalType> hash_types;
 	for (idx_t i = 0; i < result->key_positions.size(); i++) {
 		hash_types.push_back(LogicalType::HASH);
 	}
-	result->key_hashes.Initialize(Allocator::Get(context), hash_types);
+	result->removals.resize(bind_data.deltas.size());
+	result->removal_hashes.resize(bind_data.deltas.size());
+	for (idx_t i = 0; i < bind_data.deltas.size(); i++) {
+		auto &layer = bind_data.deltas[i];
+		Git4DataDeltaRead read;
+		read.layer = layer;
+		if (!layer.added.empty()) {
+			auto &added_table = Git4DataResolveTable(context, layer.added);
+			read.chunk = make_uniq<DataChunk>();
+			read.chunk->Initialize(Allocator::Get(context), scan_types);
+			read.scan = make_uniq<TableScanState>();
+			read.scan->Initialize(result->column_ids, nullptr);
+			added_table.GetStorage().GetRowGroupCollection()->InitializeScan(
+			    query_context, read.scan->table_state, result->column_ids, nullptr);
+			read.storage = added_table.GetStorage();
+		}
+		Git4DataCollectRemovedKeys(context, layer.removed, ordered_key_types, key_columns.size(), layer.bound,
+		                           read.removed);
+		// the overlays' own tables are read as the caller has them, so the database each lives in is
+		// remembered here; a read of a removed side is what decides it when there is one, which is where
+		// the caller's transaction check runs
+		if (!layer.removed.empty()) {
+			auto &removed_entry = Git4DataResolveTable(context, layer.removed);
+			read.database = removed_entry.GetStorage().GetAttached();
+		} else if (read.storage) {
+			read.database = read.storage->GetAttached();
+		}
+		result->delta_database = read.database;
+		result->removals[i] = std::move(read.removed);
+		result->removal_hashes[i] = make_uniq<DataChunk>();
+		result->removal_hashes[i]->Initialize(Allocator::Get(context), hash_types);
+		result->deltas.push_back(std::move(read));
+	}
 	return std::move(result);
 }
 
@@ -884,8 +968,8 @@ static void Git4DataSnapshotScanFunction(ClientContext &context, TableFunctionIn
 	if (state.finished) {
 		return;
 	}
-	// the base first, with the keys the delta removed left out
-	while (!state.reading_added) {
+	// the base first, with the keys the overlays removed left out
+	while (!state.base_done) {
 		state.scan_chunk.Reset();
 		if (state.reading_local_base) {
 			// the rows the caller has written to the copy it holds but not committed, which are in its
@@ -913,35 +997,25 @@ static void Git4DataSnapshotScanFunction(ClientContext &context, TableFunctionIn
 		}
 		auto count = state.scan_chunk.size();
 		if (count == 0) {
-			if (!state.has_delta) {
-				state.finished = true;
-				return;
-			}
-			// the base is exhausted; what follows is what the delta added
-			state.reading_added = true;
+			// the base is exhausted; what follows is what the overlays added, in their own order
+			state.base_done = true;
 			break;
 		}
-		if (state.removed.Empty()) {
+		// every overlay's removals apply to the base: a key one of them took away is not part of the
+		// line, whichever overlay took it
+		SelectionVector kept(count);
+		auto kept_count = Git4DataKeepRows(context, state.removals, state.removal_hashes, 0, state.scan_chunk,
+		                                   state.key_positions, kept);
+		if (kept_count == 0) {
+			// every row of this chunk was removed, so the next one is what to look at
+			continue;
+		}
+		if (kept_count == count) {
 			for (idx_t i = 0; i < output.ColumnCount(); i++) {
 				output.data[i].Reference(state.scan_chunk.data[i]);
 			}
 			output.SetCardinality(count);
 			return;
-		}
-		SelectionVector kept(count);
-		idx_t kept_count = 0;
-		// the hashes are built only when the set uses them: the typed set and the strings do not
-		if (!state.removed.typed && state.removed.hashes_usable) {
-			Git4DataHashKeyColumns(state.scan_chunk, state.key_positions, state.key_hashes);
-		}
-		for (idx_t row = 0; row < count; row++) {
-			if (!Git4DataRowWasRemoved(state.removed, state.scan_chunk, state.key_positions, state.key_hashes, row)) {
-				kept.set_index(kept_count++, row);
-			}
-		}
-		if (kept_count == 0) {
-			// every row of this chunk was removed, so the next one is what to look at
-			continue;
 		}
 		for (idx_t i = 0; i < output.ColumnCount(); i++) {
 			output.data[i].Slice(state.scan_chunk.data[i], kept, kept_count);
@@ -949,45 +1023,46 @@ static void Git4DataSnapshotScanFunction(ClientContext &context, TableFunctionIn
 		output.SetCardinality(kept_count);
 		return;
 	}
-	if (!state.reading_added) {
+	if (!state.base_done) {
 		state.finished = true;
 		return;
 	}
-	// then the rows the branch added, which are the caller's own table and so are read as the caller
-	// has them, at the bound this reference's delta is read at. The committed rows come from the row
-	// groups and the caller's own uncommitted ones from its local storage, in that order: measured,
-	// reading only the row groups left a statement group unable to see what its own earlier statements
-	// had added - `INSERT INTO t VALUES (50,50); UPDATE t SET v = 51 WHERE k = 50` left 50.
-	if (!state.reading_local_added) {
-		state.added_chunk.Reset();
-		ScanOptions added_options(Git4DataDeltaTransactionData(context, state.delta_database, state.delta_bound));
-		state.added_scan.table_state.Scan(added_options, state.added_chunk);
-		if (state.added_chunk.size() != 0) {
+	// then the rows the overlays added, in the order the overlays apply. They are the caller's own
+	// tables and so are read as the caller has them, each at the commit its own line pinned. The
+	// committed rows come from the row groups and the caller's own uncommitted ones from its local
+	// storage, in that order: measured, reading only the row groups left a statement group unable to
+	// see what its own earlier statements had added - `INSERT INTO t VALUES (50,50); UPDATE t SET v = 51
+	// WHERE k = 50` left 50.
+	while (state.delta_index < state.deltas.size()) {
+		auto &delta = state.deltas[state.delta_index];
+		if (!delta.Next(context, state.column_ids, *delta.chunk)) {
+			state.delta_index++;
+			continue;
+		}
+		auto count = delta.chunk->size();
+		// An overlay's own rows are filtered by the removals of the overlays *after* it, and by no
+		// others: a row it added is there whatever the line below it had removed, and an overlay above
+		// it that removed the same key takes it away again.
+		if (state.delta_index + 1 >= state.removals.size()) {
 			for (idx_t i = 0; i < output.ColumnCount(); i++) {
-				output.data[i].Reference(state.added_chunk.data[i]);
+				output.data[i].Reference(delta.chunk->data[i]);
 			}
-			output.SetCardinality(state.added_chunk.size());
+			output.SetCardinality(count);
 			return;
 		}
-		if (!state.added_storage || !state.delta_database) {
-			state.finished = true;
-			return;
+		SelectionVector kept(count);
+		auto kept_count = Git4DataKeepRows(context, state.removals, state.removal_hashes, state.delta_index + 1,
+		                                   *delta.chunk, state.key_positions, kept);
+		if (kept_count == 0) {
+			continue;
 		}
-		auto &open_transaction = DuckTransaction::Get(context, *state.delta_database);
-		LocalStorage::Get(open_transaction).InitializeScan(*state.added_storage, state.added_scan.local_state, nullptr);
-		state.reading_local_added = true;
-	}
-	auto &transaction = DuckTransaction::Get(context, *state.delta_database);
-	state.added_chunk.Reset();
-	LocalStorage::Get(transaction).Scan(state.added_scan.local_state, state.column_ids, state.added_chunk);
-	if (state.added_chunk.size() == 0) {
-		state.finished = true;
+		for (idx_t i = 0; i < output.ColumnCount(); i++) {
+			output.data[i].Slice(delta.chunk->data[i], kept, kept_count);
+		}
+		output.SetCardinality(kept_count);
 		return;
 	}
-	for (idx_t i = 0; i < output.ColumnCount(); i++) {
-		output.data[i].Reference(state.added_chunk.data[i]);
-	}
-	output.SetCardinality(state.added_chunk.size());
+	state.finished = true;
 }
 
 //! The rows that differ between two references. A row is visible at a bound when its insert id is
@@ -1028,14 +1103,10 @@ struct Git4DataDiffBindData : public TableFunctionData {
 	//! makes them. Different tables do not share row ids - the branch's storage numbers its own rows
 	//! from zero again - so the comparison has to be made on the primary key instead.
 	bool compare_by_key = false;
-	//! A side that differs from its base through a delta is read through it here too: the rows it added
-	//! are part of that side, and the keys it removed are not
-	string left_delta_added;
-	string left_delta_removed;
-	VisibilityBound left_delta_bound;
-	string right_delta_added;
-	string right_delta_removed;
-	VisibilityBound right_delta_bound;
+	//! A side that differs from its base through overlays is read through them here too: the rows they
+	//! added are part of that side, and the keys they removed are not
+	vector<Git4DataDeltaLayer> left_deltas;
+	vector<Git4DataDeltaLayer> right_deltas;
 };
 
 //! Marks a Change that stands alone rather than being paired with a counterpart
@@ -1188,17 +1259,6 @@ struct Git4DataDiffState : public GlobalTableFunctionState {
 	bool right_local_open = false;
 	bool left_own_storage = false;
 	bool right_own_storage = false;
-	//! Whether each side has opened the added scan yet: it is consumed as it walks and the state is
-	//! shared, so a side that found it already open would read no added rows at all - which is what a
-	//! diff of a reference against itself did, reporting its own added row as a removed one.
-	bool left_added_open = false;
-	bool right_added_open = false;
-	bool left_added_local_open = false;
-	bool right_added_local_open = false;
-	//! The added table currently open, for the scan of the caller's own uncommitted rows
-	optional_ptr<DataTable> added_storage;
-	//! Whether that added table has had its local-storage scan set up
-	bool added_local_open = false;
 	vector<StorageIndex> column_ids;
 	idx_t key_count = 0;
 	//! Whether the key is a single integer column, which is what the bits path above needs
@@ -1226,20 +1286,14 @@ struct Git4DataDiffState : public GlobalTableFunctionState {
 	//! Whether the two sides are two different tables, in which case the comparison is made on the
 	//! primary key and the scan carries every column so two rows can be told apart by value.
 	bool compare_by_key = false;
-	//! The keys each side removed from its base, and the table it added rows with. The phases run one
-	//! after the other, so one added scan serves both sides and is re-initialized when the side changes.
-	Git4DataRemovedKeys left_removed;
-	Git4DataRemovedKeys right_removed;
-	string left_added_table;
-	string right_added_table;
-	VisibilityBound left_delta_bound;
-	VisibilityBound right_delta_bound;
-	//! The bound the added table currently open is read at
-	VisibilityBound added_bound;
-	string open_added_table;
-	TableScanState added_scan;
-	DataChunk added_chunk;
-	//! The types of the bundled scan, so the added table's chunk can be built to match it
+	//! The overlays each side applies, with the keys each of them removed, and the scan over each
+	//! overlay's added rows. Every side needs its own: a scan is consumed as it walks, and the phases
+	//! run one after the other over the same state - a side that found a scan already open would read no
+	//! added rows at all, which is what a diff of a reference against itself did, reporting its own added
+	//! row as a removed one.
+	vector<Git4DataDeltaRead> left_deltas;
+	vector<Git4DataDeltaRead> right_deltas;
+	//! The types of the bundled scan, so an overlay's chunk can be built to match it
 	vector<LogicalType> scan_types;
 	//! The number of columns after the keys, contiguous in the scan chunk, when comparing by key
 	idx_t value_count = 0;
@@ -1356,12 +1410,8 @@ unique_ptr<FunctionData> Git4DataDiffFun::CreateBindData(ClientContext &context,
 	result->right_own_storage = right_plan.own_storage;
 	result->left_bound = left_plan.bound;
 	result->right_bound = right_plan.bound;
-	result->left_delta_added = left_plan.delta_added;
-	result->left_delta_removed = left_plan.delta_removed;
-	result->left_delta_bound = left_plan.delta_bound;
-	result->right_delta_added = right_plan.delta_added;
-	result->right_delta_removed = right_plan.delta_removed;
-	result->right_delta_bound = right_plan.delta_bound;
+	result->left_deltas = left_plan.deltas;
+	result->right_deltas = right_plan.deltas;
 
 	auto &table = Git4DataResolveTable(context, table_name);
 	// a generated column cannot be read out of a row's stored columns, and a diff reads the same table the scan
@@ -1697,6 +1747,41 @@ static hash_t Git4DataDiffKeyHash(const vector<Value> &key) {
 	return result;
 }
 
+//! Set up one side's overlays for a diff, in the order they apply. The same bundled column list the
+//! side's base is read with serves for every overlay's added table: they carry the source's columns in
+//! the same order. Each overlay's removed keys are read once here, because a diff walks its base once.
+static void Git4DataDiffSetupDeltas(ClientContext &context, const vector<Git4DataDeltaLayer> &layers,
+                                    const vector<StorageIndex> &column_ids, const vector<LogicalType> &scan_types,
+                                    const vector<LogicalType> &key_types, idx_t key_count,
+                                    QueryContext &query_context, vector<Git4DataDeltaRead> &result,
+                                    optional_ptr<AttachedDatabase> &database) {
+	for (auto &layer : layers) {
+		Git4DataDeltaRead read;
+		read.layer = layer;
+		if (!layer.added.empty()) {
+			auto &added_table = Git4DataResolveTable(context, layer.added);
+			read.chunk = make_uniq<DataChunk>();
+			read.chunk->Initialize(Allocator::Get(context), scan_types);
+			read.scan = make_uniq<TableScanState>();
+			read.scan->Initialize(column_ids, nullptr);
+			added_table.GetStorage().GetRowGroupCollection()->InitializeScan(query_context, read.scan->table_state,
+			                                                                 column_ids, nullptr);
+			read.storage = added_table.GetStorage();
+		}
+		Git4DataCollectRemovedKeys(context, layer.removed, key_types, key_count, layer.bound, read.removed);
+		// the overlays' own tables are read as the caller has them, so the database each lives in is
+		// remembered here
+		if (!layer.removed.empty()) {
+			auto &removed_entry = Git4DataResolveTable(context, layer.removed);
+			read.database = removed_entry.GetStorage().GetAttached();
+		} else if (read.storage) {
+			read.database = read.storage->GetAttached();
+		}
+		database = read.database;
+		result.push_back(std::move(read));
+	}
+}
+
 static unique_ptr<GlobalTableFunctionState> Git4DataDiffInit(ClientContext &context, TableFunctionInitInput &input) {
 	auto &bind_data = input.bind_data->Cast<Git4DataDiffBindData>();
 	auto result = make_uniq<Git4DataDiffState>();
@@ -1745,38 +1830,25 @@ static unique_ptr<GlobalTableFunctionState> Git4DataDiffInit(ClientContext &cont
 		hash_types.push_back(LogicalType::HASH);
 	}
 	result->key_hashes.Initialize(Allocator::Get(context), hash_types);
-	// what each side removed from its base, read once: a side that differs by a delta is not the table
+	// what each side removed from its base, and the tables it added rows with, read once: a side that
+	// differs by an overlay is not the table
 	// A single integer key gives the diff an exact bucket and removes the per-row key and string allocations
 	result->key_is_integer = bind_data.key_columns.size() == 1 && Git4DataIsIntegerKeyType(bind_data.key_types[0]);
 	if (result->key_is_integer) {
 		result->integer_key_type = bind_data.key_types[0];
 	}
-	Git4DataCollectRemovedKeys(context, bind_data.left_delta_removed, bind_data.key_types, bind_data.key_columns.size(),
-	                           bind_data.left_delta_bound, result->left_removed);
-	Git4DataCollectRemovedKeys(context, bind_data.right_delta_removed, bind_data.key_types,
-	                           bind_data.key_columns.size(), bind_data.right_delta_bound, result->right_removed);
-	{
-		auto delta_table = !bind_data.left_delta_removed.empty()    ? bind_data.left_delta_removed
-		                   : !bind_data.left_delta_added.empty()    ? bind_data.left_delta_added
-		                   : !bind_data.right_delta_removed.empty() ? bind_data.right_delta_removed
-		                                                            : bind_data.right_delta_added;
-		if (!delta_table.empty()) {
-			auto &delta_entry = Git4DataResolveTable(context, delta_table);
-			result->delta_database = delta_entry.GetStorage().GetAttached();
-		}
-	}
+	QueryContext query_context;
+	Git4DataDiffSetupDeltas(context, bind_data.left_deltas, result->column_ids, scan_types, bind_data.key_types,
+	                        bind_data.key_columns.size(), query_context, result->left_deltas, result->delta_database);
+	Git4DataDiffSetupDeltas(context, bind_data.right_deltas, result->column_ids, scan_types, bind_data.key_types,
+	                        bind_data.key_columns.size(), query_context, result->right_deltas, result->delta_database);
 	result->left_own_storage = bind_data.left_own_storage;
 	result->right_own_storage = bind_data.right_own_storage;
 	result->left_storage = &Git4DataResolveTable(context, bind_data.left_table).GetStorage();
 	result->right_storage = &Git4DataResolveTable(context, bind_data.right_table).GetStorage();
-	result->left_added_table = bind_data.left_delta_added;
-	result->right_added_table = bind_data.right_delta_added;
-	result->left_delta_bound = bind_data.left_delta_bound;
-	result->right_delta_bound = bind_data.right_delta_bound;
 
 	// each side is read from its own table, which is the same table unless a side is a branch with a
 	// line of its own
-	QueryContext query_context;
 	auto &left_table = Git4DataResolveTable(context, bind_data.left_table);
 	auto &left_groups = *left_table.GetStorage().GetRowGroupCollection();
 	result->left_scan.Initialize(result->column_ids, nullptr);
@@ -1788,20 +1860,11 @@ static unique_ptr<GlobalTableFunctionState> Git4DataDiffInit(ClientContext &cont
 	return std::move(result);
 }
 
-//! Whether the side whose keys are in this set removed the row at `row`: the hash, computed once per
-//! chunk, spares the string for the rows that cannot be in the set, and the string still decides for
-//! the ones that can.
-static bool Git4DataDiffRowRemoved(Git4DataDiffState &state, const vector<idx_t> &key_positions,
-                                   const Git4DataRemovedKeys &removed, idx_t row) {
-	return Git4DataRowWasRemoved(removed, state.scan_chunk, key_positions, state.key_hashes, row);
-}
-
-//! Walk the whole table at one bound, handing every visible row and its row id to the callback.
+//! Walk one side at one bound - its base, then the rows each of its overlays added - handing every
+//! visible row and its row id to the callback.
 static void Git4DataDiffCollect(ClientContext &context, Git4DataDiffState &state, TableScanState &scan,
-                                VisibilityBound bound, const string &added_table, VisibilityBound added_bound,
-                                const Git4DataRemovedKeys &removed, optional_ptr<DataTable> side_storage,
-                                bool side_own_storage, bool &side_local_open, bool &side_added_open,
-                                bool &side_added_local_open,
+                                VisibilityBound bound, vector<Git4DataDeltaRead> &deltas,
+                                optional_ptr<DataTable> side_storage, bool side_own_storage, bool &side_local_open,
                                 const std::function<void(DataChunk &, row_t, idx_t)> &callback) {
 	// the key columns come first in the scan, so their positions are the first key_count columns
 	vector<idx_t> key_positions;
@@ -1818,6 +1881,20 @@ static void Git4DataDiffCollect(ClientContext &context, Git4DataDiffState &state
 	auto side_view = TransactionData(side_transaction);
 	ScanOptions options(side_own_storage ? TransactionData(side_view.GetTransactionId(), bound)
 	                                     : TransactionData(MAX_TRANSACTION_ID, bound));
+	// The base is filtered by every overlay's removals: a key one of them took away is not part of the
+	// side, whichever overlay took it.
+	vector<Git4DataRemovedKeys> removals;
+	vector<unique_ptr<DataChunk>> removal_hashes;
+	vector<LogicalType> hash_types;
+	for (idx_t i = 0; i < key_positions.size(); i++) {
+		hash_types.push_back(LogicalType::HASH);
+	}
+	for (auto &delta : deltas) {
+		auto hashes = make_uniq<DataChunk>();
+		hashes->Initialize(Allocator::Get(context), hash_types);
+		removal_hashes.push_back(std::move(hashes));
+		removals.push_back(delta.removed);
+	}
 	while (true) {
 		state.scan_chunk.Reset();
 		if (side_local_open) {
@@ -1834,81 +1911,58 @@ static void Git4DataDiffCollect(ClientContext &context, Git4DataDiffState &state
 		if (count == 0) {
 			break;
 		}
-		if (!removed.typed && removed.hashes_usable && state.key_hashes.ColumnCount() > 0) {
-			Git4DataHashKeyColumns(state.scan_chunk, key_positions, state.key_hashes);
+		if (!removals.empty() && state.key_hashes.ColumnCount() > 0) {
+			Git4DataHashForRemovals(removals, removal_hashes, 0, state.scan_chunk, key_positions);
 		}
 		// the row id column is not necessarily flat - a scan may hand back a dictionary
 		// the row id sits after the keys, and after the values when those are carried too
 		auto row_ids = state.scan_chunk.data[state.key_count + state.value_count].Values<row_t>();
 		for (idx_t i = 0; i < count; i++) {
-			if (Git4DataDiffRowRemoved(state, key_positions, removed, i)) {
+			bool removed = false;
+			for (idx_t s = 0; s < removals.size(); s++) {
+				if (Git4DataRowWasRemoved(removals[s], state.scan_chunk, key_positions, *removal_hashes[s], i)) {
+					removed = true;
+					break;
+				}
+			}
+			if (removed) {
 				// this side removed the row from its base, so it is not part of what the side holds
 				continue;
 			}
 			callback(state.scan_chunk, row_ids[i].GetValue(), i);
 		}
 	}
-	if (added_table.empty()) {
-		return;
-	}
-	// then the rows this side added, which are its own and so read as of everything committed
-	// The added scan is consumed as it walks, so each side has to open it for itself: the two sides
-	// share this state, and a side that found the scan already open would read nothing - which is what
-	// a diff of a reference against itself did, reporting its own added row as a removed one. Measured:
-	// `git4data_pick(t, b, b)` - a no-op - deleted that row from the live table.
-	if (!side_added_open || state.open_added_table != added_table) {
-		auto &table = Git4DataResolveTable(context, added_table);
-		if (state.added_chunk.ColumnCount() == 0) {
-			state.added_chunk.Initialize(Allocator::Get(context), state.scan_types);
-		}
-		state.added_scan.Initialize(state.column_ids, nullptr);
-		QueryContext query_context;
-		table.GetStorage().GetRowGroupCollection()->InitializeScan(query_context, state.added_scan.table_state,
-		                                                           state.column_ids, nullptr);
-		state.open_added_table = added_table;
-		state.added_bound = added_bound;
-		state.added_storage = table.GetStorage();
-		state.added_local_open = false;
-		side_added_open = true;
-		side_added_local_open = false;
-	}
-	ScanOptions added_options(Git4DataDeltaTransactionData(context, state.delta_database, added_bound));
-	while (true) {
-		state.added_chunk.Reset();
-		state.added_scan.table_state.Scan(added_options, state.added_chunk);
-		auto count = state.added_chunk.size();
-		if (count == 0) {
-			break;
-		}
-		auto row_ids = state.added_chunk.data[state.key_count + state.value_count].Values<row_t>();
-		for (idx_t i = 0; i < count; i++) {
-			callback(state.added_chunk, row_ids[i].GetValue(), i);
-		}
-	}
-	// The rows the caller has added to this table and not committed are in its local storage rather than
-	// in the row groups above, and a diff that cannot see them disagrees with the branch it is diffing:
-	// measured, inside the transaction that inserted a row the branch read showed it and the diff
-	// reported nothing added. The pick and the merge are built on this diff, so they had it too.
-	if (!state.added_storage || !state.delta_database) {
-		return;
-	}
-	auto &transaction = DuckTransaction::Get(context, *state.delta_database);
-	auto &local_storage = LocalStorage::Get(transaction);
-	if (!side_added_local_open) {
-		local_storage.InitializeScan(*state.added_storage, state.added_scan.local_state, nullptr);
-		side_added_local_open = true;
-		state.added_local_open = true;
-	}
-	while (true) {
-		state.added_chunk.Reset();
-		local_storage.Scan(state.added_scan.local_state, state.column_ids, state.added_chunk);
-		auto count = state.added_chunk.size();
-		if (count == 0) {
-			break;
-		}
-		auto row_ids = state.added_chunk.data[state.key_count + state.value_count].Values<row_t>();
-		for (idx_t i = 0; i < count; i++) {
-			callback(state.added_chunk, row_ids[i].GetValue(), i);
+	// then the rows each overlay added, in the order the overlays apply. An overlay's own rows are
+	// filtered by the removals of the overlays *after* it, and by no others. Each overlay is read from
+	// its own table, through its own scan - a scan is consumed as it walks, and every side of the diff
+	// walks its own.
+	for (idx_t index = 0; index < deltas.size(); index++) {
+		auto &delta = deltas[index];
+		while (delta.Next(context, state.column_ids, *delta.chunk)) {
+			auto count = delta.chunk->size();
+			auto row_ids = delta.chunk->data[state.key_count + state.value_count].Values<row_t>();
+			if (index + 1 >= removals.size()) {
+				for (idx_t i = 0; i < count; i++) {
+					callback(*delta.chunk, row_ids[i].GetValue(), i);
+				}
+				continue;
+			}
+			if (state.key_hashes.ColumnCount() > 0) {
+				Git4DataHashForRemovals(removals, removal_hashes, index + 1, *delta.chunk, key_positions);
+			}
+			for (idx_t i = 0; i < count; i++) {
+				bool removed = false;
+				for (idx_t s = index + 1; s < removals.size(); s++) {
+					if (Git4DataRowWasRemoved(removals[s], *delta.chunk, key_positions, *removal_hashes[s], i)) {
+						removed = true;
+						break;
+					}
+				}
+				if (removed) {
+					continue;
+				}
+				callback(*delta.chunk, row_ids[i].GetValue(), i);
+			}
 		}
 	}
 }
@@ -1958,9 +2012,8 @@ static void Git4DataDiffFunction(ClientContext &context, TableFunctionInput &dat
 		// that, and the values are read so two rows sharing a key can be told apart from one row.
 		if (state.phase == Git4DataDiffState::Phase::LEFT) {
 			Git4DataDiffCollect(
-			    context, state, state.left_scan, state.left_bound, state.left_added_table, state.left_delta_bound,
-			    state.left_removed, state.left_storage, state.left_own_storage, state.left_local_open,
-			    state.left_added_open, state.left_added_local_open, [&](DataChunk &chunk, row_t row_id, idx_t row) {
+			    context, state, state.left_scan, state.left_bound, state.left_deltas, state.left_storage,
+			    state.left_own_storage, state.left_local_open, [&](DataChunk &chunk, row_t row_id, idx_t row) {
 				    Git4DataDiffState::KeyedRow entry;
 				    entry.stored = Git4DataDiffStoreRow(state, context, chunk, row);
 				    entry.row_id = row_id;
@@ -1979,9 +2032,8 @@ static void Git4DataDiffFunction(ClientContext &context, TableFunctionInput &dat
 		}
 		if (state.phase == Git4DataDiffState::Phase::RIGHT) {
 			Git4DataDiffCollect(
-			    context, state, state.right_scan, state.right_bound, state.right_added_table, state.right_delta_bound,
-			    state.right_removed, state.right_storage, state.right_own_storage, state.right_local_open,
-			    state.right_added_open, state.right_added_local_open, [&](DataChunk &chunk, row_t row_id, idx_t row) {
+			    context, state, state.right_scan, state.right_bound, state.right_deltas, state.right_storage,
+			    state.right_own_storage, state.right_local_open, [&](DataChunk &chunk, row_t row_id, idx_t row) {
 				    uint64_t bits = 0;
 				    if (state.key_is_integer && Git4DataDiffChunkKeyBits(chunk, row, bits)) {
 					    // the chain's key is the key itself, so a hit is exact and needs no comparison of keys
@@ -2055,9 +2107,8 @@ static void Git4DataDiffFunction(ClientContext &context, TableFunctionInput &dat
 	}
 	if (state.phase == Git4DataDiffState::Phase::LEFT) {
 		Git4DataDiffCollect(
-		    context, state, state.left_scan, state.left_bound, state.left_added_table, state.left_delta_bound,
-		    state.left_removed, state.left_storage, state.left_own_storage, state.left_local_open,
-		    state.left_added_open, state.left_added_local_open, [&](DataChunk &chunk, row_t row_id, idx_t row) {
+		    context, state, state.left_scan, state.left_bound, state.left_deltas, state.left_storage,
+		    state.left_own_storage, state.left_local_open, [&](DataChunk &chunk, row_t row_id, idx_t row) {
 			    state.left_rows.Insert(row_id);
 			    if (state.key_count > 0) {
 				    uint64_t key_bits = 0;
@@ -2072,9 +2123,8 @@ static void Git4DataDiffFunction(ClientContext &context, TableFunctionInput &dat
 	}
 	if (state.phase == Git4DataDiffState::Phase::RIGHT) {
 		vector<pair<row_t, vector<Value>>> added_rows;
-		Git4DataDiffCollect(context, state, state.right_scan, state.right_bound, state.right_added_table,
-		                    state.right_delta_bound, state.right_removed, state.right_storage, state.right_own_storage,
-		                    state.right_local_open, state.right_added_open, state.right_added_local_open,
+		Git4DataDiffCollect(context, state, state.right_scan, state.right_bound, state.right_deltas,
+		                    state.right_storage, state.right_own_storage, state.right_local_open,
 		                    [&](DataChunk &chunk, row_t row_id, idx_t row) {
 			                    state.right_rows.Insert(row_id);
 			                    if (!state.left_rows.Contains(row_id)) {

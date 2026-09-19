@@ -440,9 +440,9 @@ SELECT count(*) FROM comp AT (BRANCH => 'cd')
 ----
 25
 
-# A branch that inherited a line which differs by a delta cannot have a delta of its own: a read would
-# have to apply both, so the bind refuses rather than promising it. The parent's line is held down by the
-# child at the same time, which is what the drop says.
+# A branch that inherited a line which differs by a delta *can* be given a delta of its own, and a read of
+# it applies both, in order: the line it inherited, read at the commit it forked at, and its own delta on
+# top. The parent's line is held down by the child at the same time, which is what the drop says.
 statement ok
 CREATE TABLE t_f (k INTEGER PRIMARY KEY, v INTEGER)
 
@@ -490,10 +490,35 @@ CREATE TABLE fc_add (k INTEGER PRIMARY KEY, v INTEGER)
 statement ok
 CREATE TABLE fc_del (k INTEGER PRIMARY KEY)
 
-statement error
+statement ok
 PRAGMA git4data_bind_branch_delta('t_f', 'fc', 'fc_add', 'fc_del')
+
+statement ok
+INSERT INTO fc_add VALUES (200, 200)
+
+# the key the *inherited* line added is taken away again by the branch's own delta, and a key of the base
+# goes with it: an overlay's removals apply to everything below it, whatever put the row there
+statement ok
+INSERT INTO fc_del VALUES (100)
+
+statement ok
+INSERT INTO fc_del VALUES (9)
+
+# ten rows: the base's ten less the one it removed, plus its own one - and the inherited row is gone
+query IIII
+SELECT (SELECT count(*) FROM t_f AT (BRANCH => 'fc')),
+       (SELECT count(*) FROM t_f AT (BRANCH => 'fc') WHERE k = 100),
+       (SELECT count(*) FROM t_f AT (BRANCH => 'fc') WHERE k = 200),
+       (SELECT count(*) FROM t_f AT (BRANCH => 'fc') WHERE k = 9)
 ----
-<REGEX>:.*inherits a line that differs by a delta.*
+10	0	1	0
+
+# the line it inherited is untouched by that: the parent still holds the row the child took away
+query II
+SELECT (SELECT count(*) FROM t_f AT (BRANCH => 'fp')),
+       (SELECT count(*) FROM t_f AT (BRANCH => 'fp') WHERE k = 100)
+----
+11	1
 
 # A delta is written in names too, and both its own tables and the source it applies to can be renamed
 # under it. The oids it recorded find them again - measured before this: renaming the added table dropped
@@ -578,14 +603,107 @@ SELECT count(*) FROM t_g2 AT (BRANCH => 'gd_child')
 ----
 11
 
-# a delta of its own is still refused: two overlays over one source are not built
+# A delta of its own now *is* allowed on a branch that inherited a line differing by a delta, and a read of
+# it applies both in order: the inherited overlay, read at the commit the branch forked at, and its own as of
+# now. Every combination of the two is exercised below - a key the inherited line added and the branch takes
+# away, a key the inherited line removed and the branch adds back, and a key of the base the branch removes.
 statement ok
 CREATE TABLE gd_child_add (k INTEGER PRIMARY KEY, v INTEGER)
 
 statement ok
 CREATE TABLE gd_child_del (k INTEGER PRIMARY KEY)
 
-statement error
+statement ok
 PRAGMA git4data_bind_branch_delta('t_g2', 'gd_child', 'gd_child_add', 'gd_child_del')
+
+statement ok
+INSERT INTO gd_child_add VALUES (300, 300)
+
+# a key the inherited line removed comes back, because the branch added it after that removal
+statement ok
+INSERT INTO gd_child_add VALUES (3, 3)
+
+statement ok
+INSERT INTO gd_child_del VALUES (4)
+
+# the row the inherited line added is taken away by the branch's own delta
+statement ok
+INSERT INTO gd_child_del VALUES (100)
+
+# eleven rows: the base's ten, less the key the inherited line removed and the two this one removed, plus
+# the inherited line's two and its own two - and the counts below are which of those survive
+query IIIIII
+SELECT (SELECT count(*) FROM t_g2 AT (BRANCH => 'gd_child')),
+       (SELECT count(*) FROM t_g2 AT (BRANCH => 'gd_child') WHERE k = 3),
+       (SELECT count(*) FROM t_g2 AT (BRANCH => 'gd_child') WHERE k = 4),
+       (SELECT count(*) FROM t_g2 AT (BRANCH => 'gd_child') WHERE k = 100),
+       (SELECT count(*) FROM t_g2 AT (BRANCH => 'gd_child') WHERE k = 200),
+       (SELECT count(*) FROM t_g2 AT (BRANCH => 'gd_child') WHERE k = 300)
 ----
-<REGEX>:.*inherits a line that differs by a delta.*
+11	1	0	0	1	1
+
+# the line it inherited is not changed by any of that
+query II
+SELECT (SELECT count(*) FROM t_g2 AT (BRANCH => 'gd')), (SELECT count(*) FROM t_g2 AT (BRANCH => 'gd') WHERE k = 100)
+----
+11	1
+
+# a snapshot of such a branch captures both overlays as they stand, and reads them back the same way
+statement ok
+PRAGMA git4data_create_snapshot('gdc_cap', 'gd_child')
+
+query IIII
+SELECT (SELECT count(*) FROM t_g2 AT (SNAPSHOT => 'gdc_cap')),
+       (SELECT count(*) FROM t_g2 AT (SNAPSHOT => 'gdc_cap') WHERE k = 3),
+       (SELECT count(*) FROM t_g2 AT (SNAPSHOT => 'gdc_cap') WHERE k = 4),
+       (SELECT count(*) FROM t_g2 AT (SNAPSHOT => 'gdc_cap') WHERE k = 300)
+----
+11	1	0	1
+
+# a diff of the two lines reads both overlays on each side: two keys are in the parent and not the child, and
+# two in the child and not the parent
+query II
+SELECT g4d_change, count(*) FROM git4data_diff('t_g2', 'gd', 'gd_child') GROUP BY g4d_change ORDER BY g4d_change
+----
+added	2
+removed	2
+
+query II
+SELECT g4d_change, k FROM git4data_diff('t_g2', 'gd', 'gd_child') WHERE g4d_change = 'removed' ORDER BY k
+----
+removed	4
+removed	100
+
+# a write through such a branch lands on its own delta and reads back through both
+statement ok
+PRAGMA git4data_apply('t_g2', 'gd_child', 'DELETE FROM t_g2 WHERE k = 200')
+
+query III
+SELECT (SELECT count(*) FROM t_g2 AT (BRANCH => 'gd_child')),
+       (SELECT count(*) FROM t_g2 AT (BRANCH => 'gd_child') WHERE k = 200),
+       (SELECT count(*) FROM t_g2 AT (BRANCH => 'gd'))
+----
+10	0	11
+
+# Merging the child back into its parent brings its own change over, and only that: the parent ends as the
+# child reads, while the keys the parent itself removed stay removed on both sides. The base of that merge is
+# the parent's *line* at the commit the child forked at - a pin alone would name the parent's start commit,
+# where it had neither its added rows nor its removed ones, and the parent's own changes would come back as
+# the child's.
+statement ok
+PRAGMA git4data_merge('t_g2', 'gd', 'gd_child', 'fail')
+
+query IIIIII
+SELECT (SELECT count(*) FROM t_g2 AT (BRANCH => 'gd')),
+       (SELECT count(*) FROM t_g2 AT (BRANCH => 'gd') WHERE k = 3),
+       (SELECT count(*) FROM t_g2 AT (BRANCH => 'gd') WHERE k = 4),
+       (SELECT count(*) FROM t_g2 AT (BRANCH => 'gd') WHERE k = 100),
+       (SELECT count(*) FROM t_g2 AT (BRANCH => 'gd') WHERE k = 200),
+       (SELECT count(*) FROM t_g2 AT (BRANCH => 'gd') WHERE k = 300)
+----
+10	1	0	0	0	1
+
+query II
+SELECT (SELECT count(*) FROM t_g2 AT (BRANCH => 'gd_child')), (SELECT count(*) FROM t_g2 AT (BRANCH => 'gd_child') WHERE k = 200)
+----
+10	0
