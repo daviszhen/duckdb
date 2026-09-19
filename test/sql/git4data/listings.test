@@ -137,3 +137,87 @@ SELECT snapshot_name FROM git4data_snapshots()
 ----
 plain_snap
 line_snap
+
+# A branch reads the line its parent holds plus its own mapping, and the read falls back to the pinned image
+# when one of those tables cannot be resolved. Both of the branch's own columns stay intact when the table that
+# is gone belongs to the *parent*, so the listing said nothing: measured before `inherited_missing` was added,
+# after `DROP TABLE di_add` the branch below read six rows without the inherited added one while
+# `delta_missing` said true for `di` and false for `dic`, and nothing in either row said the child's read had
+# changed.
+statement ok
+CREATE TABLE di (k INTEGER PRIMARY KEY, v INTEGER)
+
+statement ok
+INSERT INTO di SELECT range, range FROM range(6)
+
+statement ok
+PRAGMA git4data_create_branch('di', '')
+
+statement ok
+CREATE TABLE di_add (k INTEGER PRIMARY KEY, v INTEGER)
+
+statement ok
+CREATE TABLE di_del (k INTEGER PRIMARY KEY)
+
+statement ok
+PRAGMA git4data_bind_branch_delta('di', 'di', 'di_add', 'di_del')
+
+statement ok
+INSERT INTO di_add VALUES (100, 100)
+
+statement ok
+INSERT INTO di_del VALUES (2)
+
+statement ok
+PRAGMA git4data_create_branch('dic', 'di')
+
+statement ok
+CREATE TABLE dic_add (k INTEGER PRIMARY KEY, v INTEGER)
+
+statement ok
+CREATE TABLE dic_del (k INTEGER PRIMARY KEY)
+
+statement ok
+PRAGMA git4data_bind_branch_delta('di', 'dic', 'dic_add', 'dic_del')
+
+statement ok
+INSERT INTO dic_add VALUES (300, 300)
+
+# both overlays are read, and nothing of either line is missing
+query IIII
+SELECT (SELECT count(*) FROM di AT (BRANCH => 'dic')),
+       (SELECT count(*) FROM di AT (BRANCH => 'dic') WHERE k = 100),
+       (SELECT count(*) FROM di AT (BRANCH => 'dic') WHERE k = 2),
+       (SELECT count(*) FROM di AT (BRANCH => 'dic') WHERE k = 300)
+----
+7	1	0	1
+
+query III
+SELECT delta_missing, inherited_missing, identified FROM git4data_branches() WHERE branch_name = 'dic'
+----
+false	false	true
+
+statement ok
+DROP TABLE di_add
+
+# The child reads the base's six rows, plus its own one: the inherited overlay is gone from the read whole -
+# a delta needs both of its tables, so the key the parent had removed (2) is back as well as the row it had
+# added (100) being gone - and the child's own row is what says so. The child's own columns do not move.
+query IIII
+SELECT (SELECT count(*) FROM di AT (BRANCH => 'dic')),
+       (SELECT count(*) FROM di AT (BRANCH => 'dic') WHERE k = 100),
+       (SELECT count(*) FROM di AT (BRANCH => 'dic') WHERE k = 2),
+       (SELECT count(*) FROM di AT (BRANCH => 'dic') WHERE k = 300)
+----
+7	0	1	1
+
+query III
+SELECT delta_missing, inherited_missing, identified FROM git4data_branches() WHERE branch_name = 'dic'
+----
+false	true	true
+
+# the parent says it itself, in its own column
+query II
+SELECT delta_missing, inherited_missing FROM git4data_branches() WHERE branch_name = 'di'
+----
+true	false

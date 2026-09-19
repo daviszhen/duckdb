@@ -2347,29 +2347,74 @@ static unique_ptr<FunctionData> Git4DataBranchesBind(ClientContext &context, Tab
 				delta_missing = true;
 			}
 		}
+		// Whether a table the line this branch *inherited* names is gone. A branch reads its parent's line plus
+		// its own mapping, and the read falls back to the pinned image when one of those tables cannot be
+		// resolved - so a dropped table of the parent's changes what the child reads while every one of the
+		// child's own columns stays intact. Measured (increment 3bq): after `DROP TABLE p_add`, the child of
+		// `p` read six rows without the inherited added one, `delta_missing` said true for `p` and **false**
+		// for the child, and nothing in either row said the child's read had changed. The walk follows
+		// `base_line`, which is always a branch name, and stops if a name repeats.
+		bool inherited_missing = false;
+		vector<string> visited;
+		for (auto line = branch.base_line; !line.empty();) {
+			if (std::find(visited.begin(), visited.end(), line) != visited.end()) {
+				break;
+			}
+			visited.push_back(line);
+			Git4DataBranch ancestor;
+			if (!transaction_manager.branches.Get(line, ancestor)) {
+				break;
+			}
+			for (auto &entry : ancestor.storage_tables) {
+				if (Git4DataResolveTableName(context, entry.storage, entry.oid).empty()) {
+					inherited_missing = true;
+				}
+			}
+			for (auto &entry : ancestor.deltas) {
+				if (Git4DataResolveTableName(context, entry.added, entry.added_oid).empty() ||
+				    Git4DataResolveTableName(context, entry.removed, entry.removed_oid).empty()) {
+					inherited_missing = true;
+				}
+			}
+			if (inherited_missing) {
+				break;
+			}
+			line = ancestor.base_line;
+		}
 		// Whether the tables this branch reads were identified in this session. The ids that follow a renamed
 		// table and refuse a replaced one belong to a *catalog*, and a catalog's ids do not survive a reopen
 		// (`catalog_entry.cpp:18` takes them from a process-wide counter, and the catalog is written without
 		// them): a mapping read back from disk is compared by name and shape instead, and that cannot tell a
 		// table from another table of the same name and shape created while the database was closed. It is a
 		// column rather than a footnote because it is the difference between a wrong answer and a refusal - a
-		// branch with no mappings has nothing to identify and says true.
+		// branch with no mappings has nothing to identify and says true. The tables it reads through its
+		// inherited line are read the same way, so they count here too.
 		bool identified = true;
-		for (auto &entry : branch.storage_tables) {
-			if (entry.oid == 0) {
-				identified = false;
+		auto check_identified = [&](const Git4DataBranch &entry) {
+			for (auto &storage_entry : entry.storage_tables) {
+				if (storage_entry.oid == 0) {
+					identified = false;
+				}
 			}
-		}
-		for (auto &entry : branch.deltas) {
-			if (entry.added_oid == 0 || entry.removed_oid == 0) {
-				identified = false;
+			for (auto &delta_entry : entry.deltas) {
+				if (delta_entry.added_oid == 0 || delta_entry.removed_oid == 0) {
+					identified = false;
+				}
+			}
+		};
+		check_identified(branch);
+		for (auto &line : visited) {
+			Git4DataBranch ancestor;
+			if (transaction_manager.branches.Get(line, ancestor)) {
+				check_identified(ancestor);
 			}
 		}
 		result->rows.push_back(
 		    {Value(branch.name), Value::UBIGINT(branch.pin), Value(branch.parent), Value::TIMESTAMP(branch.created),
 		     Value::BOOLEAN(!branch.storage_tables.empty()), Value::BOOLEAN(!branch.deltas.empty()),
 		     Value::BOOLEAN(storage_missing), Value::BOOLEAN(delta_missing), Value::BOOLEAN(identified),
-		     Value(Git4DataJoinedStorageTables(context, branch)), Value(delta_added), Value(delta_removed)});
+		     Value(Git4DataJoinedStorageTables(context, branch)), Value(delta_added), Value(delta_removed),
+		     Value::BOOLEAN(inherited_missing)});
 	}
 	names.emplace_back("branch_name");
 	return_types.emplace_back(LogicalType::VARCHAR);
@@ -2397,6 +2442,8 @@ static unique_ptr<FunctionData> Git4DataBranchesBind(ClientContext &context, Tab
 	return_types.emplace_back(LogicalType::VARCHAR);
 	names.emplace_back("delta_removed");
 	return_types.emplace_back(LogicalType::VARCHAR);
+	names.emplace_back("inherited_missing");
+	return_types.emplace_back(LogicalType::BOOLEAN);
 	return std::move(result);
 }
 
