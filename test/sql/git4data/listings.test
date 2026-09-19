@@ -495,3 +495,36 @@ SELECT (SELECT count(*) FROM ol AT (BRANCH => 'ownline') WHERE k = 100),
        (SELECT count(*) FROM ol AT (BRANCH => 'olb'))
 ----
 0	0	1	5
+
+# An internal reference's `line` is not a line: the point-in-time window rides its own length on that field
+# (`window_micros=...`), because a reference is what survives a crash. So the two columns that ask what the
+# named line's tables are doing have nothing to answer for it. Measured before this: with a window open,
+# `__pitr__` was reported with `line_missing = true` while nothing was missing - the window's reference holds no
+# line and no mapping - which is a false alarm in the column that exists to say a read has changed.
+statement ok
+CREATE TABLE wr (k INTEGER PRIMARY KEY, v INTEGER)
+
+statement ok
+INSERT INTO wr SELECT range, range FROM range(4)
+
+statement ok
+PRAGMA git4data_create_snapshot('wr_mine')
+
+statement ok
+PRAGMA git4data_pitr(7)
+
+statement ok
+CHECKPOINT
+
+query IIII
+SELECT snapshot_name, line IS NOT NULL, line_missing IS NULL, identified IS NULL FROM git4data_snapshots()
+WHERE snapshot_name IN ('__pitr__', 'wr_mine') ORDER BY snapshot_name
+----
+__pitr__	true	true	true
+wr_mine	false	true	true
+
+# and the window's length is still readable where it belongs
+query I
+SELECT window_days FROM git4data_pitr_state()
+----
+7

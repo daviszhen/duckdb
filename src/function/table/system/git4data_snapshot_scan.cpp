@@ -2587,7 +2587,15 @@ static unique_ptr<FunctionData> Git4DataSnapshotsBind(ClientContext &context, Ta
 		// what the resolution does when the name is not a branch.
 		Value line_missing(LogicalType::BOOLEAN);
 		Value identified(LogicalType::BOOLEAN);
-		if (!snapshot.line.empty()) {
+		// **An internal reference's `line` is not a line** (increment 3ca). The point-in-time window rides its
+		// own length on that field - `window_micros=604800000000` - because a reference is what survives a
+		// crash, so the two columns below, which ask what the named line's tables are doing, have nothing to
+		// answer about. Measured: with a window open, `__pitr__` was reported with `line_missing = true` while
+		// nothing was missing - the window's reference holds no line and no mapping at all - which is a false
+		// alarm in the one column that exists to say a read has changed. A caller cannot make a `__`-prefixed
+		// reference (the reserved prefix refuses it), so the prefix is the test for "this is the engine's".
+		auto internal = StringUtil::StartsWith(snapshot.name, "__");
+		if (!internal && !snapshot.line.empty()) {
 			Git4DataBranch captured;
 			auto found = transaction_manager.branches.Get(snapshot.line, captured);
 			line_missing = Value::BOOLEAN(!found || Git4DataLineMissing(context, transaction_manager, captured));
