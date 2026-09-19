@@ -53,6 +53,33 @@ SELECT g4d_change, count(*) FROM git4data_diff('t', 'after', 'before') GROUP BY 
 added	20
 removed	50
 
+# The removals come out in ascending row-id order. A row-id diff walks the table's own ids, which run from
+# zero, so the order is the table's and not a hash bucket's - and it is the same order every time, which is
+# what a caller can read the list as. This used to be the iteration order of an `unordered_set<row_t>`.
+query I
+SELECT g4d_row_id FROM git4data_diff('t', 'before', 'after') WHERE g4d_change = 'removed'
+----
+0
+1
+2
+3
+4
+5
+6
+7
+8
+9
+10
+11
+12
+13
+14
+15
+16
+17
+18
+19
+
 # nothing differs between a reference and itself
 query I
 SELECT count(*) FROM git4data_diff('t', 'before', 'before')
