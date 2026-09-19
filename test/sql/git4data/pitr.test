@@ -66,6 +66,43 @@ SELECT count(*) FROM t AT (SNAPSHOT => '__pitr__')
 ----
 100
 
+# A window is not the only reference a file can hold, and that is what makes the two kinds of reference meet.
+# The references a *caller* makes are rows in `git4data.snapshots`, and the rebuild that runs once the log has
+# been replayed is what brings them back - but it clears both registries first and refills them from the tables.
+# The window's own reference is not a row: the engine creates and moves it from C++, so it lives in the
+# checkpoint's registry block, and that block is read at open, *before* the rebuild. Measured, a window opened
+# while the file already held a caller's reference came back as `reference_held = false` - and it then
+# re-pinned itself at the current commit at the next checkpoint, silently narrowing the history it promises to
+# the moment of the restart. **The order here is the point**: a window opened *before* the caller's first
+# reference is copied into the tables by the migration that creates them, which is why the window is turned off
+# and on again after it.
+statement ok
+PRAGMA git4data_create_snapshot('before_the_window')
+
+statement ok
+PRAGMA git4data_pitr_off
+
+statement ok
+PRAGMA git4data_pitr(3650)
+
+restart
+
+query III
+PRAGMA git4data_pitr_state
+----
+true	3650	true
+
+query I
+SELECT count(*) FROM t AT (SNAPSHOT => '__pitr__')
+----
+100
+
+# and the caller's own reference came back with it, because it is a row
+query I
+SELECT count(*) FROM t AT (SNAPSHOT => 'before_the_window')
+----
+100
+
 # A window of zero keeps nothing: the reference moves to the current state at every checkpoint, so
 # the reach collapses onto the present.
 statement ok

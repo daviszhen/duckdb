@@ -1,0 +1,167 @@
+# name: test/sql/git4data/pitr_reference.test
+# description: The recovery window's own reference across the rebuild that runs after the log is replayed
+# group: [git4data]
+
+# The references a caller makes are rows in `git4data.snapshots`, and the rebuild that runs once the log has
+# been replayed is what brings them back. The window's reference is the one reference that is *not* a row: the
+# engine creates and moves it from C++, so the checkpoint's registry block is its home - and that block is read
+# at open, before the rebuild clears the registries. Two things were wrong with that meeting, and this file
+# pins both:
+#
+#   * the rebuild refilled the registries from the tables only, so a window's reference that had come from the
+#     block was dropped - measured, `reference_held` read `false` as soon as the file held a caller's reference
+#     too, and the window then re-pinned itself at the current commit at the next checkpoint, silently
+#     narrowing the history it promises
+#   * the migration that creates the tables copied the *internal* references into them, so a file could hold a
+#     second copy of the window's reference whose pin was the commit the migration ran at; the engine moving the
+#     window afterwards left that copy behind, and the reopened database read the copy instead of the block
+#
+# **The order below is the point**: the caller's reference comes first, so the tables exist before the window is
+# opened, and the window is then moved again after they do.
+
+load {TEST_DIR}/pitr_reference.db
+
+statement ok
+CREATE TABLE t (k INTEGER PRIMARY KEY, v INTEGER)
+
+statement ok
+INSERT INTO t SELECT range, range FROM range(100)
+
+statement ok
+CHECKPOINT
+
+# a caller's reference first: this is what creates the registry tables
+statement ok
+PRAGMA git4data_create_snapshot('caller')
+
+# and the window is opened *after* they exist, so no migration copies it anywhere
+statement ok
+PRAGMA git4data_pitr(3650)
+
+statement ok
+INSERT INTO t SELECT 100 + range, range FROM range(100)
+
+statement ok
+CHECKPOINT
+
+query III
+PRAGMA git4data_pitr_state
+----
+true	3650	true
+
+# the window's reference holds the state it was opened at, without anyone taking a reference by hand
+query I
+SELECT count(*) FROM t AT (SNAPSHOT => '__pitr__')
+----
+100
+
+restart
+
+# the rebuild kept it, and the caller's row came back beside it
+query III
+PRAGMA git4data_pitr_state
+----
+true	3650	true
+
+query I
+SELECT count(*) FROM t AT (SNAPSHOT => '__pitr__')
+----
+100
+
+query I
+SELECT count(*) FROM t AT (SNAPSHOT => 'caller')
+----
+100
+
+# Now the engine moves it: a window of zero moves the reference to the current state at every checkpoint, so
+# reopening the window puts it at the state as it stands - the 200 rows the table has here. A copy left in the
+# tables by a migration would still point at the 100 rows of an earlier commit, and this is what tells the two
+# apart.
+statement ok
+PRAGMA git4data_pitr(0)
+
+statement ok
+PRAGMA git4data_pitr(3650)
+
+statement ok
+INSERT INTO t SELECT 200 + range, range FROM range(100)
+
+statement ok
+CHECKPOINT
+
+restart
+
+query I
+SELECT count(*) FROM t AT (SNAPSHOT => '__pitr__')
+----
+200
+
+query I
+SELECT count(*) FROM t
+----
+300
+
+# ---------------------------------------------------------------------------------------------------------
+# The other order: the window first, so the migration that creates the tables copies it
+# ---------------------------------------------------------------------------------------------------------
+
+# A fresh database, because the order is what this half is about: the window is opened while there are no
+# registry tables at all, and the caller's first reference is what creates them. The migration that creates
+# them copies what the file holds into them - and it used to copy the *window's* reference as well, giving the
+# file a second copy of it whose pin was the commit the migration ran at. The engine moving the window
+# afterwards left that copy behind, and the reopened database read the copy: a window pointing at a state it
+# had already moved past.
+load {TEST_DIR}/pitr_reference_second.db
+
+statement ok
+CREATE TABLE t2 (k INTEGER PRIMARY KEY, v INTEGER)
+
+statement ok
+INSERT INTO t2 SELECT range, range FROM range(100)
+
+statement ok
+CHECKPOINT
+
+statement ok
+PRAGMA git4data_pitr(3650)
+
+# this is what creates the tables, and what the migration runs for
+statement ok
+PRAGMA git4data_create_snapshot('caller')
+
+statement ok
+INSERT INTO t2 SELECT 100 + range, range FROM range(100)
+
+statement ok
+CHECKPOINT
+
+# the engine moves its own reference to the state as it stands, which is the 200 rows
+statement ok
+PRAGMA git4data_pitr(0)
+
+statement ok
+PRAGMA git4data_pitr(3650)
+
+statement ok
+INSERT INTO t2 SELECT 200 + range, range FROM range(100)
+
+statement ok
+CHECKPOINT
+
+query I
+SELECT count(*) FROM t2 AT (SNAPSHOT => '__pitr__')
+----
+200
+
+restart
+
+# the reference the block carries is the one the engine moved; a row left by the migration would still say 100
+query I
+SELECT count(*) FROM t2 AT (SNAPSHOT => '__pitr__')
+----
+200
+
+query I
+SELECT count(*) FROM t2
+----
+300

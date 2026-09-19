@@ -64,6 +64,14 @@ string Git4DataEnsureRegistryTables(ClientContext &context) {
 	};
 	auto &migrating = Git4DataTransactionManager(context);
 	for (auto &snapshot : migrating.snapshots.List()) {
+		// The references the engine manages itself are not rows anywhere: they are moved from C++, so the
+		// checkpoint's registry block is their home, and copying one into these tables makes a second copy
+		// that goes stale the next time the engine moves it. Measured, a window opened before the tables
+		// existed left a row whose pin was the commit the *migration* ran at, and after a later move the
+		// reopened database read the row instead of the block - a window pointing at the wrong state.
+		if (StringUtil::StartsWith(snapshot.name, "__")) {
+			continue;
+		}
 		result += StringUtil::Format("INSERT INTO %s.%s VALUES ('%s', %llu, TIMESTAMP '%s', '%s');\n",
 		                             GIT4DATA_REGISTRY_SCHEMA, GIT4DATA_SNAPSHOTS_TABLE, escape(snapshot.name),
 		                             snapshot.pin, Timestamp::ToString(snapshot.created), escape(snapshot.line));
@@ -74,15 +82,14 @@ string Git4DataEnsureRegistryTables(ClientContext &context) {
 	// migrated, a file whose records were in the block lost every branch and every mapping as soon as a pragma
 	// created the tables, and the reads then reported "Branch ... does not exist" while the block still held it.
 	for (auto &branch : migrating.branches.List()) {
-		result += StringUtil::Format("INSERT INTO %s.%s VALUES ('%s', %llu, '%s', TIMESTAMP '%s', '%s');\n",
-		                             GIT4DATA_REGISTRY_SCHEMA, GIT4DATA_BRANCHES_TABLE, escape(branch.name),
-		                             branch.pin, escape(branch.parent), Timestamp::ToString(branch.created),
-		                             escape(branch.base_line));
+		result +=
+		    StringUtil::Format("INSERT INTO %s.%s VALUES ('%s', %llu, '%s', TIMESTAMP '%s', '%s');\n",
+		                       GIT4DATA_REGISTRY_SCHEMA, GIT4DATA_BRANCHES_TABLE, escape(branch.name), branch.pin,
+		                       escape(branch.parent), Timestamp::ToString(branch.created), escape(branch.base_line));
 		for (auto &storage : branch.storage_tables) {
-			result += StringUtil::Format("INSERT INTO %s.%s VALUES ('%s', '%s', '%s', %s);\n",
-			                             GIT4DATA_REGISTRY_SCHEMA, GIT4DATA_STORAGE_TABLE, escape(branch.name),
-			                             escape(storage.source), escape(storage.storage),
-			                             storage.owned ? "true" : "false");
+			result += StringUtil::Format("INSERT INTO %s.%s VALUES ('%s', '%s', '%s', %s);\n", GIT4DATA_REGISTRY_SCHEMA,
+			                             GIT4DATA_STORAGE_TABLE, escape(branch.name), escape(storage.source),
+			                             escape(storage.storage), storage.owned ? "true" : "false");
 		}
 		for (auto &delta : branch.deltas) {
 			result += StringUtil::Format("INSERT INTO %s.%s VALUES ('%s', '%s', '%s', '%s');\n",
@@ -164,7 +171,6 @@ static void Git4DataScanRegistryTable(AttachedDatabase &db, TableCatalogEntry &t
 		}
 	}
 }
-
 
 //! Whether this transaction added the record the key names
 static bool Git4DataAddedByThisTransaction(const vector<string> &added, const string &kind, const string &key) {
@@ -263,6 +269,19 @@ void Git4DataLoadRegistry(AttachedDatabase &db) {
 	// renamed and to refuse a table that took the name of one it was given - measured, a rebuild that dropped
 	// them made `git4data_apply('g2', ...)` report no delta for a renamed source and let a swapped storage table
 	// be read. A rebuild happens while the process lives, so the ids it already has are still meaningful.
+	// The references the engine moves *itself* are the other thing this rebuild cannot bring back. They are
+	// not rows in these tables - the point-in-time window's reference is created and moved from C++, with no
+	// statement to write a row - so they live in the checkpoint's registry block, which is read at open and
+	// which this call comes after. Clearing the registries would drop them: measured, with a caller's snapshot
+	// in the file too, a window enabled before a restart came back as `reference_held = false`, and the window
+	// then re-pinned itself at the *current* commit on the next checkpoint - silently narrowing the history it
+	// promises to the moment of the restart. What is in memory here was read from that block, so it is kept.
+	vector<Git4DataSnapshot> internal_snapshots;
+	for (auto &snapshot : transaction_manager.snapshots.List()) {
+		if (StringUtil::StartsWith(snapshot.name, "__")) {
+			internal_snapshots.push_back(snapshot);
+		}
+	}
 	auto old_branches = transaction_manager.branches.List();
 	transaction_manager.snapshots.Clear();
 	transaction_manager.branches.Clear();
@@ -278,6 +297,12 @@ void Git4DataLoadRegistry(AttachedDatabase &db) {
 	    db, *snapshots, {LogicalType::VARCHAR, LogicalType::UBIGINT, LogicalType::TIMESTAMP, LogicalType::VARCHAR},
 	    [&](DataChunk &chunk, idx_t row) {
 		    auto name = chunk.GetValue(0, row).GetValue<string>();
+		    if (StringUtil::StartsWith(name, "__")) {
+			    // The engine's own references are not rows - the migration used to write them, so a file can
+			    // hold one from an older build, and the copy in the block (which the caller read at open) is
+			    // the one that is kept up to date. Reading the row here would shadow it.
+			    return;
+		    }
 		    auto pin = chunk.GetValue(1, row).GetValue<uint64_t>();
 		    auto created = chunk.GetValue(2, row).GetValue<timestamp_t>();
 		    auto line = chunk.GetValue(3, row).GetValue<string>();
@@ -345,6 +370,10 @@ void Git4DataLoadRegistry(AttachedDatabase &db) {
 				}
 			}
 		}
+	}
+	// and the internal references go back, exactly as they were read from the block
+	for (auto &snapshot : internal_snapshots) {
+		transaction_manager.snapshots.Create(snapshot.name, snapshot.pin, snapshot.created, snapshot.line);
 	}
 	// what is in the tables is on disk, so a checkpoint does not have to force itself for the registries
 	transaction_manager.snapshots.MarkClean();
@@ -430,15 +459,15 @@ bool Git4DataSourceKeyMatches(ClientContext &context, const string &stored, cons
 	// are compared as names: a stored name without a schema is the default schema's, exactly as it was written
 	auto stored_name = QualifiedName::Parse(stored);
 	auto key_name = QualifiedName::Parse(key);
-	auto stored_schema = stored_name.Schema().empty() ? string(DEFAULT_SCHEMA) : stored_name.Schema().GetIdentifierName();
+	auto stored_schema =
+	    stored_name.Schema().empty() ? string(DEFAULT_SCHEMA) : stored_name.Schema().GetIdentifierName();
 	auto key_schema = key_name.Schema().empty() ? string(DEFAULT_SCHEMA) : key_name.Schema().GetIdentifierName();
 	return StringUtil::CIEquals(stored_schema, key_schema) &&
 	       StringUtil::CIEquals(stored_name.Name().GetIdentifierName(), key_name.Name().GetIdentifierName());
 }
 
-optional_ptr<const Git4DataStorageTable> Git4DataFindStorageTable(ClientContext &context,
-                                                                const Git4DataBranch &branch,
-                                                            const string &key, idx_t source_oid) {
+optional_ptr<const Git4DataStorageTable> Git4DataFindStorageTable(ClientContext &context, const Git4DataBranch &branch,
+                                                                  const string &key, idx_t source_oid) {
 	for (auto &entry : branch.storage_tables) {
 		if (Git4DataSourceKeyMatches(context, entry.source, key) ||
 		    (source_oid != 0 && entry.source_oid == source_oid)) {
@@ -448,9 +477,8 @@ optional_ptr<const Git4DataStorageTable> Git4DataFindStorageTable(ClientContext 
 	return nullptr;
 }
 
-optional_ptr<const Git4DataBranchDelta> Git4DataFindDeltaTable(ClientContext &context,
-                                                             const Git4DataBranch &branch,
-                                                         const string &key, idx_t source_oid) {
+optional_ptr<const Git4DataBranchDelta> Git4DataFindDeltaTable(ClientContext &context, const Git4DataBranch &branch,
+                                                               const string &key, idx_t source_oid) {
 	for (auto &entry : branch.deltas) {
 		if (Git4DataSourceKeyMatches(context, entry.source, key) ||
 		    (source_oid != 0 && entry.source_oid == source_oid)) {
