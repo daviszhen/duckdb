@@ -252,3 +252,72 @@ query I
 SELECT count(*) FROM nokey
 ----
 3
+
+# ---------------------------------------------------------------------------------------------------------
+# A restore writes the rows that differ, not the whole table
+# ---------------------------------------------------------------------------------------------------------
+
+# A row that is written keeps its content but not its row id, and a diff of two references of one table
+# compares row ids. So a restore that rewrote every row made a later diff report the whole table as changed,
+# for two references that denote the same rows. A table with a primary key is put right by writing only the
+# rows that differ now - the keys the reference does not have, and the keys whose row differs, are deleted and
+# taken from the reference again - so the rows that were already right stay where they are and stay out of the
+# diff.
+statement ok
+CREATE TABLE p (k INTEGER PRIMARY KEY, v INTEGER)
+
+statement ok
+INSERT INTO p VALUES (1, 10), (2, 20), (3, 30)
+
+statement ok
+CHECKPOINT
+
+statement ok
+PRAGMA git4data_create_snapshot('p_before')
+
+statement ok
+UPDATE p SET v = 99 WHERE k = 2
+
+statement ok
+PRAGMA git4data_restore('p', 'p_before')
+
+# the content is the reference's
+query III
+SELECT count(*), min(v), max(v) FROM p
+----
+3	10	30
+
+statement ok
+CHECKPOINT
+
+statement ok
+PRAGMA git4data_create_snapshot('p_after')
+
+# one row was written, so one row is the difference between the two references
+query II
+SELECT g4d_change, k FROM git4data_diff('p', 'p_before', 'p_after') ORDER BY k
+----
+changed	2
+
+# and a row the restore did not have to touch is not in that diff at all, which is what says its row id is
+# where it was: the write is what moves a row
+query I
+SELECT count(*) FROM git4data_diff('p', 'p_before', 'p_after') WHERE k IN (1, 3)
+----
+0
+
+# a row the reference never had still goes, and a row added since it comes back: the two directions are the
+# same statement
+statement ok
+DELETE FROM p WHERE k = 3
+
+statement ok
+INSERT INTO p VALUES (4, 40)
+
+statement ok
+PRAGMA git4data_restore('p', 'p_before')
+
+query III
+SELECT count(*), min(k), max(k) FROM p
+----
+3	1	3
