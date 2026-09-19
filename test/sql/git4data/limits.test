@@ -247,3 +247,16 @@ query IIII
 PRAGMA git4data_limits
 ----
 5	5	-1	6
+
+# A limit counts one kind of reference, and a kind it does not count is refused rather than quietly accepted:
+# the two names are the sentences the rest of the pragmas use, and a third one would set nothing while
+# reporting success.
+statement error
+PRAGMA git4data_limit('snapshots', 1)
+----
+<REGEX>:.*Limits are set for "snapshot" or "branch", not "snapshots".*
+
+query IIII
+PRAGMA git4data_limits
+----
+5	5	-1	6

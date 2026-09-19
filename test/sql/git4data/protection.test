@@ -112,3 +112,10 @@ statement error
 DROP SCHEMA git4data CASCADE
 ----
 <REGEX>:.*dropping or altering it would take every snapshot and branch with it.*
+
+# The same guard as it is met from ordinary DDL: the schema holds the feature's own tables, so it is not a
+# place a statement may put one of its own - the import path reads the same sentence, in the load script.
+statement error
+CREATE TABLE git4data.mine (i INTEGER)
+----
+<REGEX>:.*that schema is the feature's own: its tables are how a reference's state is kept, so a statement cannot create one there\. Use the git4data_\* pragmas\..*

@@ -851,3 +851,44 @@ query I
 SELECT count(*) FROM (SELECT k, v FROM mp AT (BRANCH => 'mpr') EXCEPT SELECT k, v FROM mp AT (BRANCH => 'mpc'))
 ----
 0
+
+# A merge says which rows are the same row by their key, so a table without one is refused. The shape that
+# reaches this is not a plain keyless table: a branch cannot be given a delta for one (that is refused earlier
+# with "a delta cannot say which rows it removes"), and a branch that has nothing at all for the table is
+# refused earlier still ("has nowhere to land"). It is reached by replacing the table both sides' own tables
+# were made from with a keyless one of the same name - the sides are already there, and the table the merge is
+# told about no longer has a key to compare on.
+statement ok
+CREATE TABLE mkl (k INTEGER PRIMARY KEY, v INTEGER)
+
+statement ok
+INSERT INTO mkl VALUES (1, 10)
+
+statement ok
+CHECKPOINT
+
+statement ok
+PRAGMA git4data_create_branch('mkl_parent', '')
+
+statement ok
+PRAGMA git4data_create_branch('mkl_child', 'mkl_parent')
+
+statement ok
+PRAGMA git4data_materialize('mkl', 'mkl_parent', 'mkl_parent_t')
+
+statement ok
+PRAGMA git4data_materialize('mkl', 'mkl_child', 'mkl_child_t')
+
+statement ok
+DROP TABLE mkl
+
+statement ok
+CREATE TABLE mkl (k INTEGER, v INTEGER)
+
+statement ok
+INSERT INTO mkl VALUES (1, 10)
+
+statement error
+PRAGMA git4data_merge('mkl', 'mkl_parent', 'mkl_child', 'fail')
+----
+<REGEX>:.*has no primary key, so a merge cannot tell which rows are the same row.*

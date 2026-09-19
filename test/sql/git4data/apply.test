@@ -212,6 +212,13 @@ PRAGMA git4data_apply('t', 'b', 'INSERT INTO t DEFAULT VALUES')
 ----
 <REGEX>:.*does not take DEFAULT VALUES.*
 
+# The rows are read by position, as the source table's own columns: a name the statement gives a column would
+# have to be matched against the table the write lands in, which is a different table.
+statement error
+PRAGMA git4data_apply('t', 'b', 'INSERT INTO t BY NAME SELECT 1 AS k, 2 AS v')
+----
+<REGEX>:.*does not take INSERT ... BY NAME.*
+
 statement error
 PRAGMA git4data_apply('t', 'b', 'DELETE FROM t USING more WHERE t.k = more.k')
 ----
