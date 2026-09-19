@@ -984,6 +984,8 @@ struct Git4DataDiffState : public GlobalTableFunctionState {
 	bool added_local_open = false;
 	vector<StorageIndex> column_ids;
 	idx_t key_count = 0;
+	//! Whether the key is a single integer column, which is what the bits path above needs
+	bool key_is_integer = false;
 	VisibilityBound left_bound;
 	VisibilityBound right_bound;
 	unordered_set<row_t> left_rows;
@@ -1016,6 +1018,9 @@ struct Git4DataDiffState : public GlobalTableFunctionState {
 		vector<Value> key;
 		vector<Value> values;
 		row_t row_id;
+		//! The key's 64-bit pattern when the key is a single integer column: the map is then bucketed by it,
+		//! which is exact, and matching a right row against it allocates nothing at all
+		uint64_t bits = 0;
 	};
 	unordered_map<hash_t, vector<KeyedRow>> left_by_key;
 	struct Change {
@@ -1176,6 +1181,27 @@ static string Git4DataDiffKeyString(const vector<Value> &key) {
 	return result;
 }
 
+//! The key bits of one row of a chunk, for a diff whose key is a single integer column
+static bool Git4DataDiffChunkKeyBits(DataChunk &chunk, idx_t row, uint64_t &bits) {
+	auto key = chunk.GetValue(0, row);
+	if (key.IsNull()) {
+		return false;
+	}
+	return Git4DataIntegerKeyBits(key, bits);
+}
+
+//! Whether the values a left row stored are the ones this row of the chunk carries. The comparison is made
+//! against the chunk rather than against a materialized row, so a matched row costs no allocation.
+static bool Git4DataDiffSameRowValues(const vector<Value> &left, DataChunk &chunk, idx_t first_value, idx_t row) {
+	for (idx_t i = 0; i < left.size(); i++) {
+		auto value = chunk.GetValue(first_value + i, row);
+		if (!Value::NotDistinctFrom(left[i], value)) {
+			return false;
+		}
+	}
+	return true;
+}
+
 static bool Git4DataDiffSameKey(const vector<Value> &left, const vector<Value> &right) {
 	if (left.size() != right.size()) {
 		return false;
@@ -1246,6 +1272,8 @@ static unique_ptr<GlobalTableFunctionState> Git4DataDiffInit(ClientContext &cont
 	}
 	result->key_hashes.Initialize(Allocator::Get(context), hash_types);
 	// what each side removed from its base, read once: a side that differs by a delta is not the table
+	// A single integer key gives the diff an exact bucket and removes the per-row key and string allocations
+	result->key_is_integer = bind_data.key_columns.size() == 1 && Git4DataIsIntegerKeyType(bind_data.key_types[0]);
 	Git4DataCollectRemovedKeys(context, bind_data.left_delta_removed, bind_data.key_types, bind_data.key_columns.size(),
 	                           bind_data.left_delta_bound, result->left_removed);
 	Git4DataCollectRemovedKeys(context, bind_data.right_delta_removed, bind_data.key_types,
@@ -1479,18 +1507,50 @@ static void Git4DataDiffFunction(ClientContext &context, TableFunctionInput &dat
 				    entry.key = key;
 				    entry.values = Git4DataDiffRowValues(chunk, state.key_count, state.value_count, row);
 				    entry.row_id = row_id;
+					if (state.key_is_integer) {
+						uint64_t bits = 0;
+						if (Git4DataDiffChunkKeyBits(chunk, row, bits)) {
+							// the bucket is the key itself, so a lookup in it needs no comparison at all
+							entry.bits = bits;
+							state.left_by_key[bits].push_back(std::move(entry));
+							return;
+						}
+					}
 				    state.left_by_key[Git4DataDiffKeyHash(key)].push_back(std::move(entry));
 			    });
 			state.phase = Git4DataDiffState::Phase::RIGHT;
 		}
 		if (state.phase == Git4DataDiffState::Phase::RIGHT) {
-			// which left rows a right row accounted for, by the key itself rather than by its hash
+			// which left rows a right row accounted for, by the key itself rather than by its hash. The bits
+			// of an integer key answer the same question without a string per row.
 			unordered_set<string> matched;
+			unordered_set<uint64_t> matched_bits;
 			Git4DataDiffCollect(
 			    context, state, state.right_scan, state.right_bound, state.right_added_table, state.right_delta_bound,
 			    state.right_removed, state.right_storage, state.right_own_storage, state.right_local_open,
 			    state.right_added_open,
 			    state.right_added_local_open, [&](DataChunk &chunk, row_t row_id, idx_t row) {
+					uint64_t bits = 0;
+					if (state.key_is_integer && Git4DataDiffChunkKeyBits(chunk, row, bits)) {
+						// the bucket is the key itself, so a hit is exact and needs no key vector
+						auto bits_entry = state.left_by_key.find(bits);
+						if (bits_entry != state.left_by_key.end()) {
+							for (auto &candidate : bits_entry->second) {
+								if (candidate.bits != bits) {
+									continue;
+								}
+								matched_bits.insert(bits);
+								if (!Git4DataDiffSameRowValues(candidate.values, chunk, state.key_count, row)) {
+									state.changed.push_back(Git4DataDiffState::Change {
+									    candidate.row_id, row_id, vector<Value> {chunk.GetValue(0, row)}});
+								}
+								return;
+							}
+						}
+						state.added.push_back(
+						    Git4DataDiffState::Change {row_id, NO_COUNTERPART, vector<Value> {chunk.GetValue(0, row)}});
+						return;
+					}
 				    auto key = Git4DataDiffRowKey(chunk, state.key_count, row);
 				    auto hash = Git4DataDiffKeyHash(key);
 				    auto entry = state.left_by_key.find(hash);
@@ -1511,7 +1571,9 @@ static void Git4DataDiffFunction(ClientContext &context, TableFunctionInput &dat
 			    });
 			for (auto &entry : state.left_by_key) {
 				for (auto &candidate : entry.second) {
-					if (matched.find(Git4DataDiffKeyString(candidate.key)) != matched.end()) {
+					if (state.key_is_integer
+					        ? matched_bits.find(candidate.bits) != matched_bits.end()
+					        : matched.find(Git4DataDiffKeyString(candidate.key)) != matched.end()) {
 						continue;
 					}
 					state.removed.push_back(
