@@ -88,6 +88,20 @@ struct Git4DataDiffFun {
 	                                               const string &left_name, const string &right_name);
 };
 
+//! The branches a database holds, as rows a caller can select from. The values used to be reachable only
+//! through `PRAGMA git4data_branches`, whose result cannot be selected *from*, so a test could assert the
+//! listing's shape and nothing else; the pragma now returns this function's rows.
+struct Git4DataBranchesFun {
+	static void RegisterFunction(BuiltinFunctions &set);
+	static TableFunction GetFunction();
+};
+
+//! The snapshots a database holds, as rows, on the same terms
+struct Git4DataSnapshotsFun {
+	static void RegisterFunction(BuiltinFunctions &set);
+	static TableFunction GetFunction();
+};
+
 struct DuckDBApproxDatabaseCountFun {
 	static void RegisterFunction(BuiltinFunctions &set);
 };

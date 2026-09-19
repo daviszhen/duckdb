@@ -1,0 +1,139 @@
+# name: test/sql/git4data/listings.test
+# description: The listings as rows a statement can select, so their values are asserted and not only their shape
+# group: [git4data]
+
+# `PRAGMA git4data_branches` and `PRAGMA git4data_snapshots` return a result, and a result cannot be selected
+# *from*: every value in them - which tables a branch reads, whether those tables are still there, the line a
+# capture holds - was readable by a person and asserted only by its shape. The rows are table functions now,
+# which is what this file uses; the pragmas return them, so the two surfaces cannot drift apart.
+
+load {TEST_DIR}/listings.db
+
+statement ok
+CREATE TABLE t (k INTEGER PRIMARY KEY, v INTEGER)
+
+statement ok
+INSERT INTO t VALUES (1, 10), (2, 20), (3, 30)
+
+statement ok
+CHECKPOINT
+
+statement ok
+PRAGMA git4data_create_branch('plain_branch', '')
+
+statement ok
+PRAGMA git4data_materialize('t', 'plain_branch', 'b_copy')
+
+statement ok
+PRAGMA git4data_create_snapshot('plain_snap')
+
+statement ok
+PRAGMA git4data_create_snapshot('line_snap', 'plain_branch')
+
+statement ok
+PRAGMA git4data_create_branch('delta_branch', '')
+
+statement ok
+CREATE TABLE d_add (k INTEGER PRIMARY KEY, v INTEGER)
+
+statement ok
+CREATE TABLE d_del (k INTEGER PRIMARY KEY)
+
+statement ok
+PRAGMA git4data_bind_branch_delta('t', 'delta_branch', 'd_add', 'd_del')
+
+# a branch with a copy says so, and names the table it reads and the (empty) delta names
+query III
+SELECT has_storage, storage_table, delta_added || '|' || delta_removed FROM git4data_branches()
+WHERE branch_name = 'plain_branch'
+----
+true	b_copy	|
+
+# a branch that differs by a delta says that instead, and names both tables
+query III
+SELECT has_delta, delta_added, delta_removed FROM git4data_branches()
+WHERE branch_name = 'delta_branch'
+----
+true	d_add	d_del
+
+# nothing is missing while the tables are there
+query II
+SELECT storage_missing, delta_missing FROM git4data_branches()
+WHERE branch_name IN ('plain_branch', 'delta_branch')
+----
+false	false
+false	false
+
+# a snapshot that captured a branch's own line names it; one that captured the table as a commit saw it has
+# no line rather than an empty string
+query II
+SELECT snapshot_name, line IS NULL FROM git4data_snapshots() ORDER BY snapshot_name
+----
+line_snap	false
+plain_snap	true
+
+query I
+SELECT line FROM git4data_snapshots() WHERE snapshot_name = 'line_snap'
+----
+plain_branch
+
+# A mapping whose table is dropped leaves the branch reading its pinned image, and the listing says so rather
+# than reporting a table that cannot be read. Measured when this column was added: a materialized branch whose
+# copy was dropped still carried has_storage true.
+statement ok
+DROP TABLE d_add
+
+query II
+SELECT has_delta, delta_missing FROM git4data_branches()
+WHERE branch_name = 'delta_branch'
+----
+true	true
+
+# the pragmas return the same rows, and the listing is a query like any other: it joins and aggregates
+query III
+SELECT (SELECT count(*) FROM git4data_branches()),
+       (SELECT count(*) FROM git4data_snapshots()),
+       (SELECT count(*) FROM (SELECT * FROM git4data_branches()) AS pragma_rows)
+----
+2	2	2
+
+query I
+SELECT count(*) FROM git4data_branches() WHERE has_storage
+----
+1
+
+# A listing is a read like any other, so a rollback that took a reference takes it out of the listing: the
+# in-memory registries are reconciled before the rows are built, exactly as a read at a reference reconciles
+# them. Without that the row would be gone from the table and still reported here.
+statement ok
+BEGIN
+
+statement ok
+PRAGMA git4data_create_snapshot('rolled_back')
+
+query I
+SELECT count(*) FROM git4data_snapshots()
+----
+3
+
+statement ok
+ROLLBACK
+
+query I
+SELECT count(*) FROM git4data_snapshots()
+----
+2
+
+query I
+SELECT count(*) FROM git4data_snapshots() WHERE snapshot_name = 'rolled_back'
+----
+0
+
+# The registry is a hash map, so the listing orders its rows itself - by the commit and then the name - which
+# is what makes them a surface something can be asserted against. Measured: without the sort the parity check's
+# two listing-order checks failed, because the order the map hands out is not the order anything was created in.
+query T
+SELECT snapshot_name FROM git4data_snapshots()
+----
+plain_snap
+line_snap

@@ -1595,4 +1595,195 @@ void Git4DataSnapshotScanFun::RegisterFunction(BuiltinFunctions &set) {
 	set.AddFunction(GetFunction());
 }
 
+
+//===----------------------------------------------------------------------===//
+// The listings, as rows rather than as a pragma's printout
+//===----------------------------------------------------------------------===//
+//! The transaction manager of the database this client is attached to, which is where the registries live.
+//! A listing is a read like any other, so a rollback that took a reference takes it out of the listing too.
+static DuckTransactionManager &GetGit4DataTransactionManagerForListing(ClientContext &context) {
+	auto &db_manager = DatabaseManager::Get(context);
+	auto attached = db_manager.GetDatabase(context, DatabaseManager::GetDefaultDatabase(context));
+	if (context.client_data->git4data_registry_reload_needed) {
+		context.client_data->git4data_registry_reload_needed = false;
+		// a rollback may have removed a reference this listing is about to read
+		Git4DataReconcileRegistry(*attached, context.client_data->git4data_added_records);
+		context.client_data->git4data_added_records.clear();
+	}
+	return DuckTransactionManager::Get(*attached);
+}
+
+//! Every value in these listings - which tables a branch reads, whether those tables are still there, the
+//! line a capture holds - used to be readable only by a person: `PRAGMA git4data_branches` returns a result
+//! that cannot be selected *from*, so a test could assert that it ran and nothing about what it said. The
+//! same rows are table functions now, which makes them data to filter, join and assert; the pragmas return
+//! these functions so the two surfaces cannot drift apart.
+struct Git4DataListingBindData : public TableFunctionData {
+	vector<vector<Value>> rows;
+};
+
+struct Git4DataListingState : public GlobalTableFunctionState {
+	idx_t cursor = 0;
+};
+
+static unique_ptr<GlobalTableFunctionState> Git4DataListingInit(ClientContext &, TableFunctionInitInput &) {
+	return make_uniq<Git4DataListingState>();
+}
+
+static void Git4DataListingScan(ClientContext &, TableFunctionInput &data_p, DataChunk &output) {
+	auto &bind_data = data_p.bind_data->Cast<Git4DataListingBindData>();
+	auto &state = data_p.global_state->Cast<Git4DataListingState>();
+	idx_t count = 0;
+	while (state.cursor < bind_data.rows.size() && count < STANDARD_VECTOR_SIZE) {
+		auto &row = bind_data.rows[state.cursor];
+		for (idx_t column = 0; column < row.size(); column++) {
+			output.SetValue(column, count, row[column]);
+		}
+		state.cursor++;
+		count++;
+	}
+	output.SetCardinality(count);
+}
+
+//! The tables a branch reads for its line, comma-joined, resolved to the names they have now
+static string Git4DataJoinedStorageTables(ClientContext &context, const Git4DataBranch &branch) {
+	string result;
+	for (auto &entry : branch.storage_tables) {
+		if (!result.empty()) {
+			result += ", ";
+		}
+		auto resolved = Git4DataResolveTableName(context, entry.storage, entry.oid);
+		result += resolved.empty() ? entry.storage : resolved;
+	}
+	return result;
+}
+
+static unique_ptr<FunctionData> Git4DataBranchesBind(ClientContext &context, TableFunctionBindInput &,
+                                                     vector<LogicalType> &return_types, vector<Identifier> &names) {
+	auto result = make_uniq<Git4DataListingBindData>();
+	auto &transaction_manager = GetGit4DataTransactionManagerForListing(context);
+	auto entries = transaction_manager.branches.List();
+	// the pragma this replaces ordered by the commit and then the name, so the rows do too
+	std::sort(entries.begin(), entries.end(), [](const Git4DataBranch &a, const Git4DataBranch &b) {
+		if (a.pin != b.pin) {
+			return a.pin < b.pin;
+		}
+		return a.name < b.name;
+	});
+	for (auto &branch : entries) {
+		// Both refusals in create_branch and merge key on whether a branch has moved on from its pin, and a
+		// mapping whose table has been dropped falls back to the pinned image rather than failing: a listing
+		// that said only "has_storage" would report a table the branch cannot read. Both are columns.
+		bool storage_missing = false;
+		for (auto &entry : branch.storage_tables) {
+			if (Git4DataResolveTableName(context, entry.storage, entry.oid).empty()) {
+				storage_missing = true;
+				break;
+			}
+		}
+		bool delta_missing = false;
+		string delta_added;
+		string delta_removed;
+		for (auto &entry : branch.deltas) {
+			if (!delta_added.empty()) {
+				delta_added += ", ";
+				delta_removed += ", ";
+			}
+			delta_added += entry.added;
+			delta_removed += entry.removed;
+			if (Git4DataResolveTableName(context, entry.added, entry.added_oid).empty() ||
+			    Git4DataResolveTableName(context, entry.removed, entry.removed_oid).empty()) {
+				delta_missing = true;
+			}
+		}
+		result->rows.push_back({Value(branch.name), Value::UBIGINT(branch.pin), Value(branch.parent),
+		                        Value::TIMESTAMP(branch.created),
+		                        Value::BOOLEAN(!branch.storage_tables.empty()), Value::BOOLEAN(!branch.deltas.empty()),
+		                        Value::BOOLEAN(storage_missing), Value::BOOLEAN(delta_missing),
+		                        Value(Git4DataJoinedStorageTables(context, branch)), Value(delta_added),
+		                        Value(delta_removed)});
+	}
+	names.emplace_back("branch_name");
+	return_types.emplace_back(LogicalType::VARCHAR);
+	names.emplace_back("pinned_commit_id");
+	return_types.emplace_back(LogicalType::UBIGINT);
+	names.emplace_back("parent");
+	return_types.emplace_back(LogicalType::VARCHAR);
+	names.emplace_back("created");
+	return_types.emplace_back(LogicalType::TIMESTAMP);
+	names.emplace_back("has_storage");
+	return_types.emplace_back(LogicalType::BOOLEAN);
+	names.emplace_back("has_delta");
+	return_types.emplace_back(LogicalType::BOOLEAN);
+	names.emplace_back("storage_missing");
+	return_types.emplace_back(LogicalType::BOOLEAN);
+	names.emplace_back("delta_missing");
+	return_types.emplace_back(LogicalType::BOOLEAN);
+	names.emplace_back("storage_table");
+	return_types.emplace_back(LogicalType::VARCHAR);
+	names.emplace_back("delta_added");
+	return_types.emplace_back(LogicalType::VARCHAR);
+	names.emplace_back("delta_removed");
+	return_types.emplace_back(LogicalType::VARCHAR);
+	return std::move(result);
+}
+
+static unique_ptr<FunctionData> Git4DataSnapshotsBind(ClientContext &context, TableFunctionBindInput &,
+                                                      vector<LogicalType> &return_types, vector<Identifier> &names) {
+	auto result = make_uniq<Git4DataListingBindData>();
+	auto &transaction_manager = GetGit4DataTransactionManagerForListing(context);
+	auto entries = transaction_manager.snapshots.List();
+	// The registry is a hash map, so the order it hands out is not a promise and a listing whose rows moved
+	// between runs would be a surface nothing could be asserted against: the rows are ordered by the commit
+	// and then the name, as the branches listing is.
+	std::sort(entries.begin(), entries.end(), [](const Git4DataSnapshot &a, const Git4DataSnapshot &b) {
+		if (a.pin != b.pin) {
+			return a.pin < b.pin;
+		}
+		return a.name < b.name;
+	});
+	for (auto &snapshot : entries) {
+		if (snapshot.name == DuckTransactionManager::MERGE_BASE_REFERENCE) {
+			// an internal reference, alive for the length of a merge - and left behind by one that failed,
+			// which is why it is neither counted nor shown
+			continue;
+		}
+		// NULL rather than an empty string for the main line, so a listing says which references capture a
+		// branch's own state and which are the table at a commit
+		result->rows.push_back({Value(snapshot.name), Value::UBIGINT(snapshot.pin), Value::TIMESTAMP(snapshot.created),
+		                        snapshot.line.empty() ? Value(LogicalType::VARCHAR) : Value(snapshot.line)});
+	}
+	names.emplace_back("snapshot_name");
+	return_types.emplace_back(LogicalType::VARCHAR);
+	names.emplace_back("pinned_commit_id");
+	return_types.emplace_back(LogicalType::UBIGINT);
+	names.emplace_back("created");
+	return_types.emplace_back(LogicalType::TIMESTAMP);
+	names.emplace_back("line");
+	return_types.emplace_back(LogicalType::VARCHAR);
+	return std::move(result);
+}
+
+TableFunction Git4DataBranchesFun::GetFunction() {
+	TableFunction fun("git4data_branches", {}, Git4DataListingScan, Git4DataBranchesBind);
+	fun.init_global = Git4DataListingInit;
+	fun.projection_pushdown = false;
+	return fun;
+}
+
+void Git4DataBranchesFun::RegisterFunction(BuiltinFunctions &set) {
+	set.AddFunction(GetFunction());
+}
+
+TableFunction Git4DataSnapshotsFun::GetFunction() {
+	TableFunction fun("git4data_snapshots", {}, Git4DataListingScan, Git4DataSnapshotsBind);
+	fun.init_global = Git4DataListingInit;
+	fun.projection_pushdown = false;
+	return fun;
+}
+
+void Git4DataSnapshotsFun::RegisterFunction(BuiltinFunctions &set) {
+	set.AddFunction(GetFunction());
+}
+
 } // namespace duckdb

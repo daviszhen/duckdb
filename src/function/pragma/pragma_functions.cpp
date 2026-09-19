@@ -1940,82 +1940,10 @@ static string PragmaGit4DataDropBranch(ClientContext &context, const FunctionPar
 }
 
 static string PragmaGit4DataBranches(ClientContext &context, const FunctionParameters &parameters) {
-	auto entries = GetGit4DataTransactionManager(context).branches.List();
-	if (entries.empty()) {
-		return "SELECT NULL::VARCHAR AS branch_name, NULL::UBIGINT AS pinned_commit_id, "
-		       "NULL::VARCHAR AS parent, NULL::TIMESTAMP AS created, NULL::BOOLEAN AS has_storage, "
-		       "NULL::BOOLEAN AS has_delta, NULL::BOOLEAN AS storage_missing, NULL::BOOLEAN AS delta_missing, "
-		       "NULL::VARCHAR AS storage_table, NULL::VARCHAR AS delta_added, NULL::VARCHAR AS delta_removed "
-		       "WHERE false";
-	}
-	string query = "SELECT * FROM (VALUES ";
-	for (idx_t i = 0; i < entries.size(); i++) {
-		if (i > 0) {
-			query += ", ";
-		}
-		// Branch names are user input, escape them before splicing into SQL
-		auto name = StringUtil::Replace(entries[i].name, "'", "''");
-		auto parent = StringUtil::Replace(entries[i].parent, "'", "''");
-		// has_storage is the precondition both refusals in create_branch and merge key on: a branch with
-		// a table of its own has moved on from the commit it was forked at, which is why a fork from it
-		// and a merge into it are not the simple operations they look like. It is reported so that is
-		// visible rather than something a caller has to infer from a conflict.
-		// has_delta says the branch differs from its base through tables of its own rather than through a
-		// copy of it, which is the cheaper shape to write to and not one the listing should hide
-		//
-		// storage_missing and delta_missing are the other half of that: a mapping whose table has been
-		// dropped falls back to the pinned image rather than failing, so a listing that only says a branch
-		// *has* storage would report a table it cannot read. Measured: after dropping a materialized
-		// branch's storage table, the branch read its pin while has_storage still said true.
-		auto storage_missing = false;
-		for (auto &storage_entry : entries[i].storage_tables) {
-			if (Git4DataResolveTableName(context, storage_entry.storage, storage_entry.oid).empty()) {
-				storage_missing = true;
-				break;
-			}
-		}
-		// The tables, not only whether there are any: two branches can be given the same delta tables -
-		// the delta's tables are the caller's - and then a write through one is visible in the other.
-		// Measured: binding one pair to two branches is accepted, and an insert through the first is read
-		// by the second. A listing that says has_delta and not *which* leaves that sharing invisible in the
-		// one place that exists to say what a branch is reading.
-		string storage_table;
-		for (auto &storage_entry : entries[i].storage_tables) {
-			if (!storage_table.empty()) {
-				storage_table += ", ";
-			}
-			auto resolved = Git4DataResolveTableName(context, storage_entry.storage, storage_entry.oid);
-			storage_table += StringUtil::Replace(resolved.empty() ? storage_entry.storage : resolved, "'", "''");
-		}
-		string delta_added;
-		string delta_removed;
-		for (auto &delta_entry : entries[i].deltas) {
-			if (!delta_added.empty()) {
-				delta_added += ", ";
-				delta_removed += ", ";
-			}
-			delta_added += StringUtil::Replace(delta_entry.added, "'", "''");
-			delta_removed += StringUtil::Replace(delta_entry.removed, "'", "''");
-		}
-		auto delta_missing = false;
-		for (auto &delta_entry : entries[i].deltas) {
-			if (Git4DataResolveTableName(context, delta_entry.added, delta_entry.added_oid).empty() ||
-			    Git4DataResolveTableName(context, delta_entry.removed, delta_entry.removed_oid).empty()) {
-				delta_missing = true;
-				break;
-			}
-		}
-		query += StringUtil::Format(
-		    "('%s'::VARCHAR, %llu::UBIGINT, '%s'::VARCHAR, '%s'::TIMESTAMP, %s::BOOLEAN, %s::BOOLEAN, %s::BOOLEAN, "
-		    "%s::BOOLEAN, '%s'::VARCHAR, '%s'::VARCHAR, '%s'::VARCHAR)",
-		    name, entries[i].pin, parent, Timestamp::ToString(entries[i].created),
-		    entries[i].storage_tables.empty() ? "false" : "true", entries[i].deltas.empty() ? "false" : "true",
-		    storage_missing ? "true" : "false", delta_missing ? "true" : "false", storage_table, delta_added,
-		    delta_removed);
-	}
-	query += ") t(branch_name, pinned_commit_id, parent, created, has_storage, has_delta, storage_missing, "
-	         "delta_missing, storage_table, delta_added, delta_removed) ORDER BY pinned_commit_id, branch_name";
-	return query;
+	// the rows come from the table function, which is where they can also be selected *from*: a pragma's
+	// result cannot, so every value in this listing used to be readable by a person and asserted only by
+	// its shape
+	return "SELECT * FROM git4data_branches()";
 }
 
 static string PragmaGit4DataLCA(ClientContext &context, const FunctionParameters &parameters) {
@@ -2125,37 +2053,8 @@ static string PragmaGit4DataDropSnapshot(ClientContext &context, const FunctionP
 }
 
 static string PragmaGit4DataSnapshots(ClientContext &context, const FunctionParameters &parameters) {
-	auto entries = GetGit4DataTransactionManager(context).snapshots.List();
-	if (entries.empty()) {
-		return "SELECT NULL::VARCHAR AS snapshot_name, NULL::UBIGINT AS pinned_commit_id, "
-		       "NULL::TIMESTAMP AS created, NULL::VARCHAR AS line WHERE false";
-	}
-	vector<Git4DataSnapshot> visible;
-	for (auto &entry : entries) {
-		if (entry.name == DuckTransactionManager::MERGE_BASE_REFERENCE) {
-			// an internal reference, alive only for the length of a merge - and left behind by one that
-			// failed, which is why it is neither counted nor shown
-			continue;
-		}
-		visible.push_back(entry);
-	}
-	string query = "SELECT * FROM (VALUES ";
-	for (idx_t i = 0; i < visible.size(); i++) {
-		if (i > 0) {
-			query += ", ";
-		}
-		// Snapshot names are user input, escape them before splicing into SQL
-		auto name = StringUtil::Replace(visible[i].name, "'", "''");
-		// NULL rather than an empty string for the main line, so a listing says which references
-		// capture a branch's own state and which are the table at a commit
-		auto line = visible[i].line.empty()
-		                ? string("NULL::VARCHAR")
-		                : StringUtil::Format("'%s'::VARCHAR", StringUtil::Replace(visible[i].line, "'", "''"));
-		query += StringUtil::Format("('%s'::VARCHAR, %llu::UBIGINT, '%s'::TIMESTAMP, %s)", name, visible[i].pin,
-		                            Timestamp::ToString(visible[i].created), line);
-	}
-	query += ") t(snapshot_name, pinned_commit_id, created, line) ORDER BY pinned_commit_id";
-	return query;
+	// as for the branches above: the rows are the table function's, so a caller (and a test) can select them
+	return "SELECT * FROM git4data_snapshots()";
 }
 
 static string PragmaGit4DataState(ClientContext &context, const FunctionParameters &parameters) {
