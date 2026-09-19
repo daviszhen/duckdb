@@ -44,3 +44,51 @@ query I
 SELECT count(*) FROM t
 ----
 600
+
+# ---------------------------------------------------------------------------------------------------------
+# A reference taken in the new process pins the newest commit, not zero
+# ---------------------------------------------------------------------------------------------------------
+
+# The counter is not the only id a restart has to put back: `GetLastCommit()` is what a reference taken *now*
+# pins, and it is an id the previous process handed out. It used to come back as zero - measured,
+# `last_commit_id` read 7 in the session that made the commits and 0 in the next one - so a snapshot taken in
+# a process that had not committed anything yet pinned the beginning of the timeline: reading at it returned
+# the rows the previous process deleted, and a diff of it against the live table reported them as differences.
+# The newest commit is written beside the counter now. **The reference is the first statement here on purpose**:
+# a statement that commits first (the migration of an older file does) would hand the session a new commit id
+# and hide the case this is about.
+statement ok
+PRAGMA git4data_create_snapshot('after_restart')
+
+query I
+SELECT pinned_commit_id > 0 FROM git4data_snapshots() WHERE snapshot_name = 'after_restart'
+----
+true
+
+# it reads the rows the table has, not the ones the previous process deleted
+query I
+SELECT count(*) FROM t AT (SNAPSHOT => 'after_restart')
+----
+600
+
+# and the reference denotes the table as it stands, so there is nothing between them
+query I
+SELECT count(*) FROM git4data_diff('t', '__live__', 'after_restart')
+----
+0
+
+# A branch pinned in the new process is the same statement, and a second restart keeps both
+statement ok
+PRAGMA git4data_create_branch('b_after_restart', '')
+
+restart
+
+query I
+SELECT count(*) FROM git4data_diff('t', 'after_restart', 'b_after_restart')
+----
+0
+
+query I
+SELECT count(*) FROM t AT (BRANCH => 'b_after_restart')
+----
+600

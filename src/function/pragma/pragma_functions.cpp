@@ -209,35 +209,68 @@ static vector<string> Git4DataPrimaryKeyColumnNames(TableCatalogEntry &table) {
 	return result;
 }
 
-//! Restore a table's contents to what a reference saw. Delete every row the reference knows and put
-//! the reference's rows back, rather than comparing them column by column: the table is being rewound,
-//! so rewriting the rows it keeps is the honest reading of that, and it needs no comparison. The
-//! primary key decides which rows those are, as it does for a pick.
-//! The statements that rewind a table to a reference, shared by the by-name and by-time forms
+//! Restore a table's contents to what a reference saw.
+//!
+//! **A table with a primary key is put right by writing only the rows that differ.** The diff against the
+//! *live* table says which keys the reference does not have and which it has with other values - those are
+//! deleted - and then the reference's rows for those keys, and for the keys the table is missing, are
+//! inserted. A restore that has one row to put right writes one row, and the rows that were already right
+//! keep their row ids: since a diff of two references of one table compares row ids, a restore that rewrote
+//! every row made a later diff of the reference taken before it and the one taken after report the whole
+//! table as changed, measured at three changed on a table of three.
+//!
+//! **A table with no key is rewound by rewriting it**, guarded by the same condition, which is what says
+//! "nothing to do" without reading the reference twice: a content-based match cannot count duplicate rows, so
+//! there is no key to delete by and no key to insert by, and the rows themselves are the only identity. A
+//! restore has never needed a key and still does not.
 static string BuildGit4DataRestore(ClientContext &context, const string &table_name, const string &reference,
                                    const char *unit) {
-	// A restore does not need a key: every row goes and the reference's own image comes back, so there is
-	// nothing to match row by row. It used to insist on one, which refused tables it could have served.
-	Catalog::GetEntry<TableCatalogEntry>(context, QualifiedName(Identifier(table_name)));
+	auto &table = Catalog::GetEntry<TableCatalogEntry>(context, QualifiedName(Identifier(table_name)));
 	auto quoted_table = Git4DataTableSQLName(table_name);
 	auto at_clause = FormatGit4DataAtClause(table_name, reference, unit);
+	auto escape = [](const string &value) {
+		return StringUtil::Replace(value, "'", "''");
+	};
 
-	// Every row goes, including the ones the reference never had: a restore rewinds the table, so a row
-	// added since the reference is as wrong as a row it changed. The delete runs first, and the reference
-	// scan still reads its own image afterwards because the delete is newer than the reference's bound.
-	//
-	// **Nothing is written when the table already reads as the reference does.** That is not an optimization
-	// of the same answer: rewriting the rows gives them new row ids, and a diff of two references that
-	// *denote the same rows* compares row ids - so a restore of a state the table already has made a later
-	// `git4data_diff` report the whole table as changed, measured. The condition is the two images differing
-	// as multisets, in either direction, and it is read before the delete; after it, the table is empty and
-	// the second half of the condition is what says whether the reference has anything to put back.
+	// The two images differ as multisets, in either direction. It is read before the delete, and it is what
+	// keeps a restore of what the table already has from writing anything at all - neither the rows nor the
+	// diff that would find them: the condition short-circuits the subqueries that follow it.
 	auto differs = StringUtil::Format("EXISTS (SELECT * FROM %s EXCEPT ALL SELECT * FROM %s) OR EXISTS (SELECT * FROM "
 	                                  "%s EXCEPT ALL SELECT * FROM %s)",
 	                                  quoted_table, at_clause, at_clause, quoted_table);
+
+	auto key_columns = Git4DataPrimaryKeyColumnNames(table);
+	if (key_columns.empty()) {
+		string result;
+		result += StringUtil::Format("DELETE FROM %s WHERE %s;\n", quoted_table, differs);
+		result += StringUtil::Format("INSERT INTO %s SELECT * FROM %s WHERE %s;", quoted_table, at_clause, differs);
+		return result;
+	}
+	string key_list;
+	for (idx_t i = 0; i < key_columns.size(); i++) {
+		if (i > 0) {
+			key_list += ", ";
+		}
+		key_list += KeywordHelper::WriteOptionallyQuoted(key_columns[i]);
+	}
+	// The live table is one side of this diff, which names it the way the rest of the surface does, and the
+	// reference is the other: what the table has and the reference does not, and the other way round.
+	auto diff = StringUtil::Format("git4data_diff('%s', '%s', '%s')", escape(table_name),
+	                               DuckTransactionManager::LIVE_REFERENCE, escape(reference));
 	string result;
-	result += StringUtil::Format("DELETE FROM %s WHERE %s;\n", quoted_table, differs);
-	result += StringUtil::Format("INSERT INTO %s SELECT * FROM %s WHERE %s;", quoted_table, at_clause, differs);
+	// The condition is parenthesized: it is a disjunction, and `AND` binds tighter than `OR`, so without the
+	// brackets the key filter would attach to its second half alone - measured, a restore that generated
+	// `WHERE EXISTS (...) OR EXISTS (...) AND (k) IN (...)` deleted and re-inserted every row, which is the
+	// whole table rewritten by a statement that was supposed to write the rows that differ.
+	result += StringUtil::Format(
+	    "DELETE FROM %s WHERE (%s) AND (%s) IN (SELECT %s FROM %s WHERE g4d_change IN ('removed', 'changed'));\n",
+	    quoted_table, differs, key_list, key_list, diff);
+	// Only the keys the table is missing: a key the reference added is missing by definition, and one whose
+	// row was just deleted is missing by the time this runs, so it takes the reference's values.
+	result += StringUtil::Format(
+	    "INSERT INTO %s SELECT * FROM %s WHERE (%s) AND (%s) IN (SELECT %s FROM %s WHERE g4d_change IN ('added', "
+	    "'changed')) AND (%s) NOT IN (SELECT %s FROM %s);",
+	    quoted_table, at_clause, differs, key_list, key_list, diff, key_list, key_list, quoted_table);
 	return result;
 }
 

@@ -309,6 +309,7 @@ void SingleFileCheckpointWriter::CreateCheckpoint() {
 	idx_t registry_block = 0;
 	idx_t registry_offset = 0;
 	auto start_timestamp = transaction_manager.GetStartTimestampCounter();
+	auto last_commit = transaction_manager.GetLastCommit();
 	auto pinned_snapshots = transaction_manager.snapshots.List();
 	auto data_branches = transaction_manager.branches.List();
 	(void)pinned_snapshots;
@@ -319,6 +320,12 @@ void SingleFileCheckpointWriter::CreateCheckpoint() {
 		BinarySerializer registry_serializer(*registry_writer, SerializationOptions(db));
 		registry_serializer.Begin();
 		registry_serializer.WriteProperty<uint64_t>(99, "start_timestamp", start_timestamp);
+		// The newest commit, for the same reason the counter is here: it is an id this process handed out, and
+		// ids do not survive a restart. A reference taken in a session that has not committed anything yet
+		// pins it - and so does the point-in-time window's own reference - so a session that restored only the
+		// counter pinned commit *0*, measured: `last_commit_id` read 7 in the session that made the commits
+		// and 0 in the next one, and a reference taken there read the table as of the beginning.
+		registry_serializer.WriteProperty<uint64_t>(107, "last_commit", last_commit);
 		// the window has to be persisted with the reference it moves, or a restart would leave the
 		// reference behind and never move it again
 		registry_serializer.WriteProperty<bool>(103, "pitr_enabled", transaction_manager.PitrEnabled());
@@ -335,16 +342,15 @@ void SingleFileCheckpointWriter::CreateCheckpoint() {
 				internal_snapshots.push_back(snapshot);
 			}
 		}
-		registry_serializer.WriteList(100, "snapshots", internal_snapshots.size(),
-		                              [&](Serializer::List &list, idx_t i) {
-			                              list.WriteObject([&](Serializer &obj) {
-				                              obj.WriteProperty<string>(100, "name", internal_snapshots[i].name);
-				                              obj.WriteProperty<uint64_t>(101, "pin", internal_snapshots[i].pin);
-				                              obj.WriteProperty<int64_t>(102, "created",
-				                                                         internal_snapshots[i].created.value);
-				                              obj.WriteProperty<string>(103, "line", internal_snapshots[i].line);
-			                              });
-		                              });
+		registry_serializer.WriteList(
+		    100, "snapshots", internal_snapshots.size(), [&](Serializer::List &list, idx_t i) {
+			    list.WriteObject([&](Serializer &obj) {
+				    obj.WriteProperty<string>(100, "name", internal_snapshots[i].name);
+				    obj.WriteProperty<uint64_t>(101, "pin", internal_snapshots[i].pin);
+				    obj.WriteProperty<int64_t>(102, "created", internal_snapshots[i].created.value);
+				    obj.WriteProperty<string>(103, "line", internal_snapshots[i].line);
+			    });
+		    });
 		// The branches are not written at all: every one of them is made by a statement, so every one has a
 		// row.
 		registry_serializer.End();
@@ -494,6 +500,11 @@ void SingleFileCheckpointReader::LoadFromStorage() {
 		// every commit this process will make
 		auto start_timestamp = registry_deserializer.ReadProperty<uint64_t>(99, "start_timestamp");
 		transaction_manager.SetMinimumStartTimestamp(start_timestamp);
+		// A file written before this property carried its newest commit here reads zero, and the counter the
+		// block does carry is one above the id it last handed out, which is the closest thing such a file has
+		// to an answer.
+		auto last_commit = registry_deserializer.ReadPropertyWithExplicitDefault<uint64_t>(107, "last_commit", 0);
+		transaction_manager.SetMinimumLastCommit(last_commit == 0 ? start_timestamp - 1 : last_commit);
 		auto pitr_enabled = registry_deserializer.ReadPropertyWithExplicitDefault<bool>(103, "pitr_enabled", false);
 		auto pitr_window = registry_deserializer.ReadPropertyWithExplicitDefault<int64_t>(104, "pitr_window", 0);
 		if (pitr_enabled) {

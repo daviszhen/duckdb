@@ -388,6 +388,15 @@ public:
 			current_start_timestamp = timestamp;
 		}
 	}
+	//! Continue counting commits from the given one. A reference created in this process pins
+	//! `GetLastCommit()`, and that is an id a *previous* process handed out: a session that restored only the
+	//! counter would pin zero and read the table as of the beginning, so the newest commit is persisted
+	//! beside it and put back here. A commit this session makes overwrites it, and is always newer.
+	void SetMinimumLastCommit(transaction_t timestamp) {
+		if (timestamp > last_commit.load()) {
+			last_commit = timestamp;
+		}
+	}
 	optional_idx GetActiveCheckpoint() const {
 		auto id = active_checkpoint.load();
 		return id == 0 ? optional_idx() : optional_idx(id);
