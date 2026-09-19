@@ -1043,6 +1043,11 @@ struct Git4DataDiffState : public GlobalTableFunctionState {
 		//! caller pays to compare two references at all.
 		StoredRow stored;
 		row_t row_id;
+		//! Whether the right side accounted for this row. It used to be a *set* of matched keys - a string
+		//! per matched row on the composite path and a 64-bit pattern per row on the integer one - which cost
+		//! a hash entry per row and, on the composite path, a formatted key string per row: measured, a
+		//! half-million-row diff under a composite key took 5.6 s that way (increment 3w).
+		bool matched = false;
 		//! The key's 64-bit pattern when the key is a single integer column: the map is then bucketed by it,
 		//! which is exact, and matching a right row against it allocates nothing at all
 		uint64_t bits = 0;
@@ -1190,6 +1195,43 @@ static unique_ptr<FunctionData> Git4DataDiffBind(ClientContext &context, TableFu
 	return result;
 }
 
+//! The hash of a scanned row's key, read out of the chunk rather than out of a key vector built for it: the
+//! combination is the one `Git4DataDiffKeyHash` makes, so a left row and a right row of the same key land in
+//! the same bucket however they were hashed.
+static hash_t Git4DataDiffChunkKeyHash(DataChunk &chunk, idx_t key_count, idx_t row) {
+	hash_t result = 0;
+	for (idx_t i = 0; i < key_count; i++) {
+		result = CombineHash(result, chunk.GetValue(i, row).Hash());
+	}
+	return result;
+}
+
+//! Whether a left row's key is the key of this row of a chunk
+static bool Git4DataDiffSameStoredKeyChunk(const Git4DataDiffState &state, const Git4DataDiffState::StoredRow &stored,
+                                           DataChunk &chunk, idx_t row) {
+	auto &block = *state.left_blocks[stored.block];
+	for (idx_t i = 0; i < state.key_count; i++) {
+		if (!Value::NotDistinctFrom(block.GetValue(i, stored.row), chunk.GetValue(i, row))) {
+			return false;
+		}
+	}
+	return true;
+}
+
+//! Whether two left rows share a key, which is what says which of them a match accounts for - the question
+//! the set of matched keys used to answer by construction.
+static bool Git4DataDiffSameStoredKeys(const Git4DataDiffState &state, const Git4DataDiffState::StoredRow &left,
+                                       const Git4DataDiffState::StoredRow &right) {
+	auto &left_block = *state.left_blocks[left.block];
+	auto &right_block = *state.left_blocks[right.block];
+	for (idx_t i = 0; i < state.key_count; i++) {
+		if (!Value::NotDistinctFrom(left_block.GetValue(i, left.row), right_block.GetValue(i, right.row))) {
+			return false;
+		}
+	}
+	return true;
+}
+
 //! The key of the row at the given position, or an empty vector when the table has no primary key
 static vector<Value> Git4DataDiffRowKey(DataChunk &chunk, idx_t key_count, idx_t row) {
 	vector<Value> key;
@@ -1198,22 +1240,6 @@ static vector<Value> Git4DataDiffRowKey(DataChunk &chunk, idx_t key_count, idx_t
 		key.push_back(chunk.data[i].GetValue(row));
 	}
 	return key;
-}
-
-//! A key as one string, for remembering which left rows a right row accounted for. The hash of a key is
-//! only a bucket - two keys that share one are different rows, and treating them as the same row loses
-//! the rows one of them had: a composite key whose parts combined to the same hash made a diff report no
-//! removal at all, measured. Length-prefixed, so two different tuples cannot produce the same string.
-static string Git4DataDiffKeyString(const vector<Value> &key) {
-	string result;
-	for (auto &value : key) {
-		auto text = value.ToString();
-		result += to_string(text.size());
-		result += ':';
-		result += text;
-		result += '|';
-	}
-	return result;
 }
 
 //! The key a 64-bit pattern stands for, in the key's own type
@@ -1266,7 +1292,7 @@ static Git4DataDiffState::StoredRow Git4DataDiffStoreRow(Git4DataDiffState &stat
 	auto stored = Git4DataDiffState::StoredRow {state.left_blocks.size() - 1, state.stored_rows++};
 	auto &block = *state.left_blocks[stored.block];
 	for (idx_t i = 0; i < state.key_count + state.value_count; i++) {
-		block.SetValue(i, stored.row, chunk.GetValue(i, row));
+		block.data[i].SetValue(stored.row, chunk.GetValue(i, row));
 	}
 	return stored;
 }
@@ -1284,34 +1310,6 @@ static bool Git4DataDiffSameStoredValues(const Git4DataDiffState &state, const G
 		}
 	}
 	return true;
-}
-
-//! The same for the key a right row built: a stored row's key is read column by column, so comparing it
-//! materializes nothing
-static bool Git4DataDiffSameStoredKey(const Git4DataDiffState &state, const Git4DataDiffState::StoredRow &stored,
-                                      const vector<Value> &key) {
-	if (state.key_count != key.size()) {
-		return false;
-	}
-	auto &block = *state.left_blocks[stored.block];
-	for (idx_t i = 0; i < key.size(); i++) {
-		if (!Value::NotDistinctFrom(block.GetValue(i, stored.row), key[i])) {
-			return false;
-		}
-	}
-	return true;
-}
-
-//! One stored row's key as the vector a change carries out. Materialized only where a change is emitted,
-//! which is why the collection phase can hold the whole side as columns.
-static vector<Value> Git4DataDiffStoredKey(const Git4DataDiffState &state, const Git4DataDiffState::StoredRow &stored) {
-	auto &block = *state.left_blocks[stored.block];
-	vector<Value> key;
-	key.reserve(state.key_count);
-	for (idx_t i = 0; i < state.key_count; i++) {
-		key.push_back(block.GetValue(i, stored.row));
-	}
-	return key;
 }
 
 //! A fresh block for the change keys, when the last one is full. A table with no primary key has no key
@@ -1344,7 +1342,7 @@ static Git4DataDiffState::StoredRow Git4DataDiffStoreChangeKey(Git4DataDiffState
 	}
 	auto &block = *state.change_keys[stored.block];
 	for (idx_t i = 0; i < state.key_count; i++) {
-		block.SetValue(i, stored.row, chunk.GetValue(i, row));
+		block.data[i].SetValue(stored.row, chunk.GetValue(i, row));
 	}
 	return stored;
 }
@@ -1359,7 +1357,7 @@ static Git4DataDiffState::StoredRow Git4DataDiffStoreChangeKeyFromLeft(Git4DataD
 	auto &from = *state.left_blocks[source.block];
 	auto &block = *state.change_keys[stored.block];
 	for (idx_t i = 0; i < state.key_count; i++) {
-		block.SetValue(i, stored.row, from.GetValue(i, source.row));
+		block.data[i].SetValue(stored.row, from.GetValue(i, source.row));
 	}
 	return stored;
 }
@@ -1375,10 +1373,10 @@ static Git4DataDiffState::StoredRow Git4DataDiffStoreChangeKeyValues(Git4DataDif
 	auto &block = *state.change_keys[stored.block];
 	for (idx_t i = 0; i < state.key_count; i++) {
 		if (i < key.size()) {
-			block.SetValue(i, stored.row, key[i]);
+			block.data[i].SetValue(stored.row, key[i]);
 			continue;
 		}
-		block.SetValue(i, stored.row, Value(state.scan_types[i]));
+		block.data[i].SetValue(stored.row, Value(state.scan_types[i]));
 	}
 	return stored;
 }
@@ -1680,16 +1678,11 @@ static void Git4DataDiffFunction(ClientContext &context, TableFunctionInput &dat
 						    return;
 					    }
 				    }
-				    state.left_by_key[Git4DataDiffKeyHash(Git4DataDiffRowKey(chunk, state.key_count, row))].push_back(
-				        entry);
+				    state.left_by_key[Git4DataDiffChunkKeyHash(chunk, state.key_count, row)].push_back(entry);
 			    });
 			state.phase = Git4DataDiffState::Phase::RIGHT;
 		}
 		if (state.phase == Git4DataDiffState::Phase::RIGHT) {
-			// which left rows a right row accounted for, by the key itself rather than by its hash. The bits
-			// of an integer key answer the same question without a string per row.
-			unordered_set<string> matched;
-			unordered_set<uint64_t> matched_bits;
 			Git4DataDiffCollect(
 			    context, state, state.right_scan, state.right_bound, state.right_added_table, state.right_delta_bound,
 			    state.right_removed, state.right_storage, state.right_own_storage, state.right_local_open,
@@ -1703,7 +1696,13 @@ static void Git4DataDiffFunction(ClientContext &context, TableFunctionInput &dat
 							    if (candidate.bits != bits) {
 								    continue;
 							    }
-							    matched_bits.insert(bits);
+							    // every left row carrying these bits is accounted for, which is what the set of
+							    // matched patterns said
+							    for (auto &same : bits_entry->second) {
+								    if (same.bits == bits) {
+									    same.matched = true;
+								    }
+							    }
 							    if (!Git4DataDiffSameStoredValues(state, candidate.stored, chunk, state.key_count,
 							                                      row)) {
 								    state.changed.push_back(Git4DataDiffState::Change {
@@ -1717,15 +1716,20 @@ static void Git4DataDiffFunction(ClientContext &context, TableFunctionInput &dat
 					        row_id, NO_COUNTERPART, Git4DataDiffStoreChangeKey(state, context, chunk, row)});
 					    return;
 				    }
-				    auto key = Git4DataDiffRowKey(chunk, state.key_count, row);
-				    auto hash = Git4DataDiffKeyHash(key);
+				    auto hash = Git4DataDiffChunkKeyHash(chunk, state.key_count, row);
 				    auto entry = state.left_by_key.find(hash);
 				    if (entry != state.left_by_key.end()) {
 					    for (auto &candidate : entry->second) {
-						    if (!Git4DataDiffSameStoredKey(state, candidate.stored, key)) {
+						    if (!Git4DataDiffSameStoredKeyChunk(state, candidate.stored, chunk, row)) {
 							    continue;
 						    }
-						    matched.insert(Git4DataDiffKeyString(key));
+						    // every left row sharing this key is accounted for, which is what the set of
+						    // matched keys said; they share a bucket, so this is the bucket's own rows
+						    for (auto &same : entry->second) {
+							    if (Git4DataDiffSameStoredKeys(state, candidate.stored, same.stored)) {
+								    same.matched = true;
+							    }
+						    }
 						    if (!Git4DataDiffSameStoredValues(state, candidate.stored, chunk, state.key_count, row)) {
 							    state.changed.push_back(Git4DataDiffState::Change {
 							        candidate.row_id, row_id, Git4DataDiffStoreChangeKey(state, context, chunk, row)});
@@ -1738,18 +1742,7 @@ static void Git4DataDiffFunction(ClientContext &context, TableFunctionInput &dat
 			    });
 			for (auto &entry : state.left_by_key) {
 				for (auto &candidate : entry.second) {
-					if (state.key_is_integer) {
-						if (matched_bits.find(candidate.bits) != matched_bits.end()) {
-							continue;
-						}
-						state.removed.push_back(Git4DataDiffState::Change {
-						    candidate.row_id, NO_COUNTERPART,
-						    Git4DataDiffStoreChangeKeyFromLeft(state, context, candidate.stored)});
-						continue;
-					}
-					// the key is read out of the block once: it is what says whether the row was matched
-					if (matched.find(Git4DataDiffKeyString(Git4DataDiffStoredKey(state, candidate.stored))) !=
-					    matched.end()) {
+					if (candidate.matched) {
 						continue;
 					}
 					state.removed.push_back(Git4DataDiffState::Change {
