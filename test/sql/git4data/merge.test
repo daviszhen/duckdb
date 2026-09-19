@@ -158,3 +158,80 @@ query I
 SELECT count(*) FROM t AT (BRANCH => 'left')
 ----
 104
+
+# ---------------------------------------------------------------------------------------------------------
+# A merge inside the caller's transaction, and what a refusal leaves behind
+# ---------------------------------------------------------------------------------------------------------
+
+# A merge is a group of statements in the caller's transaction, and one of them builds a helper table holding
+# the conflicts. A refusal aborts the whole transaction, so the caller has to roll back - and the rollback has
+# to leave no trace: no helper table, and no change to either side. Measured, that is what happens: the helper
+# is a `CREATE OR REPLACE TEMP TABLE`, and a temp table made inside the transaction goes with it.
+statement ok
+CREATE TABLE tx_t (k INTEGER PRIMARY KEY, v INTEGER)
+
+statement ok
+INSERT INTO tx_t VALUES (1, 10)
+
+statement ok
+CHECKPOINT
+
+statement ok
+PRAGMA git4data_create_branch('tx_root', '')
+
+statement ok
+PRAGMA git4data_create_branch('tx_left', 'tx_root')
+
+statement ok
+PRAGMA git4data_create_branch('tx_right', 'tx_root')
+
+statement ok
+PRAGMA git4data_materialize('tx_t', 'tx_left', 'tx_left_t')
+
+statement ok
+PRAGMA git4data_materialize('tx_t', 'tx_right', 'tx_right_t')
+
+# the same row, changed differently on each side
+statement ok
+UPDATE tx_left_t SET v = 111 WHERE k = 1
+
+statement ok
+UPDATE tx_right_t SET v = 222 WHERE k = 1
+
+statement ok
+BEGIN
+
+statement error
+PRAGMA git4data_merge('tx_t', 'tx_left', 'tx_right', 'fail')
+----
+<REGEX>:.*merge conflict.*
+
+# the session is in an aborted transaction after a refusal, which the note records as the one thing a caller
+# has to clear; the rollback clears it and takes the merge with it
+statement ok
+ROLLBACK
+
+query I
+SELECT v FROM tx_left_t WHERE k = 1
+----
+111
+
+query I
+SELECT v FROM tx_right_t WHERE k = 1
+----
+222
+
+# no helper table is left behind by the refusal
+query I
+SELECT count(*) FROM duckdb_tables() WHERE table_name LIKE 'g4d%'
+----
+0
+
+# and the merge still works when the caller asks it to skip the conflicting row
+statement ok
+PRAGMA git4data_merge('tx_t', 'tx_left', 'tx_right', 'skip')
+
+query I
+SELECT v FROM tx_left_t WHERE k = 1
+----
+111

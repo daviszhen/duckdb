@@ -321,3 +321,56 @@ query III
 SELECT count(*), min(k), max(k) FROM p
 ----
 3	1	3
+
+# ---------------------------------------------------------------------------------------------------------
+# A restore inside the caller's transaction
+# ---------------------------------------------------------------------------------------------------------
+
+# The table is rewound to the reference as *the caller's own transaction* has it, not as the file does: a row
+# the caller inserted and has not committed is a row the reference never had, so the restore takes it, and a
+# row the caller changed is put back to the reference's value like any other. The whole thing then rolls back
+# like any other DML - the restore is an ordinary statement - while what the rollback does *not* reach is the
+# file: a reference taken in that transaction goes with it, which `snapshot.test` asserts.
+statement ok
+CREATE TABLE tx (k INTEGER PRIMARY KEY, v INTEGER)
+
+statement ok
+INSERT INTO tx VALUES (1, 10), (2, 20)
+
+statement ok
+CHECKPOINT
+
+statement ok
+PRAGMA git4data_create_snapshot('tx_base')
+
+statement ok
+UPDATE tx SET v = 99 WHERE k = 1
+
+statement ok
+BEGIN
+
+statement ok
+INSERT INTO tx VALUES (3, 30)
+
+statement ok
+PRAGMA git4data_restore('tx', 'tx_base')
+
+# the reference's two rows and its values, and the caller's own uncommitted row is gone with them
+query II
+SELECT count(*), sum(v) FROM tx
+----
+2	30
+
+statement ok
+ROLLBACK
+
+# and the rollback puts the transaction's work back, the update included
+query II
+SELECT count(*), sum(v) FROM tx
+----
+2	119
+
+query I
+SELECT count(*) FROM git4data_snapshots() WHERE snapshot_name = 'tx_base'
+----
+1
