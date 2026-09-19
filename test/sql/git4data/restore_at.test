@@ -83,3 +83,55 @@ query III
 SELECT count(*), min(k), max(k) FROM t
 ----
 200	0	199
+
+# A window's reference is a reference like any other, and that is *not* a defect: it is created when the window
+# is opened and moved forward when it falls out of the window, so it carries a timestamp and a pin like every
+# reference, and a by-time restore may choose it. `pitr.test` is the other half of this: with no reference of the
+# caller's at all, a restore to a time after the window was opened reaches back to it - which is the whole point
+# of the window. What a caller has to know is which one they will get: a reference *taken later* wins, and the
+# window's is taken when the window is opened or last moved.
+#
+# Measured, and the reasoning was wrong the first time: excluding `__`-prefixed references from the chooser looks
+# right (the listings hide the merge base, the quotas do not count internals) and it **breaks PITR by time** -
+# `pitr.test:48` then refuses with "nothing to restore". The window's reference is the one thing that makes a
+# state inside the window reachable by name or by time, so it stays a candidate. This section pins that, and the
+# check is the perturbation: skip internal references in the chooser and the assertions below fail.
+statement ok
+INSERT INTO t VALUES (999, 999)
+
+statement ok
+PRAGMA git4data_pitr(1)
+
+statement ok
+CHECKPOINT
+
+query II
+SELECT (SELECT count(*) FROM git4data_snapshots() WHERE snapshot_name = '__pitr__'),
+       (SELECT count(*) FROM t)
+----
+1	201
+
+# the window's reference was taken after `late`, so it is the newest reference at or before the target time and
+# the restore reaches the state it pins - the row written after `late` stays
+statement ok
+PRAGMA git4data_restore_at('t', '2030-01-01 00:00:00')
+
+query III
+SELECT count(*), min(k), max(k) FROM t
+----
+201	0	999
+
+# and the caller's own reference, named, gives what it holds - which is how a caller asks for *their* state
+statement ok
+PRAGMA git4data_restore('t', 'late')
+
+query III
+SELECT count(*), min(k), max(k) FROM t
+----
+200	0	199
+
+# a time before the window's reference and before every other one still has nothing to reach
+statement error
+PRAGMA git4data_restore_at('t', '2020-01-01 00:00:00')
+----
+<REGEX>:.*nothing to restore.*
