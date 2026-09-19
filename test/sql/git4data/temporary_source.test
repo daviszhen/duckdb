@@ -1,0 +1,76 @@
+# name: test/sql/git4data/temporary_source.test
+# description: A temporary table as a source: where its rows live, and what a pin taken around a write sees
+# group: [git4data]
+
+# A temporary table can be a source - `schema_source.test` is where that is pinned. This file pins what
+# was measured while probing the shapes a source can have: a temporary table's rows are *not* in the
+# session's local storage as one would expect, and the commit that writes them is not the commit that
+# finalizes them. Both are the engine's, and both decide what a reference read of such a table returns.
+
+statement ok
+CREATE TEMP TABLE tt (k INTEGER PRIMARY KEY, v INTEGER);
+
+statement ok
+INSERT INTO tt SELECT range, range FROM range(5);
+
+# The rows are in the table's own row groups - a row group scan is what reads them, and the segment
+# information proves they are there rather than only in the session's local storage.
+query I
+SELECT count(DISTINCT row_group_id) FROM pragma_storage_info('tt')
+----
+1
+
+query I
+SELECT count(*) FROM pragma_storage_info('tt')
+----
+4
+
+# A pin taken right after the rows were written sees them here. Measured on the shell, that is *not*
+# always so: in a session where the write is the database's very first commit, the pin recorded right
+# after it (3) is below the row's commit id, and the read returns 0 - from the next pin (7) on it
+# returns 5. A write to a temporary table is finalized by the *next* commit there, which is the
+# engine's business, and it is why this file pins only what a test session can rely on.
+statement ok
+PRAGMA git4data_create_snapshot('pin_1');
+
+statement ok
+PRAGMA git4data_create_snapshot('pin_2');
+
+query I
+SELECT count(*) FROM tt AT (SNAPSHOT => 'pin_1')
+----
+5
+
+query I
+SELECT count(*) FROM tt AT (SNAPSHOT => 'pin_2')
+----
+5
+
+# A permanent table is the contrast that makes the two numbers above a statement about temporary
+# storage rather than about the read: the same sequence on a permanent table is visible at its own pin.
+statement ok
+CREATE TABLE pt (k INTEGER PRIMARY KEY, v INTEGER);
+
+statement ok
+INSERT INTO pt SELECT range, range FROM range(5);
+
+statement ok
+PRAGMA git4data_create_snapshot('pt_pin');
+
+query I
+SELECT count(*) FROM pt AT (SNAPSHOT => 'pt_pin')
+----
+5
+
+# The lag is a lag and not a loss: whatever the first pin shows, the second shows the rows, and the
+# table itself holds them.
+query II
+SELECT (SELECT count(*) FROM tt AT (SNAPSHOT => 'pin_1')),
+       (SELECT count(*) FROM tt AT (SNAPSHOT => 'pin_2'))
+----
+5	5
+
+query I
+SELECT count(*) FROM tt
+----
+5
