@@ -381,3 +381,41 @@ SELECT k, v FROM unsigned_k AT (BRANCH => 'unsigned_branch') ORDER BY k
 ----
 18446744073709551614	3
 18446744073709551615	2
+
+# The removed table holds the source's key columns, in the order the source declares them - the read builds the
+# key tuple positionally from it. This refusal had no test: a removed table with the key columns in the other
+# order, or with a different column, is what it is for.
+statement ok
+CREATE TABLE dk2 (a INTEGER, b INTEGER, v INTEGER, PRIMARY KEY (a, b))
+
+statement ok
+INSERT INTO dk2 VALUES (1, 2, 3)
+
+statement ok
+PRAGMA git4data_create_branch('dk2b', '')
+
+statement ok
+CREATE TABLE dk2_add (a INTEGER, b INTEGER, v INTEGER)
+
+statement ok
+CREATE TABLE dk2_del_swapped (b INTEGER, a INTEGER)
+
+statement ok
+CREATE TABLE dk2_del_wrong (a INTEGER)
+
+statement error
+PRAGMA git4data_bind_branch_delta('dk2', 'dk2b', 'dk2_add', 'dk2_del_swapped')
+----
+<REGEX>:.*holds the keys removed from "dk2", so it needs exactly those 2 key column\(s\), in the order the source declares them.*
+
+statement error
+PRAGMA git4data_bind_branch_delta('dk2', 'dk2b', 'dk2_add', 'dk2_del_wrong')
+----
+<REGEX>:.*holds the keys removed from "dk2", so it needs exactly those 2 key column\(s\), in the order the source declares them.*
+
+# the shape it wants is accepted, and the branch reads through it
+statement ok
+CREATE TABLE dk2_del (a INTEGER, b INTEGER)
+
+statement ok
+PRAGMA git4data_bind_branch_delta('dk2', 'dk2b', 'dk2_add', 'dk2_del')

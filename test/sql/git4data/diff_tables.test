@@ -146,3 +146,32 @@ SELECT g4d_change, count(*) FROM git4data_diff('u', 'u_base', 'u_plain') GROUP B
 ----
 added	1
 removed	1
+
+# A table whose key column is named like one of the three columns a diff reports is refused: without the refusal
+# the binder answers instead, and its answer is worse - measured, `Binder Error: table "git4data_diff" has
+# duplicate column name "g4d_change"` - while a caller asking for g4d_change would silently be handed the table's
+# column rather than the change marker. This refusal had no test; the pragmas that build a diff of their own (a
+# restore, a pick, a merge) hit it at the same place, which is how it was found.
+statement ok
+CREATE TABLE dc2 (g4d_change INTEGER PRIMARY KEY, v INTEGER)
+
+statement ok
+INSERT INTO dc2 VALUES (1, 10)
+
+statement ok
+PRAGMA git4data_create_snapshot('dc2_pin')
+
+statement ok
+INSERT INTO dc2 VALUES (2, 20)
+
+statement error
+SELECT * FROM git4data_diff('dc2', 'dc2_pin', '__live__')
+----
+<REGEX>:.*has a key column named "g4d_change", which is one of the columns a diff reports, so the result would carry that name twice\. Rename the column and ask again\..*
+
+# and a restore of the same table is refused in the same place, because a restore diffs the table against the
+# reference it names
+statement error
+PRAGMA git4data_restore('dc2', 'dc2_pin')
+----
+<REGEX>:.*has a key column named "g4d_change".*
