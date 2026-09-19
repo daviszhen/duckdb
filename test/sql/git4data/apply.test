@@ -551,3 +551,58 @@ query II
 SELECT (SELECT count(*) FROM g_add WHERE k = 200), (SELECT count(*) FROM g_del WHERE k = 100)
 ----
 1	1
+
+# The table a write statement names has to be the table the delta is for, resolved and compared - the name alone
+# would match a same-named table in another schema, and the write is recorded against the table the pragma
+# resolved. Measured with the comparison disabled (the perturbation is in the note): `apply('a', 'br', 'INSERT
+# INTO s2.a ...')` then records the row in **a's** delta - the branch of a reads it, and the table the caller
+# actually wrote is untouched - so the sentence "the write would be recorded in the delta of "a"" is exactly what
+# happens, and refusing is the only thing that keeps the caller's model of which table they wrote true.
+statement ok
+CREATE TABLE ap (k INTEGER PRIMARY KEY, v INTEGER)
+
+statement ok
+INSERT INTO ap SELECT range, range FROM range(4)
+
+statement ok
+CREATE SCHEMA ap_other
+
+statement ok
+CREATE TABLE ap_other.ap (k INTEGER PRIMARY KEY, v INTEGER)
+
+statement ok
+INSERT INTO ap_other.ap VALUES (900, 900)
+
+statement ok
+CREATE TABLE ap_plain (k INTEGER PRIMARY KEY, v INTEGER)
+
+statement ok
+PRAGMA git4data_create_branch('apb', '')
+
+statement ok
+CREATE TABLE apb_add (k INTEGER PRIMARY KEY, v INTEGER)
+
+statement ok
+CREATE TABLE apb_del (k INTEGER PRIMARY KEY)
+
+statement ok
+PRAGMA git4data_bind_branch_delta('ap', 'apb', 'apb_add', 'apb_del')
+
+# the same name in another schema: the clause about the name is right here
+statement error
+PRAGMA git4data_apply('ap', 'apb', 'INSERT INTO ap_other.ap VALUES (100, 100)')
+----
+<REGEX>:.*the statement writes "ap_other.ap", which is a different table of that name, in schema "ap_other": the write would be recorded in the delta of "ap"\..*
+
+# a table with a *different* name: the clause cannot be about the name, and it no longer is
+statement error
+PRAGMA git4data_apply('ap', 'apb', 'INSERT INTO ap_plain VALUES (100, 100)')
+----
+<REGEX>:.*the statement writes "ap_plain", which is a different table: the write would be recorded in the delta of "ap"\..*
+
+# and nothing was recorded by either of them
+query II
+SELECT (SELECT count(*) FROM ap AT (BRANCH => 'apb')),
+       (SELECT count(*) FROM apb_add)
+----
+4	0

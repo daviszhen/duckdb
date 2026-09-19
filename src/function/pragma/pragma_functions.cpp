@@ -1118,13 +1118,21 @@ static void Git4DataCheckApplyTargetTable(ClientContext &context, const Qualifie
 	if (by_name && by_name->oid == source.oid) {
 		return;
 	}
+	// The clause has to be true of the table the statement actually named: "a different table of that name"
+	// describes the same-named table in another schema, and it was said about a table with a *different* name
+	// too - measured (increment 3cj), `apply('a', 'br', 'INSERT INTO other ...')` answered "the statement writes
+	// "other", which is a different table of that name, in schema "main"", where the name is the thing that is
+	// not the same.
+	auto same_name = by_name && StringUtil::CIEquals(by_name->name.GetIdentifierName(), table_name);
 	throw InvalidInputException(
 	    "git4data_apply was given \"%s\", but the statement writes \"%s\", which is %s: the write would be "
 	    "recorded in the delta of \"%s\". Write the table the branch's delta is for.",
 	    table_name, written_name.ToString(),
-	    by_name
-	        ? "a different table of that name, in schema \"" + by_name->ParentSchema().name.GetIdentifierName() + "\""
-	        : "not a table",
+	    by_name ? (same_name
+	                   ? "a different table of that name, in schema \"" +
+	                         by_name->ParentSchema().name.GetIdentifierName() + "\""
+	                   : "a different table")
+	            : "not a table",
 	    table_name);
 }
 
