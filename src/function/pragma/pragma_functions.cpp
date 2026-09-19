@@ -1633,15 +1633,13 @@ static string PragmaGit4DataMerge(ClientContext &context, const FunctionParamete
 		// the fork's own pin: `fork_state_merge.test` pins that choice, and it is what makes the merge bring
 		// over what the ancestor changed after the target forked (222 in that test) as the other side's change
 		// rather than as something the target already had.
-		auto name_line_as_base = [&]() {
+		// The commit the two sides parted at: the fork pin of whichever of them is not the ancestor. When one of
+		// the two *is* the ancestor - merging a child back into its parent - the ancestor's own pin is where the
+		// *ancestor* started, not where they parted, so the other side's pin is the one that names the state.
+		auto fork_commit = [&]() {
 			transaction_t fork = 0;
 			Git4DataBranch fork_branch;
 			for (auto &side : {left_name, right_name}) {
-				// The ancestor's own pin is where the *ancestor* started, not where the two sides parted. When
-				// one of the two *is* the ancestor - merging a child back into its parent - the commit that
-				// names the parting state is the other side's fork pin. Measured: taking the ancestor's own pin
-				// there read its line at the commit it was created at, so a parent that differs by a delta read
-				// as the raw source, with its own additions and removals missing from the base.
 				if (side == ancestor) {
 					continue;
 				}
@@ -1650,9 +1648,17 @@ static string PragmaGit4DataMerge(ClientContext &context, const FunctionParamete
 					break;
 				}
 			}
+			return fork;
+		};
+		// Naming the base as the ancestor's own *line* at that commit, which is what carries the ancestor's own
+		// change: a delta lives in two tables and a copy is a table of its own, and neither is pointed at by a
+		// commit. Naming it as the line it *inherited* instead, against the ancestor's own pin, reads the raw
+		// source - measured below, in both shapes.
+		auto name_line_as_base = [&]() {
+			auto fork = fork_commit();
 			if (fork == 0) {
-				// neither side is a branch (a child of a captured snapshot): the ancestor's own pin is what
-				// its line is read at, which is what the delta case below names too
+				// Both sides are the ancestor (a branch merged with itself): there is no fork to name, and the
+				// ancestor's own pin is what is left.
 				fork = ancestor_branch.pin;
 			}
 			transaction_manager.snapshots.Drop(DuckTransactionManager::MERGE_BASE_REFERENCE);
@@ -1669,11 +1675,14 @@ static string PragmaGit4DataMerge(ClientContext &context, const FunctionParamete
 		// which: a fork from a parent that has a line of its own pins the commit it forked at, so a merge
 		// target whose pin is newer than the ancestor's own parted *inside* that line. Both the ancestor's own
 		// copy below and its own delta go through this, because both are its line: a delta is a change it made
-		// to the source, and naming the pin instead reads the source without it.
+		// to the source, and naming the pin instead reads the source without it. **Measured, and corrected in
+		// increment 3bp (`fb4e40e8a5`)**: the fork commit is the one the side that is *not* the ancestor forked
+		// at, so the question is whether that side's pin is newer than the ancestor's - asking it of the merge
+		// target alone sent "merge a child into its parent" down the pin path, where a parent whose line is a
+		// delta read as the raw source and one whose line is a copy that was written to read as the source's
+		// values, losing the parent's own change from the base.
 		auto name_the_parting_state = [&]() {
-			Git4DataBranch target_branch;
-			if (transaction_manager.branches.Get(left_name, target_branch) &&
-			    target_branch.pin > ancestor_branch.pin) {
+			if (fork_commit() > ancestor_branch.pin) {
 				name_line_as_base();
 			} else {
 				name_pin_as_base();

@@ -780,3 +780,74 @@ PRAGMA git4data_drop_branch('mbsr')
 
 statement ok
 PRAGMA git4data_drop_branch('mbsbase')
+
+# Merging a child back into a parent whose own line is a *copy* the parent has written to: the base of that
+# merge is the parent's line at the commit the child forked at, and not the parent's own pin against the line
+# it inherited - a pin names a commit, and a commit does not carry a copy. Measured before this: the parent's
+# own value was read as the source's, so the merge deleted the row the parent had written and the merge
+# reported success - the parent lost (k = 1, 111), which no statement said a word about.
+statement ok
+CREATE TABLE mp (k INTEGER PRIMARY KEY, v INTEGER)
+
+statement ok
+INSERT INTO mp SELECT range, range FROM range(4)
+
+statement ok
+PRAGMA git4data_create_branch('mpr', '')
+
+statement ok
+PRAGMA git4data_materialize('mp', 'mpr', 'mpr_copy')
+
+statement ok
+UPDATE mpr_copy SET v = 111 WHERE k = 1
+
+query II
+SELECT (SELECT count(*) FROM mp AT (BRANCH => 'mpr')), (SELECT v FROM mp AT (BRANCH => 'mpr') WHERE k = 1)
+----
+4	111
+
+statement ok
+PRAGMA git4data_create_branch('mpc', 'mpr')
+
+statement ok
+CREATE TABLE mpc_add (k INTEGER PRIMARY KEY, v INTEGER)
+
+statement ok
+CREATE TABLE mpc_del (k INTEGER PRIMARY KEY)
+
+statement ok
+PRAGMA git4data_bind_branch_delta('mp', 'mpc', 'mpc_add', 'mpc_del')
+
+statement ok
+INSERT INTO mpc_add VALUES (9, 9)
+
+statement ok
+INSERT INTO mpc_del VALUES (2)
+
+query II
+SELECT (SELECT count(*) FROM mp AT (BRANCH => 'mpc')), (SELECT v FROM mp AT (BRANCH => 'mpc') WHERE k = 1)
+----
+4	111
+
+statement ok
+PRAGMA git4data_merge('mp', 'mpr', 'mpc', 'fail')
+
+# the parent keeps its own value, loses the key the child removed, and gains the one the child added: the
+# child's change and only that comes over, because the parent's own line is what the base named
+query III
+SELECT (SELECT count(*) FROM mp AT (BRANCH => 'mpr')),
+       (SELECT count(*) FROM mp AT (BRANCH => 'mpr') WHERE k = 1),
+       (SELECT count(*) FROM mp AT (BRANCH => 'mpr') WHERE k = 2)
+----
+4	1	0
+
+query II
+SELECT (SELECT v FROM mp AT (BRANCH => 'mpr') WHERE k = 1), (SELECT count(*) FROM mp AT (BRANCH => 'mpr') WHERE k = 9)
+----
+111	1
+
+# and the parent reads exactly what the child read, which is what a merge of the child's own change means
+query I
+SELECT count(*) FROM (SELECT k, v FROM mp AT (BRANCH => 'mpr') EXCEPT SELECT k, v FROM mp AT (BRANCH => 'mpc'))
+----
+0
