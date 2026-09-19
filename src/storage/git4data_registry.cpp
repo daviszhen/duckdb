@@ -248,6 +248,16 @@ void Git4DataReconcileRegistry(AttachedDatabase &db, const vector<string> &added
 			                                           delta.added_oid, delta.removed_oid, delta.source_oid);
 		}
 	}
+	// The window is a setting as well as a reference, and the reload above decides it from the tables - but
+	// only when they are there, and a database whose *first* reference was the one rolled back has none: the
+	// transaction that created them is the one that was rolled back. Measured, `BEGIN; git4data_pitr(7);
+	// ROLLBACK;` left the window enabled with no reference at all, and the next checkpoint wrote a reference
+	// at the *current* commit - so a window the caller rolled back became a real one, seven days of it, and a
+	// restart brought it back as `pitr_enabled = true, window_days = 7, reference_held = true`.
+	if (!tables_have_snapshots &&
+	    Git4DataAddedByThisTransaction(added, "snapshot", DuckTransactionManager::PITR_REFERENCE)) {
+		transaction_manager.ClearPitr();
+	}
 }
 
 void Git4DataLoadRegistry(AttachedDatabase &db) {
