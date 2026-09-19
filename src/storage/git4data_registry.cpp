@@ -274,10 +274,20 @@ void Git4DataLoadRegistry(AttachedDatabase &db) {
 	// then re-pinned itself at the *current* commit on the next checkpoint - silently narrowing the history it
 	// promises to the moment of the restart. What is in memory here was read from that block, so it is kept.
 	vector<Git4DataSnapshot> internal_snapshots;
+	Git4DataSnapshot kept_pitr;
+	bool has_kept_pitr = false;
 	for (auto &snapshot : transaction_manager.snapshots.List()) {
-		if (StringUtil::StartsWith(snapshot.name, "__")) {
-			internal_snapshots.push_back(snapshot);
+		if (!StringUtil::StartsWith(snapshot.name, "__")) {
+			continue;
 		}
+		if (snapshot.name == DuckTransactionManager::PITR_REFERENCE) {
+			// the window's reference is decided below by the row and by this copy together, so it is held
+			// apart from the others: those are put back as they were, this one is not
+			kept_pitr = snapshot;
+			has_kept_pitr = true;
+			continue;
+		}
+		internal_snapshots.push_back(snapshot);
 	}
 	auto old_branches = transaction_manager.branches.List();
 	transaction_manager.snapshots.Clear();
@@ -290,10 +300,14 @@ void Git4DataLoadRegistry(AttachedDatabase &db) {
 	if (!snapshots) {
 		return;
 	}
+	bool pitr_row_seen = false;
 	Git4DataScanRegistryTable(
 	    db, *snapshots, {LogicalType::VARCHAR, LogicalType::UBIGINT, LogicalType::TIMESTAMP, LogicalType::VARCHAR},
 	    [&](DataChunk &chunk, idx_t row) {
 		    auto name = chunk.GetValue(0, row).GetValue<string>();
+		    if (name == DuckTransactionManager::PITR_REFERENCE) {
+			    pitr_row_seen = true;
+		    }
 		    auto pin = chunk.GetValue(1, row).GetValue<uint64_t>();
 		    auto created = chunk.GetValue(2, row).GetValue<timestamp_t>();
 		    auto line = chunk.GetValue(3, row).GetValue<string>();
@@ -301,9 +315,12 @@ void Git4DataLoadRegistry(AttachedDatabase &db) {
 			    // An internal reference is a row like any other, and this row is what a crash before the next
 			    // checkpoint leaves behind. The block holds the copy the engine *moves*, at a checkpoint, so
 			    // where both are there the newer pin is the one that holds: a pin only moves forward, and
-			    // keeping the older of the two would retain history the window has already let go.
-			    Git4DataSnapshot held;
-			    if (transaction_manager.snapshots.Get(name, held) && held.pin >= pin) {
+			    // keeping the older of the two would retain history the window has already let go. The copy
+			    // kept above is the block's, read before the registries were cleared - comparing against the
+			    // registry here would compare against nothing.
+			    if (name == DuckTransactionManager::PITR_REFERENCE && has_kept_pitr && kept_pitr.pin >= pin) {
+				    transaction_manager.snapshots.Create(kept_pitr.name, kept_pitr.pin, kept_pitr.created,
+				                                         kept_pitr.line);
 				    return;
 			    }
 			    transaction_manager.snapshots.Drop(name);
@@ -322,6 +339,15 @@ void Git4DataLoadRegistry(AttachedDatabase &db) {
 		    }
 		    transaction_manager.snapshots.Create(name, pin, created, line);
 	    });
+	// The window's reference is a row now, so that row decides whether the window is on: a window turned off
+	// is a delete in the caller's transaction, and the block the engine writes at a checkpoint can still hold
+	// the reference it had before. Measured, a window turned off and then reopened without a checkpoint came
+	// back on - `pitr_enabled = true, reference_held = true` with no row in the table at all - which is a
+	// window the caller released, holding history they let go. The block is what a file *without* these
+	// tables falls back on, and that case returns above.
+	if (!pitr_row_seen) {
+		transaction_manager.ClearPitr();
+	}
 	// branches first: the two mappings are recorded against a branch, and their setters do nothing for a
 	// branch that is not there yet
 	if (branches) {
@@ -385,7 +411,9 @@ void Git4DataLoadRegistry(AttachedDatabase &db) {
 			}
 		}
 	}
-	// and the internal references go back, exactly as they were read from the block
+	// and the internal references go back, exactly as they were read from the block - the window's among
+	// them only if nothing above decided it, which it always does: a row is either there, and wins unless
+	// the block's copy is newer, or it is not, and the window is off
 	for (auto &snapshot : internal_snapshots) {
 		transaction_manager.snapshots.Create(snapshot.name, snapshot.pin, snapshot.created, snapshot.line);
 	}
