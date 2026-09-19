@@ -412,3 +412,34 @@ statement error
 SELECT k, v FROM sh AT (BRANCH => 'shb')
 ----
 <REGEX>:.*no longer has that table's columns in that order - a read maps them by position, so the values would be someone else's\..*
+
+# The fourth argument says whether the table was created for the branch, and a value that is neither is refused
+# with the argument named rather than read as false.
+statement ok
+CREATE TABLE bt_arg (k INTEGER PRIMARY KEY, v INTEGER)
+
+statement ok
+INSERT INTO bt_arg VALUES (1, 10)
+
+statement ok
+CREATE TABLE bt_arg_copy (k INTEGER PRIMARY KEY, v INTEGER)
+
+statement ok
+INSERT INTO bt_arg_copy VALUES (1, 10)
+
+statement ok
+PRAGMA git4data_create_branch('btarg', '')
+
+statement error
+PRAGMA git4data_bind_branch_table('bt_arg', 'btarg', 'bt_arg_copy', 'maybe')
+----
+<REGEX>:.*The fourth argument of git4data_bind_branch_table says whether the table was created for the branch, so it is true or false, not "maybe".*
+
+# and the two values it does accept both bind
+statement ok
+PRAGMA git4data_bind_branch_table('bt_arg', 'btarg', 'bt_arg_copy', 'false')
+
+query I
+SELECT count(*) FROM bt_arg AT (BRANCH => 'btarg')
+----
+1

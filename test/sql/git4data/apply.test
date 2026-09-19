@@ -650,3 +650,31 @@ statement error
 PRAGMA git4data_apply('ap_keyless', 'apkl', 'INSERT INTO ap_keyless VALUES (2, 20)')
 ----
 <REGEX>:.*has no primary key, so a delta cannot say which rows a write removes.*
+
+# A delta whose tables are gone has nowhere to record a write, and the sentence names both tables rather than
+# letting the apply fail somewhere deeper.
+statement ok
+CREATE TABLE ap_gone (k INTEGER PRIMARY KEY, v INTEGER)
+
+statement ok
+INSERT INTO ap_gone SELECT range, range FROM range(3)
+
+statement ok
+CREATE TABLE ap_gone_add (k INTEGER PRIMARY KEY, v INTEGER)
+
+statement ok
+CREATE TABLE ap_gone_del (k INTEGER PRIMARY KEY)
+
+statement ok
+PRAGMA git4data_create_branch('apgone', '')
+
+statement ok
+PRAGMA git4data_bind_branch_delta('ap_gone', 'apgone', 'ap_gone_add', 'ap_gone_del')
+
+statement ok
+DROP TABLE ap_gone_del
+
+statement error
+PRAGMA git4data_apply('ap_gone', 'apgone', 'INSERT INTO ap_gone VALUES (100, 100)')
+----
+<REGEX>:.*The delta branch "apgone" differs by is gone: "ap_gone_add" or "ap_gone_del" is not there any more.*
