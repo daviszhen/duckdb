@@ -320,3 +320,99 @@ query II
 SELECT (SELECT count(*) FROM ch2_copy), (SELECT count(*) FROM ch2_copy WHERE k = 100)
 ----
 5	1
+
+# 6. A merge whose *target* is a branch with two overlays: the landing has to go on top of a line the target
+# inherited while its own delta records the change. Probed before it was written down: merging a sibling of the
+# same line into it brought the sibling's change over and left the line the target inherited, and the sibling,
+# untouched.
+statement ok
+CREATE TABLE mg (k INTEGER PRIMARY KEY, v INTEGER)
+
+statement ok
+INSERT INTO mg SELECT range, range FROM range(5)
+
+statement ok
+PRAGMA git4data_create_branch('mg0', '')
+
+statement ok
+CREATE TABLE mg0_add (k INTEGER PRIMARY KEY, v INTEGER)
+
+statement ok
+CREATE TABLE mg0_del (k INTEGER PRIMARY KEY)
+
+statement ok
+PRAGMA git4data_bind_branch_delta('mg', 'mg0', 'mg0_add', 'mg0_del')
+
+statement ok
+INSERT INTO mg0_add VALUES (100, 100)
+
+statement ok
+INSERT INTO mg0_del VALUES (2)
+
+statement ok
+PRAGMA git4data_create_branch('mg1', 'mg0')
+
+statement ok
+CREATE TABLE mg1_add (k INTEGER PRIMARY KEY, v INTEGER)
+
+statement ok
+CREATE TABLE mg1_del (k INTEGER PRIMARY KEY)
+
+statement ok
+PRAGMA git4data_bind_branch_delta('mg', 'mg1', 'mg1_add', 'mg1_del')
+
+statement ok
+INSERT INTO mg1_add VALUES (200, 200)
+
+statement ok
+INSERT INTO mg1_del VALUES (3)
+
+statement ok
+PRAGMA git4data_create_branch('mg2', 'mg0')
+
+statement ok
+CREATE TABLE mg2_add (k INTEGER PRIMARY KEY, v INTEGER)
+
+statement ok
+CREATE TABLE mg2_del (k INTEGER PRIMARY KEY)
+
+statement ok
+PRAGMA git4data_bind_branch_delta('mg', 'mg2', 'mg2_add', 'mg2_del')
+
+statement ok
+INSERT INTO mg2_add VALUES (300, 300)
+
+statement ok
+INSERT INTO mg2_del VALUES (4)
+
+query IIIIII
+SELECT (SELECT count(*) FROM mg AT (BRANCH => 'mg1')),
+       (SELECT count(*) FROM mg AT (BRANCH => 'mg2')),
+       (SELECT count(*) FROM mg AT (BRANCH => 'mg1') WHERE k = 200),
+       (SELECT count(*) FROM mg AT (BRANCH => 'mg1') WHERE k = 300),
+       (SELECT count(*) FROM mg AT (BRANCH => 'mg1') WHERE k = 3),
+       (SELECT count(*) FROM mg AT (BRANCH => 'mg1') WHERE k = 4)
+----
+5	5	1	0	0	1
+
+statement ok
+PRAGMA git4data_merge('mg', 'mg1', 'mg2', 'fail')
+
+# the target keeps its line and its own change, takes the sibling's change, and the sibling and the shared
+# ancestor are untouched
+query IIIIIIII
+SELECT (SELECT count(*) FROM mg AT (BRANCH => 'mg1')),
+       (SELECT count(*) FROM mg AT (BRANCH => 'mg1') WHERE k = 100),
+       (SELECT count(*) FROM mg AT (BRANCH => 'mg1') WHERE k = 200),
+       (SELECT count(*) FROM mg AT (BRANCH => 'mg1') WHERE k = 300),
+       (SELECT count(*) FROM mg AT (BRANCH => 'mg1') WHERE k = 2),
+       (SELECT count(*) FROM mg AT (BRANCH => 'mg1') WHERE k = 3),
+       (SELECT count(*) FROM mg AT (BRANCH => 'mg1') WHERE k = 4),
+       (SELECT count(*) FROM mg AT (BRANCH => 'mg2'))
+----
+5	1	1	1	0	0	0	5
+
+query I
+SELECT count(*) FROM mg AT (BRANCH => 'mg0')
+----
+5
