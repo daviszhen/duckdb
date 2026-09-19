@@ -1,0 +1,71 @@
+# name: test/sql/git4data/probes.test
+# description: The measurement hooks as rows: what a physical scan sees at the retention bound and at a commit
+# group: [git4data]
+
+# `git4data_probe`, `git4data_probe_all` and `git4data_probe_at` read a table through its physical row groups
+# rather than through a transaction's snapshot, which is how retention and the effect of a bound are observed
+# directly: the first two report the rows the retention bound lets through, and the third sweeps an explicitly
+# given commit. All three were pragmas returning a result, so a test could run them and assert nothing about
+# their numbers - which is the whole point of a measurement hook. They are table functions now, and the pragmas
+# return them.
+
+load {TEST_DIR}/probes.db
+
+statement ok
+CREATE TABLE t (k INTEGER PRIMARY KEY, v INTEGER)
+
+statement ok
+INSERT INTO t SELECT range, range FROM range(10)
+
+statement ok
+CHECKPOINT
+
+statement ok
+PRAGMA git4data_create_snapshot('s')
+
+statement ok
+UPDATE t SET v = v + 100 WHERE k IN (1, 2)
+
+statement ok
+DELETE FROM t WHERE k = 3
+
+statement ok
+INSERT INTO t VALUES (100, 100)
+
+statement ok
+CHECKPOINT
+
+# The physical rows: the ten the table started with, a version of each of the two updated rows, and the row
+# that was inserted. The extremes of the first column come along so the pre-image can be told from the
+# post-image rather than only counted.
+query III
+SELECT * FROM git4data_probe('t')
+----
+13	0	100
+
+query III
+SELECT * FROM git4data_probe_all('t')
+----
+13	0	100
+
+# A bound before anything was inserted sees every physical row, deletes included: the delete is not committed
+# before it, so the row it removed is still there.
+query I
+SELECT * FROM git4data_probe_at('t', 1)
+----
+13
+
+# A bound after the whole sequence sees the rows it would have read: the deleted row is gone, and the versions
+# of the updated rows are skipped rather than counted twice.
+query I
+SELECT * FROM git4data_probe_at('t', 1000000)
+----
+10
+
+# the pragmas return the same rows as the functions
+query III
+SELECT (SELECT rows_at_retention_bound FROM git4data_probe('t')),
+       (SELECT min_col0 FROM (SELECT * FROM git4data_probe('t'))),
+       (SELECT rows_visible_at_bound FROM git4data_probe_at('t', 1000000))
+----
+13	0	10

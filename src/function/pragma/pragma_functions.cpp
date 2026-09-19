@@ -319,8 +319,8 @@ static void Git4DataAddColumnNames(ClientContext &context, const string &table_n
 //! The names a branch's mappings for one source are held under: the key, and whatever a record written before
 //! keys carried a schema holds. The statements that replace a mapping have to take every one of them, or a
 //! legacy row stays beside the new one and a read takes whichever it sees first.
-static vector<string> Git4DataStoredSourceNames(ClientContext &context, const Git4DataBranch &branch,
-                                                const string &key, idx_t source_oid, const string &record_name) {
+static vector<string> Git4DataStoredSourceNames(ClientContext &context, const Git4DataBranch &branch, const string &key,
+                                                idx_t source_oid, const string &record_name) {
 	vector<string> result;
 	result.push_back(key);
 	result.push_back(record_name);
@@ -594,7 +594,8 @@ static string PragmaGit4DataMaterialize(ClientContext &context, const FunctionPa
 	}
 	auto quoted_storage = Git4DataTableSQLName(storage_table);
 	auto escaped_source = StringUtil::Replace(record_name, "'", "''");
-	auto stored_source = Git4DataEscapedList(Git4DataStoredSourceNames(context, branch, source_key, table.oid, record_name));
+	auto stored_source =
+	    Git4DataEscapedList(Git4DataStoredSourceNames(context, branch, source_key, table.oid, record_name));
 	auto escaped_branch = StringUtil::Replace(branch_name, "'", "''");
 	auto escaped_storage = StringUtil::Replace(storage_table, "'", "''");
 	// A second materialize of one source replaces the mapping, and the copy the first one made is then a
@@ -622,8 +623,8 @@ static string PragmaGit4DataMaterialize(ClientContext &context, const FunctionPa
 	                          "PRAGMA git4data_bind_internal('%s', '%s', '%s', 'true');\n"
 	                          "DELETE FROM %s.%s WHERE branch = '%s' AND source IN (%s);\n"
 	                          "INSERT INTO %s.%s VALUES ('%s', '%s', '%s', true);%s",
-	                          quoted_storage, columns, quoted_storage, Git4DataTableSQLName(source_key),
-	                          escaped_branch, escaped_source, escaped_branch, escaped_storage, GIT4DATA_REGISTRY_SCHEMA,
+	                          quoted_storage, columns, quoted_storage, Git4DataTableSQLName(source_key), escaped_branch,
+	                          escaped_source, escaped_branch, escaped_storage, GIT4DATA_REGISTRY_SCHEMA,
 	                          GIT4DATA_STORAGE_TABLE, escaped_branch, stored_source, GIT4DATA_REGISTRY_SCHEMA,
 	                          GIT4DATA_STORAGE_TABLE, escaped_branch, escaped_source, escaped_storage, replaced);
 }
@@ -1516,8 +1517,8 @@ static string PragmaGit4DataMerge(ClientContext &context, const FunctionParamete
 		// name is. Naming it here is what makes such a line mergeable.
 		ancestor = Git4DataSharedSnapshotAncestor(transaction_manager, left_name, right_name);
 		if (ancestor.empty()) {
-			throw InvalidInputException("Branches \"%s\" and \"%s\" share no ancestor to merge against",
-			                            left_name, right_name);
+			throw InvalidInputException("Branches \"%s\" and \"%s\" share no ancestor to merge against", left_name,
+			                            right_name);
 		}
 	}
 
@@ -1541,9 +1542,8 @@ static string PragmaGit4DataMerge(ClientContext &context, const FunctionParamete
 		// touched.
 		auto name_pin_as_base = [&]() {
 			transaction_manager.snapshots.Drop(DuckTransactionManager::MERGE_BASE_REFERENCE);
-			if (!transaction_manager.snapshots.Create(DuckTransactionManager::MERGE_BASE_REFERENCE,
-			                                          ancestor_branch.pin, Timestamp::GetCurrentTimestamp(),
-			                                          ancestor_branch.base_line)) {
+			if (!transaction_manager.snapshots.Create(DuckTransactionManager::MERGE_BASE_REFERENCE, ancestor_branch.pin,
+			                                          Timestamp::GetCurrentTimestamp(), ancestor_branch.base_line)) {
 				throw InternalException("Could not create the internal merge base reference");
 			}
 			base_reference = DuckTransactionManager::MERGE_BASE_REFERENCE;
@@ -2049,137 +2049,28 @@ static string PragmaGit4DataState(ClientContext &context, const FunctionParamete
 	return "SELECT * FROM git4data_state()";
 }
 
-//! Reads a table through the physical row groups, using the retention bound rather
-//! than a transaction's own snapshot. This is a measurement hook: with a snapshot
-//! pinned it reports the pre-image row count, so retention across a checkpoint can
-//! be observed directly.
-static string Git4DataProbe(ClientContext &context, const string &table_name, TableScanType scan_type) {
-	auto &table = Git4DataResolveTable(context, table_name);
-	auto &storage = table.GetStorage();
-	auto &row_groups = *storage.GetRowGroupCollection();
-	auto &types = row_groups.GetTypes();
-
-	vector<StorageIndex> column_ids;
-	vector<LogicalType> scan_types;
-	for (idx_t i = 0; i < types.size(); i++) {
-		column_ids.emplace_back(i);
-		scan_types.push_back(types[i]);
-	}
-	column_ids.emplace_back(COLUMN_IDENTIFIER_ROW_ID);
-	scan_types.push_back(LogicalType::ROW_TYPE);
-
-	DataChunk scan_chunk;
-	scan_chunk.Initialize(Allocator::Get(context), scan_types);
-
-	TableScanState state;
-	state.Initialize(column_ids, nullptr);
-	QueryContext query_context;
-	row_groups.InitializeScan(query_context, state.table_state, column_ids, nullptr);
-
-	idx_t count = 0;
-	int64_t min_value = 0;
-	int64_t max_value = 0;
-	bool have_value = false;
-	while (true) {
-		scan_chunk.Reset();
-		state.table_state.Scan(scan_chunk, scan_type);
-		if (scan_chunk.size() == 0) {
-			break;
-		}
-		count += scan_chunk.size();
-		// Track value extremes of the first column so tests can tell the pre-image apart from the
-		// post-image, not just count rows. Any integer width, because a key is as likely to be an
-		// INTEGER as a BIGINT and the extremes are only reported when the column is integral at all.
-		if (scan_chunk.data.empty()) {
-			continue;
-		}
-		auto &first = scan_chunk.data[0];
-		switch (first.GetType().id()) {
-		case LogicalTypeId::TINYINT:
-		case LogicalTypeId::SMALLINT:
-		case LogicalTypeId::INTEGER:
-		case LogicalTypeId::BIGINT: {
-			// read one value at a time: the typed iterator insists on the column's own width, and this
-			// is a diagnostic rather than a hot path
-			for (idx_t row = 0; row < first.size(); row++) {
-				auto entry = first.GetValue(row);
-				if (entry.IsNull()) {
-					continue;
-				}
-				auto value = entry.GetValue<int64_t>();
-				if (!have_value) {
-					min_value = max_value = value;
-					have_value = true;
-				} else {
-					min_value = MinValue(min_value, value);
-					max_value = MaxValue(max_value, value);
-				}
-			}
-			break;
-		}
-		default:
-			break;
-		}
-	}
-	return StringUtil::Format("SELECT %llu::UBIGINT AS rows_at_retention_bound, %lld::BIGINT AS min_col0, "
-	                          "%lld::BIGINT AS max_col0",
-	                          count, min_value, max_value);
-}
-
 //! Base data with updates skipped: what a pinned snapshot needs kept
 static string PragmaGit4DataProbe(ClientContext &context, const FunctionParameters &parameters) {
-	return Git4DataProbe(context, parameters.values[0].ToString(), TableScanType::TABLE_SCAN_BASE_ROWS);
+	// the row comes from the table function, which is where its numbers can be selected
+	return StringUtil::Format("SELECT * FROM git4data_probe('%s')",
+	                          StringUtil::Replace(parameters.values[0].ToString(), "'", "''"));
+}
+
+//! Every physical row including all deleted ones, to tell "the data is gone" apart from
+//! "the data is there but filtered out"
+static string PragmaGit4DataProbeAll(ClientContext &context, const FunctionParameters &parameters) {
+	// the row comes from the table function, which is where its numbers can be selected
+	return StringUtil::Format("SELECT * FROM git4data_probe_all('%s')",
+	                          StringUtil::Replace(parameters.values[0].ToString(), "'", "''"));
 }
 
 //! Base data with updates skipped, read at an explicitly given visibility bound. Sweeping
 //! the bound reveals the effective delete and insert ids: the count changes where the bound
 //! crosses an id, which is what tells the two runners apart.
 static string PragmaGit4DataProbeAt(ClientContext &context, const FunctionParameters &parameters) {
-	auto table_name = parameters.values[0].ToString();
-	auto bound_value = parameters.values[1].GetValue<int64_t>();
-
-	auto &table = Git4DataResolveTable(context, table_name);
-	auto &storage = table.GetStorage();
-	auto &row_groups = *storage.GetRowGroupCollection();
-
-	vector<StorageIndex> column_ids;
-	vector<LogicalType> scan_types;
-	for (auto &column : table.GetColumns().Logical()) {
-		column_ids.emplace_back(column.Physical().index);
-		scan_types.push_back(column.Type());
-	}
-	column_ids.emplace_back(COLUMN_IDENTIFIER_ROW_ID);
-	scan_types.push_back(LogicalType::ROW_TYPE);
-
-	DataChunk scan_chunk;
-	scan_chunk.Initialize(Allocator::Get(context), scan_types);
-
-	TableScanState state;
-	state.Initialize(column_ids, nullptr);
-	QueryContext query_context;
-	row_groups.InitializeScan(query_context, state.table_state, column_ids, nullptr);
-
-	idx_t count = 0;
-	while (true) {
-		scan_chunk.Reset();
-		ScanOptions options(
-		    TransactionData(MAX_TRANSACTION_ID, VisibilityBound::Before(NumericCast<transaction_t>(bound_value))));
-		options.insert_type = InsertedScanType::ALL_ROWS;
-		options.delete_type = DeletedScanType::OMIT_COMMITTED_DELETES;
-		options.update_type = UpdateScanType::SKIP_UPDATES;
-		state.table_state.Scan(options, scan_chunk);
-		if (scan_chunk.size() == 0) {
-			break;
-		}
-		count += scan_chunk.size();
-	}
-	return StringUtil::Format("SELECT %llu::UBIGINT AS rows_visible_at_bound", count);
-}
-
-//! Every physical row including all deleted ones, to tell "the data is gone" apart from
-//! "the data is there but filtered out"
-static string PragmaGit4DataProbeAll(ClientContext &context, const FunctionParameters &parameters) {
-	return Git4DataProbe(context, parameters.values[0].ToString(), TableScanType::TABLE_SCAN_ALL_ROWS);
+	return StringUtil::Format("SELECT * FROM git4data_probe_at('%s', %lld)",
+	                          StringUtil::Replace(parameters.values[0].ToString(), "'", "''"),
+	                          (long long)parameters.values[1].GetValue<int64_t>());
 }
 
 void PragmaFunctions::RegisterFunction(BuiltinFunctions &set) {

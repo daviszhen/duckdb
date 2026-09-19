@@ -163,7 +163,6 @@ static bool Git4DataIntegerKeyBits(const Value &key, uint64_t &result) {
 	}
 }
 
-
 //! Whether the removed side holds this row's key. The typed set decides when the key is a single integer, and
 //! otherwise the hash spares the rows that cannot be in the string set and the string decides for the rest.
 static bool Git4DataRowWasRemoved(const Git4DataRemovedKeys &removed, DataChunk &chunk,
@@ -380,8 +379,8 @@ void Git4DataSnapshotScanFun::CheckReferenceSource(ClientContext &context, Table
 	    "Table \"%s\" is reached as \"%s\" in catalog %s, and a reference is keyed by the table a read names: "
 	    "the key \"%s\" reaches %s, so the read would be answered from that table's line. A reference is kept "
 	    "in the database it belongs to, and a table of another database cannot be its source.",
-	    table.name.GetIdentifierName(), table.ParentSchema().name.GetIdentifierName(),
-	    table.ParentCatalog().GetName(), key,
+	    table.name.GetIdentifierName(), table.ParentSchema().name.GetIdentifierName(), table.ParentCatalog().GetName(),
+	    key,
 	    by_key ? "\"" + by_key->name.GetIdentifierName() + "\" in schema \"" +
 	                 by_key->ParentSchema().name.GetIdentifierName() + "\""
 	           : "no table here");
@@ -1364,9 +1363,9 @@ static bool Git4DataDiffRowRemoved(Git4DataDiffState &state, const vector<idx_t>
 //! Walk the whole table at one bound, handing every visible row and its row id to the callback.
 static void Git4DataDiffCollect(ClientContext &context, Git4DataDiffState &state, TableScanState &scan,
                                 VisibilityBound bound, const string &added_table, VisibilityBound added_bound,
-                                const Git4DataRemovedKeys &removed,
-                                optional_ptr<DataTable> side_storage, bool side_own_storage, bool &side_local_open,
-                                bool &side_added_open, bool &side_added_local_open,
+                                const Git4DataRemovedKeys &removed, optional_ptr<DataTable> side_storage,
+                                bool side_own_storage, bool &side_local_open, bool &side_added_open,
+                                bool &side_added_local_open,
                                 const std::function<void(DataChunk &, row_t, idx_t)> &callback) {
 	// the key columns come first in the scan, so their positions are the first key_count columns
 	vector<idx_t> key_positions;
@@ -1541,23 +1540,22 @@ static void Git4DataDiffFunction(ClientContext &context, TableFunctionInput &dat
 		if (state.phase == Git4DataDiffState::Phase::LEFT) {
 			Git4DataDiffCollect(
 			    context, state, state.left_scan, state.left_bound, state.left_added_table, state.left_delta_bound,
-			    state.left_removed, state.left_storage,
-			    state.left_own_storage, state.left_local_open, state.left_added_open, state.left_added_local_open,
-			    [&](DataChunk &chunk, row_t row_id, idx_t row) {
+			    state.left_removed, state.left_storage, state.left_own_storage, state.left_local_open,
+			    state.left_added_open, state.left_added_local_open, [&](DataChunk &chunk, row_t row_id, idx_t row) {
 				    auto key = Git4DataDiffRowKey(chunk, state.key_count, row);
 				    Git4DataDiffState::KeyedRow entry;
 				    entry.key = key;
 				    entry.values = Git4DataDiffRowValues(chunk, state.key_count, state.value_count, row);
 				    entry.row_id = row_id;
-					if (state.key_is_integer) {
-						uint64_t bits = 0;
-						if (Git4DataDiffChunkKeyBits(chunk, row, bits)) {
-							// the bucket is the key itself, so a lookup in it needs no comparison at all
-							entry.bits = bits;
-							state.left_by_key[bits].push_back(std::move(entry));
-							return;
-						}
-					}
+				    if (state.key_is_integer) {
+					    uint64_t bits = 0;
+					    if (Git4DataDiffChunkKeyBits(chunk, row, bits)) {
+						    // the bucket is the key itself, so a lookup in it needs no comparison at all
+						    entry.bits = bits;
+						    state.left_by_key[bits].push_back(std::move(entry));
+						    return;
+					    }
+				    }
 				    state.left_by_key[Git4DataDiffKeyHash(key)].push_back(std::move(entry));
 			    });
 			state.phase = Git4DataDiffState::Phase::RIGHT;
@@ -1570,29 +1568,28 @@ static void Git4DataDiffFunction(ClientContext &context, TableFunctionInput &dat
 			Git4DataDiffCollect(
 			    context, state, state.right_scan, state.right_bound, state.right_added_table, state.right_delta_bound,
 			    state.right_removed, state.right_storage, state.right_own_storage, state.right_local_open,
-			    state.right_added_open,
-			    state.right_added_local_open, [&](DataChunk &chunk, row_t row_id, idx_t row) {
-					uint64_t bits = 0;
-					if (state.key_is_integer && Git4DataDiffChunkKeyBits(chunk, row, bits)) {
-						// the bucket is the key itself, so a hit is exact and needs no key vector
-						auto bits_entry = state.left_by_key.find(bits);
-						if (bits_entry != state.left_by_key.end()) {
-							for (auto &candidate : bits_entry->second) {
-								if (candidate.bits != bits) {
-									continue;
-								}
-								matched_bits.insert(bits);
-								if (!Git4DataDiffSameRowValues(candidate.values, chunk, state.key_count, row)) {
-									state.changed.push_back(Git4DataDiffState::Change {
-									    candidate.row_id, row_id, vector<Value> {chunk.GetValue(0, row)}});
-								}
-								return;
-							}
-						}
-						state.added.push_back(
-						    Git4DataDiffState::Change {row_id, NO_COUNTERPART, vector<Value> {chunk.GetValue(0, row)}});
-						return;
-					}
+			    state.right_added_open, state.right_added_local_open, [&](DataChunk &chunk, row_t row_id, idx_t row) {
+				    uint64_t bits = 0;
+				    if (state.key_is_integer && Git4DataDiffChunkKeyBits(chunk, row, bits)) {
+					    // the bucket is the key itself, so a hit is exact and needs no key vector
+					    auto bits_entry = state.left_by_key.find(bits);
+					    if (bits_entry != state.left_by_key.end()) {
+						    for (auto &candidate : bits_entry->second) {
+							    if (candidate.bits != bits) {
+								    continue;
+							    }
+							    matched_bits.insert(bits);
+							    if (!Git4DataDiffSameRowValues(candidate.values, chunk, state.key_count, row)) {
+								    state.changed.push_back(Git4DataDiffState::Change {
+								        candidate.row_id, row_id, vector<Value> {chunk.GetValue(0, row)}});
+							    }
+							    return;
+						    }
+					    }
+					    state.added.push_back(
+					        Git4DataDiffState::Change {row_id, NO_COUNTERPART, vector<Value> {chunk.GetValue(0, row)}});
+					    return;
+				    }
 				    auto key = Git4DataDiffRowKey(chunk, state.key_count, row);
 				    auto hash = Git4DataDiffKeyHash(key);
 				    auto entry = state.left_by_key.find(hash);
@@ -1613,9 +1610,8 @@ static void Git4DataDiffFunction(ClientContext &context, TableFunctionInput &dat
 			    });
 			for (auto &entry : state.left_by_key) {
 				for (auto &candidate : entry.second) {
-					if (state.key_is_integer
-					        ? matched_bits.find(candidate.bits) != matched_bits.end()
-					        : matched.find(Git4DataDiffKeyString(candidate.key)) != matched.end()) {
+					if (state.key_is_integer ? matched_bits.find(candidate.bits) != matched_bits.end()
+					                         : matched.find(Git4DataDiffKeyString(candidate.key)) != matched.end()) {
 						continue;
 					}
 					state.removed.push_back(
@@ -1641,21 +1637,20 @@ static void Git4DataDiffFunction(ClientContext &context, TableFunctionInput &dat
 		return;
 	}
 	if (state.phase == Git4DataDiffState::Phase::LEFT) {
-		Git4DataDiffCollect(context, state, state.left_scan, state.left_bound, state.left_added_table,
-		                    state.left_delta_bound, state.left_removed, state.left_storage, state.left_own_storage,
-		                    state.left_local_open,
-		                    state.left_added_open, state.left_added_local_open,
-		                    [&](DataChunk &chunk, row_t row_id, idx_t row) {
-			                    state.left_rows.insert(row_id);
-			                    if (state.key_count > 0) {
-				                    uint64_t key_bits = 0;
-				                    if (state.key_is_integer && Git4DataDiffChunkKeyBits(chunk, row, key_bits)) {
-					                    state.left_key_bits.emplace(row_id, key_bits);
-				                    } else {
-					                    state.left_keys.emplace(row_id, Git4DataDiffRowKey(chunk, state.key_count, row));
-				                    }
-			                    }
-		                    });
+		Git4DataDiffCollect(
+		    context, state, state.left_scan, state.left_bound, state.left_added_table, state.left_delta_bound,
+		    state.left_removed, state.left_storage, state.left_own_storage, state.left_local_open,
+		    state.left_added_open, state.left_added_local_open, [&](DataChunk &chunk, row_t row_id, idx_t row) {
+			    state.left_rows.insert(row_id);
+			    if (state.key_count > 0) {
+				    uint64_t key_bits = 0;
+				    if (state.key_is_integer && Git4DataDiffChunkKeyBits(chunk, row, key_bits)) {
+					    state.left_key_bits.emplace(row_id, key_bits);
+				    } else {
+					    state.left_keys.emplace(row_id, Git4DataDiffRowKey(chunk, state.key_count, row));
+				    }
+			    }
+		    });
 		state.phase = Git4DataDiffState::Phase::RIGHT;
 	}
 	if (state.phase == Git4DataDiffState::Phase::RIGHT) {
@@ -1774,7 +1769,6 @@ void Git4DataSnapshotScanFun::RegisterFunction(BuiltinFunctions &set) {
 	set.AddFunction(GetFunction());
 }
 
-
 //===----------------------------------------------------------------------===//
 // The listings, as rows rather than as a pragma's printout
 //===----------------------------------------------------------------------===//
@@ -1876,11 +1870,10 @@ static unique_ptr<FunctionData> Git4DataBranchesBind(ClientContext &context, Tab
 			}
 		}
 		result->rows.push_back({Value(branch.name), Value::UBIGINT(branch.pin), Value(branch.parent),
-		                        Value::TIMESTAMP(branch.created),
-		                        Value::BOOLEAN(!branch.storage_tables.empty()), Value::BOOLEAN(!branch.deltas.empty()),
-		                        Value::BOOLEAN(storage_missing), Value::BOOLEAN(delta_missing),
-		                        Value(Git4DataJoinedStorageTables(context, branch)), Value(delta_added),
-		                        Value(delta_removed)});
+		                        Value::TIMESTAMP(branch.created), Value::BOOLEAN(!branch.storage_tables.empty()),
+		                        Value::BOOLEAN(!branch.deltas.empty()), Value::BOOLEAN(storage_missing),
+		                        Value::BOOLEAN(delta_missing), Value(Git4DataJoinedStorageTables(context, branch)),
+		                        Value(delta_added), Value(delta_removed)});
 	}
 	names.emplace_back("branch_name");
 	return_types.emplace_back(LogicalType::VARCHAR);
@@ -1966,6 +1959,201 @@ void Git4DataSnapshotsFun::RegisterFunction(BuiltinFunctions &set) {
 }
 
 //===----------------------------------------------------------------------===//
+// The probes, as rows a statement can select
+//===----------------------------------------------------------------------===//
+//! Reads a table through the physical row groups, using the retention bound rather than a transaction's own
+//! snapshot. This is a measurement hook: with a snapshot pinned it reports the pre-image row count, so
+//! retention across a checkpoint can be observed directly. It was reachable only through `PRAGMA
+//! git4data_probe`, whose result cannot be selected *from*, so `diagnostics.test` could assert that it ran and
+//! nothing about the numbers - which is the whole point of a measurement hook. The rows are a table function
+//! now and the pragmas return it.
+static void Git4DataProbeRows(ClientContext &context, const string &table_name, TableScanType scan_type,
+                              vector<vector<Value>> &rows) {
+	auto &table = Git4DataResolveTable(context, table_name);
+	auto &storage = table.GetStorage();
+	auto &row_groups = *storage.GetRowGroupCollection();
+	auto &types = row_groups.GetTypes();
+
+	vector<StorageIndex> column_ids;
+	vector<LogicalType> scan_types;
+	for (idx_t i = 0; i < types.size(); i++) {
+		column_ids.emplace_back(i);
+		scan_types.push_back(types[i]);
+	}
+	column_ids.emplace_back(COLUMN_IDENTIFIER_ROW_ID);
+	scan_types.push_back(LogicalType::ROW_TYPE);
+
+	DataChunk scan_chunk;
+	scan_chunk.Initialize(Allocator::Get(context), scan_types);
+
+	TableScanState state;
+	state.Initialize(column_ids, nullptr);
+	QueryContext query_context;
+	row_groups.InitializeScan(query_context, state.table_state, column_ids, nullptr);
+
+	idx_t count = 0;
+	int64_t min_value = 0;
+	int64_t max_value = 0;
+	bool have_value = false;
+	while (true) {
+		scan_chunk.Reset();
+		state.table_state.Scan(scan_chunk, scan_type);
+		if (scan_chunk.size() == 0) {
+			break;
+		}
+		count += scan_chunk.size();
+		// Track value extremes of the first column so tests can tell the pre-image apart from the post-image,
+		// not just count rows. Any integer width, because a key is as likely to be an INTEGER as a BIGINT and
+		// the extremes are only reported when the column is integral at all.
+		if (scan_chunk.data.empty()) {
+			continue;
+		}
+		auto &first = scan_chunk.data[0];
+		switch (first.GetType().id()) {
+		case LogicalTypeId::TINYINT:
+		case LogicalTypeId::SMALLINT:
+		case LogicalTypeId::INTEGER:
+		case LogicalTypeId::BIGINT: {
+			// read one value at a time: the typed iterator insists on the column's own width, and this is a
+			// diagnostic rather than a hot path
+			for (idx_t row = 0; row < first.size(); row++) {
+				auto entry = first.GetValue(row);
+				if (entry.IsNull()) {
+					continue;
+				}
+				auto value = entry.GetValue<int64_t>();
+				if (!have_value) {
+					min_value = max_value = value;
+					have_value = true;
+				} else {
+					min_value = MinValue(min_value, value);
+					max_value = MaxValue(max_value, value);
+				}
+			}
+			break;
+		}
+		default:
+			break;
+		}
+	}
+	rows.push_back({Value::UBIGINT(count), Value::BIGINT(min_value), Value::BIGINT(max_value)});
+}
+
+//! The same scan at an explicitly given commit, sweeping which rows the bound lets through
+static void Git4DataProbeAtRows(ClientContext &context, const string &table_name, int64_t bound_value,
+                                vector<vector<Value>> &rows) {
+	auto &table = Git4DataResolveTable(context, table_name);
+	auto &storage = table.GetStorage();
+	auto &row_groups = *storage.GetRowGroupCollection();
+
+	vector<StorageIndex> column_ids;
+	vector<LogicalType> scan_types;
+	for (auto &column : table.GetColumns().Logical()) {
+		column_ids.emplace_back(column.Physical().index);
+		scan_types.push_back(column.Type());
+	}
+	column_ids.emplace_back(COLUMN_IDENTIFIER_ROW_ID);
+	scan_types.push_back(LogicalType::ROW_TYPE);
+
+	DataChunk scan_chunk;
+	scan_chunk.Initialize(Allocator::Get(context), scan_types);
+
+	TableScanState state;
+	state.Initialize(column_ids, nullptr);
+	QueryContext query_context;
+	row_groups.InitializeScan(query_context, state.table_state, column_ids, nullptr);
+
+	idx_t count = 0;
+	while (true) {
+		scan_chunk.Reset();
+		ScanOptions options(
+		    TransactionData(MAX_TRANSACTION_ID, VisibilityBound::Before(NumericCast<transaction_t>(bound_value))));
+		options.insert_type = InsertedScanType::ALL_ROWS;
+		options.delete_type = DeletedScanType::OMIT_COMMITTED_DELETES;
+		options.update_type = UpdateScanType::SKIP_UPDATES;
+		state.table_state.Scan(options, scan_chunk);
+		if (scan_chunk.size() == 0) {
+			break;
+		}
+		count += scan_chunk.size();
+	}
+	rows.push_back({Value::UBIGINT(count)});
+}
+
+static void Git4DataProbeNames(vector<LogicalType> &return_types, vector<Identifier> &names) {
+	names.emplace_back("rows_at_retention_bound");
+	return_types.emplace_back(LogicalType::UBIGINT);
+	names.emplace_back("min_col0");
+	return_types.emplace_back(LogicalType::BIGINT);
+	names.emplace_back("max_col0");
+	return_types.emplace_back(LogicalType::BIGINT);
+}
+
+static unique_ptr<FunctionData> Git4DataProbeImpl(ClientContext &context, TableFunctionBindInput &input,
+                                                  vector<LogicalType> &return_types, vector<Identifier> &names,
+                                                  bool all_rows) {
+	auto result = make_uniq<Git4DataListingBindData>();
+	Git4DataProbeRows(context, input.inputs[0].GetValue<string>(),
+	                  all_rows ? TableScanType::TABLE_SCAN_ALL_ROWS : TableScanType::TABLE_SCAN_BASE_ROWS,
+	                  result->rows);
+	Git4DataProbeNames(return_types, names);
+	return std::move(result);
+}
+
+static unique_ptr<FunctionData> Git4DataProbeBind(ClientContext &context, TableFunctionBindInput &input,
+                                                  vector<LogicalType> &return_types, vector<Identifier> &names) {
+	return Git4DataProbeImpl(context, input, return_types, names, false);
+}
+
+static unique_ptr<FunctionData> Git4DataProbeAllBind(ClientContext &context, TableFunctionBindInput &input,
+                                                     vector<LogicalType> &return_types, vector<Identifier> &names) {
+	return Git4DataProbeImpl(context, input, return_types, names, true);
+}
+
+static unique_ptr<FunctionData> Git4DataProbeAtBind(ClientContext &context, TableFunctionBindInput &input,
+                                                    vector<LogicalType> &return_types, vector<Identifier> &names) {
+	auto result = make_uniq<Git4DataListingBindData>();
+	Git4DataProbeAtRows(context, input.inputs[0].GetValue<string>(), input.inputs[1].GetValue<int64_t>(), result->rows);
+	names.emplace_back("rows_visible_at_bound");
+	return_types.emplace_back(LogicalType::UBIGINT);
+	return std::move(result);
+}
+
+TableFunction Git4DataProbeFun::GetFunction() {
+	TableFunction fun("git4data_probe", {LogicalType::VARCHAR}, Git4DataListingScan, Git4DataProbeBind);
+	fun.init_global = Git4DataListingInit;
+	fun.projection_pushdown = false;
+	return fun;
+}
+
+void Git4DataProbeFun::RegisterFunction(BuiltinFunctions &set) {
+	set.AddFunction(GetFunction());
+}
+
+TableFunction Git4DataProbeAllFun::GetFunction() {
+	TableFunction fun("git4data_probe_all", {LogicalType::VARCHAR}, Git4DataListingScan, Git4DataProbeAllBind);
+	fun.init_global = Git4DataListingInit;
+	fun.projection_pushdown = false;
+	return fun;
+}
+
+void Git4DataProbeAllFun::RegisterFunction(BuiltinFunctions &set) {
+	set.AddFunction(GetFunction());
+}
+
+TableFunction Git4DataProbeAtFun::GetFunction() {
+	TableFunction fun("git4data_probe_at", {LogicalType::VARCHAR, LogicalType::BIGINT}, Git4DataListingScan,
+	                  Git4DataProbeAtBind);
+	fun.init_global = Git4DataListingInit;
+	fun.projection_pushdown = false;
+	return fun;
+}
+
+void Git4DataProbeAtFun::RegisterFunction(BuiltinFunctions &set) {
+	set.AddFunction(GetFunction());
+}
+
+//===----------------------------------------------------------------------===//
 // The state a database is in, as one row a statement can select
 //===----------------------------------------------------------------------===//
 //! The same argument as the listings above, for the three surfaces that report a *value*: the commit counter
@@ -2000,10 +2188,9 @@ static unique_ptr<FunctionData> Git4DataLimitsBind(ClientContext &context, Table
                                                    vector<LogicalType> &return_types, vector<Identifier> &names) {
 	auto result = make_uniq<Git4DataListingBindData>();
 	auto &transaction_manager = GetGit4DataTransactionManagerForListing(context);
-	result->rows.push_back({Value::BIGINT(transaction_manager.snapshot_limit),
-	                        Value::UBIGINT(transaction_manager.UserSnapshotCount()),
-	                        Value::BIGINT(transaction_manager.branch_limit),
-	                        Value::UBIGINT(transaction_manager.branches.Count())});
+	result->rows.push_back(
+	    {Value::BIGINT(transaction_manager.snapshot_limit), Value::UBIGINT(transaction_manager.UserSnapshotCount()),
+	     Value::BIGINT(transaction_manager.branch_limit), Value::UBIGINT(transaction_manager.branches.Count())});
 	Git4DataRowNames(names, return_types, "snapshot_limit", LogicalType::BIGINT);
 	Git4DataRowNames(names, return_types, "snapshots", LogicalType::UBIGINT);
 	Git4DataRowNames(names, return_types, "branch_limit", LogicalType::BIGINT);
@@ -2021,8 +2208,8 @@ static unique_ptr<FunctionData> Git4DataPitrStateBind(ClientContext &context, Ta
 	// assert it. It shows in git4data_snapshots, where it belongs.
 	Git4DataSnapshot reference;
 	auto held = transaction_manager.snapshots.Get(DuckTransactionManager::PITR_REFERENCE, reference);
-	result->rows.push_back({Value::BOOLEAN(transaction_manager.PitrEnabled()), Value::BIGINT(days),
-	                        Value::BOOLEAN(held)});
+	result->rows.push_back(
+	    {Value::BOOLEAN(transaction_manager.PitrEnabled()), Value::BIGINT(days), Value::BOOLEAN(held)});
 	Git4DataRowNames(names, return_types, "pitr_enabled", LogicalType::BOOLEAN);
 	Git4DataRowNames(names, return_types, "window_days", LogicalType::BIGINT);
 	Git4DataRowNames(names, return_types, "reference_held", LogicalType::BOOLEAN);

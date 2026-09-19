@@ -122,6 +122,24 @@ struct Git4DataPitrStateFun {
 	static TableFunction GetFunction();
 };
 
+//! The measurement hooks, as rows: what a scan through the physical row groups sees at the retention bound,
+//! and at an explicitly given commit. They were pragmas returning a result, so their numbers could be produced
+//! by a test and never asserted.
+struct Git4DataProbeFun {
+	static void RegisterFunction(BuiltinFunctions &set);
+	static TableFunction GetFunction();
+};
+
+struct Git4DataProbeAllFun {
+	static void RegisterFunction(BuiltinFunctions &set);
+	static TableFunction GetFunction();
+};
+
+struct Git4DataProbeAtFun {
+	static void RegisterFunction(BuiltinFunctions &set);
+	static TableFunction GetFunction();
+};
+
 struct DuckDBApproxDatabaseCountFun {
 	static void RegisterFunction(BuiltinFunctions &set);
 };
