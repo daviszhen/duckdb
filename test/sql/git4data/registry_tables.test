@@ -217,6 +217,19 @@ CREATE TABLE git4data.copy AS SELECT 1 AS a
 ----
 <REGEX>:.*is in the schema the reference registry is kept in.*
 
+statement error
+CREATE VIEW git4data.v AS SELECT 1 AS a
+----
+<REGEX>:.*is in the schema the reference registry is kept in.*
+
+# MERGE INTO reaches the rows through none of INSERT, UPDATE or DELETE, and it was measured doing exactly
+# what they are refused for: `MERGE INTO git4data.snapshots ... WHEN NOT MATCHED THEN INSERT ...` put a
+# forged reference in the registry (the count below went from 1 to 2 before this was refused).
+statement error
+MERGE INTO git4data.snapshots USING (SELECT 'forged' AS name) s ON (git4data.snapshots.name = s.name) WHEN NOT MATCHED THEN INSERT VALUES ('forged', 1, TIMESTAMP '2020-01-01 00:00:00', '')
+----
+<REGEX>:.*is one of the tables the reference registry is kept in.*
+
 # and the references are untouched by all of it
 query II
 SELECT (SELECT count(*) FROM git4data.snapshots), (SELECT count(*) FROM git4data.branches)

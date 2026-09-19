@@ -6,6 +6,8 @@
 #include "duckdb/planner/expression_binder/where_binder.hpp"
 #include "duckdb/catalog/catalog_entry/table_catalog_entry.hpp"
 #include "duckdb/planner/operator/logical_merge_into.hpp"
+
+#include "duckdb/storage/git4data_registry.hpp"
 #include "duckdb/planner/operator/logical_projection.hpp"
 #include "duckdb/planner/expression/bound_constant_expression.hpp"
 #include "duckdb/planner/expression/bound_columnref_expression.hpp"
@@ -222,6 +224,13 @@ BoundStatement Binder::BindNode(MergeQueryNode &node) {
 		throw BinderException("Can only merge into base tables!");
 	}
 	auto &table = *table_ptr;
+	// A reference's tables are the feature's own state: MERGE INTO edits rows like INSERT, UPDATE and DELETE
+	// do, and it reaches the registry through none of those statements - measured, `MERGE INTO
+	// git4data.snapshots ... WHEN NOT MATCHED THEN INSERT ...` put a forged reference in the registry and its
+	// row count went from 1 to 2.
+	if (!internal_statement) {
+		Git4DataCheckRegistryWrite(table);
+	}
 
 	bool has_triggers = false;
 	auto transaction = table.ParentCatalog().GetCatalogTransaction(context);

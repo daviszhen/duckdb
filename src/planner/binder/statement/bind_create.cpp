@@ -855,6 +855,12 @@ BoundStatement Binder::Bind(CreateStatement &stmt) {
 	}
 	case CatalogType::VIEW_ENTRY: {
 		auto &base = stmt.info->Cast<CreateViewInfo>();
+		// the registry's schema is the feature's own, and a view in it is a caller's object where its tables
+		// are the only thing that should be - measured, `CREATE VIEW git4data.v AS SELECT 1` went through
+		if (!internal_statement) {
+			Git4DataCheckRegistryCreate(base.GetQualifiedName().Schema().GetIdentifierName(),
+			                            base.GetQualifiedName().Name().GetIdentifierName());
+		}
 		// bind the schema
 		auto &schema = BindCreateSchema(*stmt.info);
 		if (base.security_type == ViewSecurityType::SECURE_VIEW) {
