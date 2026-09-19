@@ -137,3 +137,186 @@ query II
 SELECT (SELECT v FROM c AT (BRANCH => 'child') WHERE k = 2), (SELECT count(*) FROM c_parent)
 ----
 222	10
+
+# 4. A *write* through a branch that both inherits a line and has a delta of its own - the shape two overlays
+# make, and the one a write is hardest on: the branch's own delta records the change while the line it inherited
+# stays as it was. Probed before it was written down: updating a row that came from the *inherited* delta's
+# added table left the branch reading the new value once and the branch it inherited from untouched.
+statement ok
+CREATE TABLE ov (k INTEGER PRIMARY KEY, v INTEGER)
+
+statement ok
+INSERT INTO ov SELECT range, range FROM range(5)
+
+statement ok
+PRAGMA git4data_create_branch('ovb', '')
+
+statement ok
+CREATE TABLE ovb_add (k INTEGER PRIMARY KEY, v INTEGER)
+
+statement ok
+CREATE TABLE ovb_del (k INTEGER PRIMARY KEY)
+
+statement ok
+PRAGMA git4data_bind_branch_delta('ov', 'ovb', 'ovb_add', 'ovb_del')
+
+statement ok
+INSERT INTO ovb_add VALUES (100, 100)
+
+statement ok
+INSERT INTO ovb_del VALUES (2)
+
+statement ok
+PRAGMA git4data_create_branch('ovc', 'ovb')
+
+statement ok
+CREATE TABLE ovc_add (k INTEGER PRIMARY KEY, v INTEGER)
+
+statement ok
+CREATE TABLE ovc_del (k INTEGER PRIMARY KEY)
+
+statement ok
+PRAGMA git4data_bind_branch_delta('ov', 'ovc', 'ovc_add', 'ovc_del')
+
+statement ok
+INSERT INTO ovc_add VALUES (200, 200)
+
+query III
+SELECT (SELECT count(*) FROM ov AT (BRANCH => 'ovc')),
+       (SELECT count(*) FROM ov AT (BRANCH => 'ovc') WHERE k = 100),
+       (SELECT count(*) FROM ov AT (BRANCH => 'ovc') WHERE k = 2)
+----
+6	1	0
+
+# the row it changes came from the inherited delta, and the change lands in its own tables
+statement ok
+PRAGMA git4data_apply('ov', 'ovc', 'UPDATE ov SET v = 555 WHERE k = 100')
+
+query IIII
+SELECT (SELECT count(*) FROM ov AT (BRANCH => 'ovc')),
+       (SELECT count(*) FROM ov AT (BRANCH => 'ovc') WHERE k = 100 AND v = 555),
+       (SELECT count(*) FROM ov AT (BRANCH => 'ovc') WHERE k = 100 AND v = 100),
+       (SELECT count(*) FROM ov AT (BRANCH => 'ovb') WHERE k = 100 AND v = 100)
+----
+6	1	0	1
+
+query II
+SELECT (SELECT count(*) FROM ovc_add), (SELECT count(*) FROM ovc_del)
+----
+2	1
+
+# and removing it takes it out of the branch without touching the line it inherited
+statement ok
+PRAGMA git4data_apply('ov', 'ovc', 'DELETE FROM ov WHERE k = 100')
+
+query II
+SELECT (SELECT count(*) FROM ov AT (BRANCH => 'ovc')),
+       (SELECT count(*) FROM ov AT (BRANCH => 'ovc') WHERE k = 100)
+----
+5	0
+
+query II
+SELECT (SELECT count(*) FROM ov AT (BRANCH => 'ovb') WHERE k = 100),
+       (SELECT count(*) FROM ov AT (BRANCH => 'ovb'))
+----
+1	5
+
+# taking the branch's own delta back leaves it reading the line it inherited, which is what it has
+statement ok
+PRAGMA git4data_unbind('ov', 'ovc')
+
+query III
+SELECT (SELECT count(*) FROM ov AT (BRANCH => 'ovc')),
+       (SELECT count(*) FROM ov AT (BRANCH => 'ovc') WHERE k = 100),
+       (SELECT line FROM git4data_branches() WHERE branch_name = 'ovc')
+----
+5	1	ovb
+
+# 5. A chain of forks: each link inherits the line of the one before it, so a read at the end walks the whole
+# chain. Probed before it was written down - the fork rule did not take an inherited line with it until 3bu, and
+# a chain read the raw table one hop down.
+statement ok
+CREATE TABLE ch (k INTEGER PRIMARY KEY, v INTEGER)
+
+statement ok
+INSERT INTO ch SELECT range, range FROM range(5)
+
+statement ok
+PRAGMA git4data_create_branch('ch0', '')
+
+statement ok
+CREATE TABLE ch0_add (k INTEGER PRIMARY KEY, v INTEGER)
+
+statement ok
+CREATE TABLE ch0_del (k INTEGER PRIMARY KEY)
+
+statement ok
+PRAGMA git4data_bind_branch_delta('ch', 'ch0', 'ch0_add', 'ch0_del')
+
+statement ok
+INSERT INTO ch0_add VALUES (100, 100)
+
+statement ok
+INSERT INTO ch0_del VALUES (2)
+
+statement ok
+PRAGMA git4data_create_branch('ch1', 'ch0')
+
+statement ok
+PRAGMA git4data_create_branch('ch2', 'ch1')
+
+statement ok
+PRAGMA git4data_create_branch('ch3', 'ch2')
+
+query IIII
+SELECT (SELECT count(*) FROM ch AT (BRANCH => 'ch1')),
+       (SELECT count(*) FROM ch AT (BRANCH => 'ch2')),
+       (SELECT count(*) FROM ch AT (BRANCH => 'ch3')),
+       (SELECT count(*) FROM ch AT (BRANCH => 'ch3') WHERE k = 2)
+----
+5	5	5	0
+
+query II
+SELECT line, parent FROM git4data_branches() WHERE branch_name = 'ch3'
+----
+ch2	ch2
+
+# the ancestor walk sees every link
+query I
+PRAGMA git4data_lca('ch3', 'ch1')
+----
+ch1
+
+query I
+PRAGMA git4data_lca('ch3', 'ch0')
+----
+ch0
+
+# a capture of a middle link reads what that link reads, and a fork from the capture reads it too
+statement ok
+PRAGMA git4data_create_snapshot('ch2_cap', 'ch2')
+
+query III
+SELECT (SELECT count(*) FROM ch AT (SNAPSHOT => 'ch2_cap')),
+       (SELECT count(*) FROM ch AT (BRANCH => 'ch3')),
+       (SELECT count(*) FROM ch AT (SNAPSHOT => 'ch2_cap') WHERE k = 100)
+----
+5	5	1
+
+# restoring the live table to the end of the chain rewinds it to what the chain reads
+statement ok
+PRAGMA git4data_restore('ch', 'ch3')
+
+query III
+SELECT (SELECT count(*) FROM ch), (SELECT count(*) FROM ch WHERE k = 100), (SELECT count(*) FROM ch WHERE k = 2)
+----
+5	1	0
+
+# and the middle link can still be materialized: the copy holds what the chain reads, not the raw table
+statement ok
+PRAGMA git4data_materialize('ch', 'ch2', 'ch2_copy')
+
+query II
+SELECT (SELECT count(*) FROM ch2_copy), (SELECT count(*) FROM ch2_copy WHERE k = 100)
+----
+5	1
