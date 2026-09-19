@@ -1587,10 +1587,19 @@ static string PragmaGit4DataMerge(ClientContext &context, const FunctionParamete
 			merge_into = Git4DataResolveTableName(context, entry.storage, entry.oid);
 		}
 	}
+	// A branch does not have to have a table of its own to be merged into: one that differs by a delta has
+	// somewhere to record the change too - the same two tables git4data_apply records in - so the landing
+	// statements below are written as delta rows instead of as changes to a table, and the "live" side of the
+	// conflict rule is read as the branch's own view rather than as a table.
+	optional_ptr<const Git4DataBranchDelta> merge_delta;
 	if (merge_into.empty()) {
-		throw InvalidInputException("Branch \"%s\" has no storage of its own for table \"%s\", so a merge "
-		                            "has nowhere to land - materialize it first",
-		                            left_name, table_name);
+		merge_delta = Git4DataFindDeltaTable(context, left, merge_key, merge_source.oid);
+		if (!merge_delta) {
+			throw InvalidInputException("Branch \"%s\" has neither a table of its own nor a delta for table "
+			                            "\"%s\", so a merge has nowhere to land - materialize it, or give it a "
+			                            "delta with git4data_bind_branch_delta",
+			                            left_name, table_name);
+		}
 	}
 	string ancestor;
 	if (!transaction_manager.branches.FindLCA(left_name, right_name, ancestor)) {
@@ -1802,6 +1811,7 @@ static string PragmaGit4DataMerge(ClientContext &context, const FunctionParamete
 	}
 	auto quoted_table = Git4DataTableSQLName(table_name);
 	auto quoted_into = Git4DataTableSQLName(merge_into);
+	auto read_target = merge_into.empty() ? FormatGit4DataAtClause(table_name, left_name, "BRANCH") : quoted_into;
 	auto diff_left = StringUtil::Format("git4data_diff('%s', '%s', '%s')", escape(table_name), escape(base_reference),
 	                                    escape(left_name));
 	auto diff_right = StringUtil::Format("git4data_diff('%s', '%s', '%s')", escape(table_name), escape(base_reference),
@@ -1821,9 +1831,9 @@ static string PragmaGit4DataMerge(ClientContext &context, const FunctionParamete
 	    "AND (EXISTS (SELECT 1 FROM (SELECT * FROM %s) %s WHERE %s) OR EXISTS (SELECT 1 FROM (SELECT * FROM %s) "
 	    "%s WHERE %s));\n",
 	    conflict_name, alias_left, key_list, diff_left, alias_right, key_list, diff_right, alias_both, key_list,
-	    alias_left, key_list, alias_right, key_list_both, alias_both, alias_both_rows, quoted_into, alias_x,
+	    alias_left, key_list, alias_right, key_list_both, alias_both, alias_both_rows, read_target, alias_x,
 	    right_image, alias_y, key_match_xy, key_match_by, BuildGit4DataRowComparison(table, alias_x, alias_y),
-	    right_image, alias_x, key_match_x_by, quoted_into, alias_y, key_match_by);
+	    right_image, alias_x, key_match_x_by, read_target, alias_y, key_match_by);
 	if (policy == "fail") {
 		result += StringUtil::Format("SELECT CASE WHEN EXISTS (SELECT 1 FROM %s) THEN error('merge conflict: use "
 		                             "policy skip or accept, or resolve it first') ELSE 0 END;\n",
@@ -1836,15 +1846,44 @@ static string PragmaGit4DataMerge(ClientContext &context, const FunctionParamete
 	// Accepting means the right side's row replaces whatever the left has for that key, including when
 	// the right side added it and the left also has one - so every key the right touched is cleared
 	// first, not only the ones it removed or changed.
-	result += StringUtil::Format("DELETE FROM %s WHERE (%s) IN (SELECT %s FROM %s WHERE g4d_change IN (%s)%s);\n",
-	                             quoted_into, key_list, key_list, diff_right,
-	                             policy == "accept" ? "'added', 'removed', 'changed'" : "'removed', 'changed'",
-	                             conflict_filter);
-	result += StringUtil::Format(
-	    "INSERT INTO %s SELECT * FROM %s WHERE (%s) IN (SELECT %s FROM %s WHERE g4d_change IN (%s)%s) AND (%s) NOT IN "
-	    "(SELECT %s FROM %s);\n",
-	    quoted_into, right_image, key_list, key_list, diff_right, "'added', 'changed'", conflict_filter, key_list,
-	    key_list, quoted_into);
+	auto changed_filter = policy == "accept" ? "'added', 'removed', 'changed'" : "'removed', 'changed'";
+	auto dropped_keys = StringUtil::Format("SELECT %s FROM %s WHERE g4d_change IN (%s)%s", key_list, diff_right,
+	                                        changed_filter, conflict_filter);
+	auto added_keys = StringUtil::Format(
+	    "SELECT %s FROM %s WHERE (%s) IN (SELECT %s FROM %s WHERE g4d_change IN ('added', 'changed')%s) AND (%s) "
+	    "NOT IN (SELECT %s FROM %s)",
+	    key_list, right_image, key_list, key_list, diff_right, conflict_filter, key_list, key_list, read_target);
+	auto added_rows =
+	    StringUtil::Format("SELECT * FROM %s WHERE (%s) IN (%s)", right_image, key_list, added_keys);
+	if (merge_delta) {
+		// the delta is where the change is recorded: a key the merge removes loses the branch's own override
+		// and is recorded removed, and a row it adds is recorded added and loses any removal - the two
+		// statements git4data_apply renders for a delete and an insert, against the same two tables
+		auto delta_added = Git4DataResolveTableName(context, merge_delta->added, merge_delta->added_oid);
+		auto delta_removed = Git4DataResolveTableName(context, merge_delta->removed, merge_delta->removed_oid);
+		if (delta_added.empty() || delta_removed.empty()) {
+			throw InvalidInputException("The delta branch \"%s\" differs by is gone: \"%s\" or \"%s\" is not "
+			                            "there any more",
+			                            left_name, merge_delta->added, merge_delta->removed);
+		}
+		auto quoted_added = Git4DataTableSQLName(delta_added);
+		auto quoted_removed = Git4DataTableSQLName(delta_removed);
+		result += StringUtil::Format("DELETE FROM %s WHERE (%s) IN (%s);\n", quoted_added, key_list, dropped_keys);
+		result +=
+		    StringUtil::Format("INSERT INTO %s (%s) SELECT %s FROM (%s) g4d_dk WHERE (%s) NOT IN (SELECT %s FROM "
+		                       "%s) AND (%s) IN (SELECT %s FROM %s);\n",
+		                       quoted_removed, key_list, key_list, dropped_keys, key_list, key_list, quoted_removed,
+		                       key_list, key_list, read_target);
+		result += StringUtil::Format("INSERT INTO %s %s;\n", quoted_added, added_rows);
+		result += StringUtil::Format("DELETE FROM %s WHERE (%s) IN (%s);\n", quoted_removed, key_list, added_keys);
+	} else {
+		result += StringUtil::Format("DELETE FROM %s WHERE (%s) IN (%s);\n", quoted_into, key_list, dropped_keys);
+		result += StringUtil::Format(
+		    "INSERT INTO %s SELECT * FROM %s WHERE (%s) IN (SELECT %s FROM %s WHERE g4d_change IN ('added', "
+		    "'changed')%s) AND (%s) NOT IN (SELECT %s FROM %s);\n",
+		    quoted_into, right_image, key_list, key_list, diff_right, conflict_filter, key_list, key_list,
+		    quoted_into);
+	}
 	result += StringUtil::Format("DROP TABLE %s;", conflict_name);
 
 	if (drop_merge_base) {
