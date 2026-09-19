@@ -225,9 +225,19 @@ static string BuildGit4DataRestore(ClientContext &context, const string &table_n
 	// Every row goes, including the ones the reference never had: a restore rewinds the table, so a row
 	// added since the reference is as wrong as a row it changed. The delete runs first, and the reference
 	// scan still reads its own image afterwards because the delete is newer than the reference's bound.
+	//
+	// **Nothing is written when the table already reads as the reference does.** That is not an optimization
+	// of the same answer: rewriting the rows gives them new row ids, and a diff of two references that
+	// *denote the same rows* compares row ids - so a restore of a state the table already has made a later
+	// `git4data_diff` report the whole table as changed, measured. The condition is the two images differing
+	// as multisets, in either direction, and it is read before the delete; after it, the table is empty and
+	// the second half of the condition is what says whether the reference has anything to put back.
+	auto differs = StringUtil::Format("EXISTS (SELECT * FROM %s EXCEPT ALL SELECT * FROM %s) OR EXISTS (SELECT * FROM "
+	                                  "%s EXCEPT ALL SELECT * FROM %s)",
+	                                  quoted_table, at_clause, at_clause, quoted_table);
 	string result;
-	result += StringUtil::Format("DELETE FROM %s;\n", quoted_table);
-	result += StringUtil::Format("INSERT INTO %s SELECT * FROM %s;", quoted_table, at_clause);
+	result += StringUtil::Format("DELETE FROM %s WHERE %s;\n", quoted_table, differs);
+	result += StringUtil::Format("INSERT INTO %s SELECT * FROM %s WHERE %s;", quoted_table, at_clause, differs);
 	return result;
 }
 
