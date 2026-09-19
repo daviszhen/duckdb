@@ -1631,6 +1631,37 @@ static string PragmaGit4DataMerge(ClientContext &context, const FunctionParamete
 			base_reference = DuckTransactionManager::MERGE_BASE_REFERENCE;
 			drop_merge_base = true;
 		};
+		// The state an ancestor's copy was written from is its own line, read at the commit the two sides
+		// forked at: that is what each of them saw, and it is not the source's pinned image, because the
+		// ancestor's own changes were already part of its line when they forked. Measured: an ancestor whose
+		// copy held 111 for a row, with two sides that both read 111 and one of them changing it to 222, was
+		// merged against the source's 1 - so both sides looked changed and the merge was refused as a conflict
+		// although only one had touched the row. The commit is the one the *merge target* parted at, which is
+		// the fork's own pin: `fork_state_merge.test` pins that choice, and it is what makes the merge bring
+		// over what the ancestor changed after the target forked (222 in that test) as the other side's change
+		// rather than as something the target already had.
+		auto name_line_as_base = [&]() {
+			transaction_t fork = 0;
+			Git4DataBranch fork_branch;
+			for (auto &side : {left_name, right_name}) {
+				if (transaction_manager.branches.Get(side, fork_branch)) {
+					fork = fork_branch.pin;
+					break;
+				}
+			}
+			if (fork == 0) {
+				// neither side is a branch (a child of a captured snapshot): the ancestor's own pin is what
+				// its line is read at, which is what the delta case below names too
+				fork = ancestor_branch.pin;
+			}
+			transaction_manager.snapshots.Drop(DuckTransactionManager::MERGE_BASE_REFERENCE);
+			if (!transaction_manager.snapshots.Create(DuckTransactionManager::MERGE_BASE_REFERENCE, fork,
+			                                          Timestamp::GetCurrentTimestamp(), ancestor)) {
+				throw InternalException("Could not create the internal merge base reference");
+			}
+			base_reference = DuckTransactionManager::MERGE_BASE_REFERENCE;
+			drop_merge_base = true;
+		};
 		// A delta is the ancestor's own change to the source, so its name reads as its line *now*; whether its
 		// two tables are empty yet is not asked, because naming the pin is right either way.
 		// A delta is the ancestor's own change to the source, so its name reads as its line *now*; whether its
@@ -1701,10 +1732,22 @@ static string PragmaGit4DataMerge(ClientContext &context, const FunctionParamete
 				}
 			}
 			if (!unwritten) {
-				// Written to since: what the table holds now is the pinned image plus this branch's own
-				// changes since, and reading it as the base would apply those changes backwards. Naming the
-				// pin (and the line it inherited, if it inherited one) is the fix.
-				name_pin_as_base();
+				// Written to since: what the table holds now is the line this branch started from plus its own
+				// changes, and reading *it* as the base would apply those changes backwards. Where the two
+				// sides parted depends on when they forked: a side forked *after* the ancestor had a line of
+				// its own parted at that line as it stood then, and a side forked before it parted at the
+				// ancestor's pinned image, which is what naming the pin reads. `merge_lineage.test` and
+				// `storage_writes.test` are the second case (their sides were forked before the ancestor was
+				// given a copy) and `fork_state_merge.test` the first; a pin newer than the ancestor's own is
+				// what tells them apart, because a fork from a parent with a line pins the commit it forked at.
+				Git4DataBranch target_branch;
+				auto forked_inside_the_line =
+				    transaction_manager.branches.Get(left_name, target_branch) && target_branch.pin > ancestor_branch.pin;
+				if (forked_inside_the_line) {
+					name_line_as_base();
+				} else {
+					name_pin_as_base();
+				}
 			}
 		}
 	}

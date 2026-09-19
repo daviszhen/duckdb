@@ -71,3 +71,55 @@ query III
 SELECT (SELECT v FROM t_p WHERE k = 1), (SELECT v FROM t_p WHERE k = 2), (SELECT v FROM t_b WHERE k = 3)
 ----
 111	222	999
+
+# The parent's copy can also be written *before* either side forks, and then both sides part from that
+# written state rather than from the parent's pinned image. Measured before this was fixed: with the
+# parent's copy holding 111 for the row and both sides reading 111, a merge in which only one of them
+# changed that row was refused as a conflict - both sides looked changed against the source's 1, which is
+# the state the parent's *pin* names rather than the state the two sides parted at.
+statement ok
+CREATE TABLE t2 (k INTEGER PRIMARY KEY, v INTEGER)
+
+statement ok
+INSERT INTO t2 SELECT range, range FROM range(10)
+
+statement ok
+CHECKPOINT
+
+statement ok
+PRAGMA git4data_create_branch('q', '')
+
+statement ok
+PRAGMA git4data_materialize('t2', 'q', 't2_q')
+
+statement ok
+UPDATE t2_q SET v = 111 WHERE k = 1
+
+statement ok
+PRAGMA git4data_create_branch('ql', 'q')
+
+statement ok
+PRAGMA git4data_create_branch('qr', 'q')
+
+statement ok
+PRAGMA git4data_materialize('t2', 'ql', 't2_ql')
+
+statement ok
+PRAGMA git4data_materialize('t2', 'qr', 't2_qr')
+
+query II
+SELECT (SELECT v FROM t2 AT (BRANCH => 'ql') WHERE k = 1), (SELECT v FROM t2 AT (BRANCH => 'qr') WHERE k = 1)
+----
+111	111
+
+statement ok
+UPDATE t2_ql SET v = 222 WHERE k = 1
+
+# only the left side changed this row, so the merge has no conflict there and keeps the left side's value
+statement ok
+PRAGMA git4data_merge('t2', 'ql', 'qr', 'fail')
+
+query II
+SELECT (SELECT v FROM t2 AT (BRANCH => 'ql') WHERE k = 1), (SELECT v FROM t2 AT (BRANCH => 'qr') WHERE k = 1)
+----
+222	111

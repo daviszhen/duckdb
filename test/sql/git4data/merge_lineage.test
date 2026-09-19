@@ -53,11 +53,12 @@ SELECT (SELECT v FROM t_a WHERE k = 2), (SELECT count(*) FROM t_a), (SELECT coun
 ----
 22	100	1
 
-# now a is written to, so its table no longer holds the state the two lines parted at. That state is
-# still namable, though: a branch with a table of its own cannot be forked from at all, so b must have
-# been forked before a was given this table, and the state they parted at is a's pinned image - the
-# commit a reads. The merge names that commit with an internal reference instead of reading a's table
-# as the base, which is what would apply a's own changes backwards.
+# now a is written to, so its table no longer holds the state the two lines parted at. It is still
+# namable: here both sides were forked from the ancestor *before* a was given this table, so they parted
+# at the ancestor's pinned image - the commit a reads - and the merge names that commit with an internal
+# reference instead of reading a's table as the base, which is what would apply a's own changes backwards.
+# A side forked *after* the ancestor had a line of its own parted at that line instead, which
+# `fork_state_merge.test` is the case for.
 statement ok
 UPDATE t_a SET v = 11 WHERE k = 1
 
