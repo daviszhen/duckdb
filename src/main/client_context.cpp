@@ -362,7 +362,15 @@ ErrorData ClientContext::EndQueryInternal(ClientContextLock &lock, bool success,
 				}
 			} else if (invalidate_transaction) {
 				D_ASSERT(!success);
-				ValidChecker::Invalidate(ActiveTransaction(), "Failed to commit");
+				if (transaction.GetAutoRollback()) {
+					// this transaction was opened by the preprocessor for a multi-statement body rather
+					// than by the caller (auto_rollback is only set by the wrapper's own BEGIN). A body
+					// statement that failed must close it, so the session is usable afterwards instead of
+					// holding an invalidated transaction that no caller knows it has to roll back.
+					transaction.Rollback(previous_error);
+				} else {
+					ValidChecker::Invalidate(ActiveTransaction(), "Failed to commit");
+				}
 			}
 		}
 	} catch (std::exception &ex) {
