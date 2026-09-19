@@ -307,3 +307,77 @@ query I
 SELECT v FROM "q'uote" AT (BRANCH => 'b''ranch') WHERE k = 1
 ----
 1
+
+# A single integer key is the shape the removed side keeps as its 64-bit pattern rather than as a string
+# (increment 3q), and the pattern has to keep values apart that a naive cast would fold together: a negative
+# key and a large unsigned one. Both are read through a delta whose removed side holds them.
+statement ok
+CREATE TABLE signed (k BIGINT PRIMARY KEY, v INTEGER)
+
+statement ok
+INSERT INTO signed VALUES (-9223372036854775808, 1), (-1, 2), (0, 3), (9223372036854775807, 4)
+
+statement ok
+CHECKPOINT
+
+statement ok
+CREATE TABLE signed_del (k BIGINT PRIMARY KEY)
+
+statement ok
+INSERT INTO signed_del VALUES (-1), (0)
+
+statement ok
+CREATE TABLE signed_add (k BIGINT PRIMARY KEY, v INTEGER)
+
+statement ok
+INSERT INTO signed_add VALUES (-2, 11)
+
+statement ok
+PRAGMA git4data_create_branch('signed_branch', '')
+
+statement ok
+PRAGMA git4data_bind_branch_delta('signed', 'signed_branch', 'signed_add', 'signed_del')
+
+# the removed keys are gone, the added row is there, and the extremes are still told apart from each other:
+# -1 was removed and -2 added, so the pattern keeps neighbouring negative keys apart as well as the extremes
+query II
+SELECT k, v FROM signed AT (BRANCH => 'signed_branch') ORDER BY k
+----
+-9223372036854775808	1
+-2	11
+9223372036854775807	4
+
+# the same for an unsigned key that does not fit in a signed 64-bit integer: 2^64-1 must not be read as -1,
+# which is the value the signed test above removes
+statement ok
+CREATE TABLE unsigned_k (k UBIGINT PRIMARY KEY, v INTEGER)
+
+statement ok
+INSERT INTO unsigned_k VALUES (0, 1), (18446744073709551615, 2)
+
+statement ok
+CHECKPOINT
+
+statement ok
+CREATE TABLE unsigned_del (k UBIGINT PRIMARY KEY)
+
+statement ok
+INSERT INTO unsigned_del VALUES (0)
+
+statement ok
+CREATE TABLE unsigned_add (k UBIGINT PRIMARY KEY, v INTEGER)
+
+statement ok
+INSERT INTO unsigned_add VALUES (18446744073709551614, 3)
+
+statement ok
+PRAGMA git4data_create_branch('unsigned_branch', '')
+
+statement ok
+PRAGMA git4data_bind_branch_delta('unsigned_k', 'unsigned_branch', 'unsigned_add', 'unsigned_del')
+
+query II
+SELECT k, v FROM unsigned_k AT (BRANCH => 'unsigned_branch') ORDER BY k
+----
+18446744073709551614	3
+18446744073709551615	2
