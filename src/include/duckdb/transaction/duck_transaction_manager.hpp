@@ -355,8 +355,13 @@ public:
 	//! reference. A window of zero moves it at every checkpoint, which keeps nothing.
 	static constexpr const char *PITR_REFERENCE = "__pitr__";
 	//! The reference a merge names the ancestor's pin with, so both diffs read the state two lines parted
-	//! at. It exists for the length of one merge; a merge that fails leaves it, which is why it is not
-	//! counted against the quota and not listed - it is not a reference the user asked for.
+	//! at. It exists for the length of one merge, and it is neither counted against the quota nor listed -
+	//! it is not a reference the user asked for. This used to add that a merge which fails leaves it behind;
+	//! measured, it does not: a read through `__merge_base__` after a refused merge answers that it does not
+	//! exist, and `merge.test` asserts that for both a refused and a completed merge. Which step removes it
+	//! on the refusal path is not pinned down - the generated body's own delete and
+	//! `git4data_forget_internal` run only after the conflict check, and the reconcile does not list this
+	//! name among the records a transaction added.
 	static constexpr const char *MERGE_BASE_REFERENCE = "__merge_base__";
 	//! The name a read uses for the table as it stands now, through the caller's own transaction - the live
 	//! side of a diff. It is a name the registries never hold: it is resolved before they are looked in, and

@@ -706,3 +706,56 @@ query I
 SELECT v FROM cp AT (BRANCH => 'cpl2') WHERE a = 1 AND b = 1
 ----
 222
+
+# The internal reference a merge names its base with does not survive a refused merge: `__merge_base__` is
+# created before the conflict check runs, and a read through it afterwards answers that it does not exist.
+# This is asserted because the design note used to claim the opposite ("a merge that failed leaves it") - it is
+# a measured behaviour now, and the note retracts the claim.
+statement ok
+CREATE TABLE mbs (k INTEGER PRIMARY KEY, v INTEGER)
+
+statement ok
+INSERT INTO mbs SELECT range, range FROM range(10)
+
+statement ok
+CHECKPOINT
+
+statement ok
+PRAGMA git4data_create_branch('mbsbase', '')
+
+statement ok
+PRAGMA git4data_create_branch('mbsl', 'mbsbase')
+
+statement ok
+PRAGMA git4data_create_branch('mbsr', 'mbsbase')
+
+statement ok
+PRAGMA git4data_materialize('mbs', 'mbsl', 'mbs_left')
+
+statement ok
+PRAGMA git4data_materialize('mbs', 'mbsr', 'mbs_right')
+
+statement ok
+UPDATE mbs_left SET v = 111 WHERE k = 1
+
+statement ok
+UPDATE mbs_right SET v = 222 WHERE k = 1
+
+statement error
+PRAGMA git4data_merge('mbs', 'mbsl', 'mbsr', 'fail')
+----
+<REGEX>:.*merge conflict.*
+
+statement error
+SELECT count(*) FROM mbs AT (SNAPSHOT => '__merge_base__')
+----
+<REGEX>:.*does not exist.*
+
+# and a merge that goes through leaves nothing behind either
+statement ok
+PRAGMA git4data_merge('mbs', 'mbsl', 'mbsr', 'skip')
+
+statement error
+SELECT count(*) FROM mbs AT (SNAPSHOT => '__merge_base__')
+----
+<REGEX>:.*does not exist.*
