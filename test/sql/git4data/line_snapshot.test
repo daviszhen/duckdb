@@ -296,3 +296,51 @@ SELECT (SELECT count(*) FROM cap_d_src AT (SNAPSHOT => 'cap_d_s')),
        (SELECT count(*) FROM cap_d_src AT (SNAPSHOT => 'cap_d_s') WHERE k = 500)
 ----
 4	0
+
+# A branch that *inherited* a line reads it, so that line can be captured as well - the refusal above is for a
+# branch with no line at all, which reads the source at its pin and for which a snapshot of the table says the
+# same thing. Measured before this: capturing the line of a branch that inherited one was refused with "it reads
+# the table exactly as a snapshot does", which is false - a branch that only inherits reads the line (100 rows,
+# v = -1 at k = 1) while the table has the row inserted after the line's pin (101 rows) - and there was no way to
+# capture that state: a snapshot of the branch the line came from pins at *now* and would take whatever it did
+# since the fork, which is exactly what the branch's pin excludes.
+#
+# The branch below is made for this: it has nothing of its own (no copy, no delta) and reads the line it
+# inherited, which is the shape the refusal was wrong about. `child` above will not do - it is materialized
+# further down this file, so by the time this runs it holds a copy of its own, and a check written against it
+# passes with or without the fix (measured: the first version of this section used it and did not fail when the
+# fix was reverted).
+statement ok
+PRAGMA git4data_create_branch('inherited_only', 'of_b')
+
+query IIII
+SELECT line, has_storage, has_delta,
+       (SELECT v FROM t AT (BRANCH => 'inherited_only') WHERE k = 1)
+FROM git4data_branches() WHERE branch_name = 'inherited_only'
+----
+b	false	false	-1
+
+query II
+SELECT (SELECT count(*) FROM t), (SELECT count(*) FROM t AT (BRANCH => 'inherited_only'))
+----
+101	100
+
+statement ok
+PRAGMA git4data_create_snapshot('inherited_cap', 'inherited_only')
+
+query III
+SELECT (SELECT count(*) FROM t AT (SNAPSHOT => 'inherited_cap')),
+       (SELECT v FROM t AT (SNAPSHOT => 'inherited_cap') WHERE k = 1),
+       (SELECT line FROM git4data_snapshots() WHERE snapshot_name = 'inherited_cap')
+----
+100	-1	inherited_only
+
+# and a fork from that capture reads the same state, which is what capturing a line is for
+statement ok
+PRAGMA git4data_create_branch('grandchild', 'inherited_cap')
+
+query II
+SELECT (SELECT count(*) FROM t AT (BRANCH => 'grandchild')),
+       (SELECT v FROM t AT (BRANCH => 'grandchild') WHERE k = 1)
+----
+100	-1

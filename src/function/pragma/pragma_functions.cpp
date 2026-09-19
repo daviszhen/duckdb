@@ -2183,7 +2183,16 @@ static string PragmaGit4DataCreateSnapshot(ClientContext &context, const Functio
 		if (!transaction_manager.branches.Get(line, branch)) {
 			throw InvalidInputException("Branch \"%s\" does not exist", line);
 		}
-		if (branch.storage_tables.empty() && branch.deltas.empty()) {
+		// **A branch that inherited a line reads it, and that is a line to capture too** (increment 3bv). The
+		// refusal is for a branch with no line at all - no mapping of its own and nothing inherited - which
+		// reads the source at its pin, so a snapshot of the table says the same thing and the second argument
+		// buys nothing. Measured before this: capturing the line of a branch that inherited one was refused
+		// with "it reads the table exactly as a snapshot does", which is **false** - `b1`, forked from a branch
+		// that differed by a delta, read four rows with the delta's added key present and its removed key
+		// absent, while the table had five with the removed key in it - and the caller had no way to capture
+		// that state: a snapshot of the branch's *parent* pinned at now would take whatever the parent did
+		// since the fork, which is exactly what the branch's pin excludes.
+		if (branch.storage_tables.empty() && branch.deltas.empty() && branch.base_line.empty()) {
 			throw InvalidInputException("Branch \"%s\" has no line of its own, so there is nothing to capture "
 			                            "- it reads the table exactly as a snapshot does",
 			                            line);
