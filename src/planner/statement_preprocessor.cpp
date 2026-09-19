@@ -115,10 +115,18 @@ vector<unique_ptr<SQLStatement>> StatementPreprocessor::TryReparsePragma(unique_
 		const auto query_to_reparse = bound_info->function.query(context, parameters);
 		Parser parser(context.GetParserOptions());
 		parser.ParseQuery(query_to_reparse);
-		// these are the engine's own statements: what a pragma returns is written by the feature, not called
-		// by the caller
+		// A statement a pragma returns is the feature's own *when the feature wrote it*: the git4data_* pragmas
+		// build their statements from registry state, and those have to reach the registry's tables, which is
+		// what the internal flag lets them do. The same is not true of the engine's pragmas, and treating it as
+		// true was a defect: `IMPORT DATABASE` returns the statements of `schema.sql` and `load.sql`, which come
+		// from files on disk, so marking them internal let `COPY git4data.snapshots FROM ...` past the guard
+		// that refuses exactly that write. Measured, an exported and re-imported database then held a reference
+		// whose pin belonged to the database it came from and read as the live table, silently - an error where
+		// the answer would be wrong is what the guard is for.
+		const auto &pragma_name = info->name.GetIdentifierName();
+		const bool feature_pragma = StringUtil::StartsWith(pragma_name, "git4data_");
 		for (auto &reparsed : parser.statements) {
-			reparsed->internal = true;
+			reparsed->internal = feature_pragma;
 		}
 		return std::move(parser.statements);
 	}
