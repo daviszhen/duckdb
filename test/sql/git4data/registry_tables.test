@@ -355,6 +355,90 @@ SELECT (SELECT count(*) FROM duckdb_sequences() WHERE schema_name = 'git4data'),
 ----
 0	0
 
+# **The write guard has a back door, and it is the feature's own statements (3dn).** A caller cannot write the
+# registry tables - but a *binding* can point the feature at them, and everything the feature writes goes
+# through statements marked internal, which is exactly what lets them past that guard. Measured, with a source
+# shaped like `git4data.snapshots` (four columns, primary key on the first): `git4data_bind_branch_delta` took
+# `git4data.snapshots` as the delta's added table, and `git4data_apply` then landed a row naming a **forged
+# snapshot with a pin of the caller's choosing** - `SELECT count(*) FROM t AT (SNAPSHOT => 'forged')` read one
+# row through it, and the row is in the file, so the next open loads it like any other reference. A pin is what
+# holds history, so a forged one is a forged retention promise as well. The refusal is on the aim rather than
+# on the shot, because every writer goes through a binding: the table a branch is given, and both sides of a
+# delta, cannot be one of these tables.
+statement ok
+CREATE TABLE reg_shape (branch VARCHAR PRIMARY KEY, source VARCHAR, storage VARCHAR, owned BOOLEAN)
+
+statement ok
+INSERT INTO reg_shape VALUES ('x', 'y', 'z', false)
+
+statement ok
+CREATE TABLE reg_delta_shape (branch VARCHAR PRIMARY KEY, source VARCHAR, added VARCHAR, removed VARCHAR)
+
+statement ok
+INSERT INTO reg_delta_shape VALUES ('x', 'y', 'z', 'w')
+
+statement ok
+CREATE TABLE reg_delta_del (branch VARCHAR PRIMARY KEY)
+
+statement ok
+CHECKPOINT
+
+statement ok
+PRAGMA git4data_create_branch('reg_b', '')
+
+statement error
+PRAGMA git4data_bind_branch_table('reg_shape', 'reg_b', 'git4data.storage')
+----
+<REGEX>:.*is one of the tables the reference registry is kept in.*
+
+statement error
+PRAGMA git4data_bind_branch_delta('reg_delta_shape', 'reg_b', 'git4data.deltas', 'reg_delta_del')
+----
+<REGEX>:.*is one of the tables the reference registry is kept in.*
+
+statement error
+PRAGMA git4data_bind_branch_delta('reg_delta_shape', 'reg_b', 'reg_delta_shape', 'git4data.deltas')
+----
+<REGEX>:.*is one of the tables the reference registry is kept in.*
+
+# The other two writers take the live table as an argument rather than through a binding: a pick and a restore
+# both write it with the feature's own statements. Neither could be aimed at the registry through a qualified
+# name (the resolver reads `git4data.snapshots` as one identifier first), which is what the default schema is
+# for - and that is how the write was reached, measured, before this refusal existed.
+statement ok
+SET schema='git4data'
+
+statement error
+PRAGMA git4data_restore('snapshots', 'reg_b')
+----
+<REGEX>:.*is one of the tables the reference registry is kept in.*
+
+statement error
+PRAGMA git4data_restore_at('snapshots', '2030-01-01 00:00:00')
+----
+<REGEX>:.*is one of the tables the reference registry is kept in.*
+
+statement error
+PRAGMA git4data_pick('snapshots', 'reg_b', 'reg_b')
+----
+<REGEX>:.*is one of the tables the reference registry is kept in.*
+
+statement ok
+SET schema='main'
+
+# and none of it wrote anything: no forged reference and no delta row, and the one branch the test made here is
+# the only thing these statements added
+query II
+SELECT (SELECT count(*) FROM git4data.snapshots WHERE name = 'forged'),
+       (SELECT count(*) FROM git4data.deltas)
+----
+0	0
+
+query I
+SELECT count(*) FROM git4data.branches WHERE name = 'reg_b'
+----
+1
+
 # The schema is the feature's own bookkeeping, so it is not part of what the database looks like to a
 # caller: SHOW TABLES and information_schema.tables are queries over duckdb_tables(), and that function
 # leaves it out. Reading the tables by name still works - that is how a caller sees what the feature keeps.

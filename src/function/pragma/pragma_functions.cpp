@@ -223,6 +223,12 @@ static vector<string> Git4DataPrimaryKeyColumnNames(TableCatalogEntry &table) {
 static string BuildGit4DataRestore(ClientContext &context, const string &table_name, const string &reference,
                                    const char *unit) {
 	auto &table = Catalog::GetEntry<TableCatalogEntry>(context, QualifiedName(Identifier(table_name)));
+	// A restore writes the *live* table through the feature's own statements, so the table it writes cannot be
+	// one of the registry's: measured, with a reference keyed to `git4data.snapshots` (a materialize of it is
+	// allowed, and it is a read), `SET schema='git4data'; git4data_restore('snapshots', ...)` rewrote the
+	// registry table - the write the guard refuses a caller, reached through the flag that lets the feature's
+	// own statements past it.
+	Git4DataCheckRegistryTarget(table.ParentSchema().name.GetIdentifierName(), table.name.GetIdentifierName());
 	auto quoted_table = Git4DataTableSQLName(table_name);
 	auto at_clause = FormatGit4DataAtClause(table_name, reference, unit);
 	auto escape = [](const string &value) {
@@ -512,6 +518,9 @@ static string PragmaGit4DataPick(ClientContext &context, const FunctionParameter
 	auto base_unit = ResolveGit4DataReference(transaction_manager, base);
 
 	auto &table = Catalog::GetEntry<TableCatalogEntry>(context, QualifiedName(Identifier(table_name)));
+	// a pick writes the live table through the feature's own statements, so it is refused the registry's tables
+	// for the reason a restore is
+	Git4DataCheckRegistryTarget(table.ParentSchema().name.GetIdentifierName(), table.name.GetIdentifierName());
 	auto key_columns = Git4DataPrimaryKeyColumnNames(table);
 	if (key_columns.empty()) {
 		throw InvalidInputException("Table \"%s\" has no primary key, so a pick cannot tell which rows to "
@@ -804,6 +813,15 @@ static void Git4DataBindBranchTableImpl(ClientContext &context, const FunctionPa
 	auto source_key = Git4DataSourceKey(source_entry);
 	auto record_name = Git4DataTableName(source_entry);
 	auto &storage_entry = Git4DataResolveTable(context, storage_table);
+	// The table a binding points the feature at is written by the feature's *own* statements - a materialize
+	// fills it, an apply lands rows in a delta's - and those are marked internal, which is what lets them past
+	// the guard that refuses a caller's write to the registry tables. So a binding aimed at one of those tables
+	// is a way to write the registry through SQL after all: measured, with a source shaped like
+	// `git4data.snapshots`, `git4data_apply` landed a row naming a snapshot called `forged` with a pin of the
+	// caller's choosing, and `SELECT ... AT (SNAPSHOT => 'forged')` then read through it. The guard below
+	// refuses the aim rather than the shot, because every writer goes through a binding.
+	Git4DataCheckRegistryTarget(storage_entry.ParentSchema().name.GetIdentifierName(),
+	                            storage_entry.name.GetIdentifierName());
 	// The read maps a branch's own table onto the source's columns *by position*, so the table has to have
 	// the source's columns in the source's order. Measured: a table holding (v, k) where the source holds
 	// (k, v) read back as k = 777 and v = 1 from a row that held k = 1 and v = 777. The delta path has
@@ -916,6 +934,11 @@ static string PragmaGit4DataBindBranchDelta(ClientContext &context, const Functi
 	auto record_name = Git4DataTableName(source);
 	auto &added = Git4DataResolveTable(context, added_table);
 	auto &removed = Git4DataResolveTable(context, removed_table);
+	// both sides are written by the feature's own statements - an apply lands the added rows and records the
+	// removed keys - so neither can be one of the registry's tables, for the reason spelled out at
+	// `git4data_bind_branch_table`
+	Git4DataCheckRegistryTarget(added.ParentSchema().name.GetIdentifierName(), added.name.GetIdentifierName());
+	Git4DataCheckRegistryTarget(removed.ParentSchema().name.GetIdentifierName(), removed.name.GetIdentifierName());
 	// the added rows are read as rows of the source table, so the two have to be interchangeable
 	auto &source_columns = source.GetColumns();
 	// the added rows are read as rows of the source table, so the two have to be interchangeable
