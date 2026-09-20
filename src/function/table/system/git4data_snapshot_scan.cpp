@@ -349,8 +349,14 @@ static void Git4DataCollectRemovedKeys(ClientContext &context, const string &rem
 	DataChunk hashes;
 	hashes.Initialize(Allocator::Get(context), hash_types);
 	scan.Initialize(removed_ids, nullptr);
+	// A removed table with no rows has nothing to read and no row group to scan (`InitializeScan` asserts on
+	// the root segment); the caller's own uncommitted rows in it are read below, from its local storage, so
+	// this is the on-disk half only.
+	const bool groups_empty = groups.GetTotalRows() == 0;
 	QueryContext query_context;
-	groups.InitializeScan(query_context, scan.table_state, removed_ids, nullptr);
+	if (!groups_empty) {
+		groups.InitializeScan(query_context, scan.table_state, removed_ids, nullptr);
+	}
 	ScanOptions options(Git4DataDeltaTransactionData(context, table.GetStorage().GetAttached(), bound));
 	// The hashes are a fast path for the common delta - a handful of keys against a large base, where
 	// they turn a per-row string build into one hash lookup and measured 0.554 s into 0.005 s on 400,000
@@ -416,7 +422,7 @@ static void Git4DataCollectRemovedKeys(ClientContext &context, const string &rem
 			result.strings.insert(Git4DataKeyString(chunk, positions, row));
 		}
 	};
-	while (true) {
+	while (!groups_empty) {
 		chunk.Reset();
 		scan.table_state.Scan(options, chunk);
 		if (chunk.size() == 0) {
@@ -463,6 +469,9 @@ struct Git4DataDeltaRead {
 	optional_ptr<AttachedDatabase> database;
 	bool rows_done = false;
 	bool local_open = false;
+	//! Whether the added table has no row groups at all: there is then nothing to scan (and nothing was
+	//! initialized to scan), and only the caller's own uncommitted rows in it are left to read
+	bool groups_empty = false;
 
 	//! Read this overlay's next chunk of added rows: the committed ones out of its row groups first, then
 	//! the rows the caller has written to that table and not committed, which are in its local storage.
@@ -484,7 +493,9 @@ struct Git4DataDeltaRead {
 				return false;
 			}
 			ScanOptions options(Git4DataDeltaTransactionData(context, database, layer.bound));
-			scan->table_state.Scan(options, target);
+			if (!groups_empty) {
+				scan->table_state.Scan(options, target);
+			}
 			if (target.size() != 0) {
 				return true;
 			}
@@ -582,6 +593,12 @@ struct Git4DataSnapshotScanState : public GlobalTableFunctionState {
 	idx_t delta_index = 0;
 	bool base_done = false;
 	bool finished = false;
+	//! Whether the base's collection has no row groups at all, in which case there is nothing to scan and
+	//! nothing was initialized to scan: `RowGroupCollection::InitializeScan` asserts on the root segment, and
+	//! an empty table has none (measured - a table with no rows reports no row groups in `pragma_storage_info`
+	//! both in session and after a reopen). An empty base is what the caller's own uncommitted rows are read
+	//! on top of, so the scan is skipped rather than the branch being cut off.
+	bool base_groups_empty = false;
 	//! The database the delta's tables live in, so a scan of them can run under the caller's transaction
 	optional_ptr<AttachedDatabase> delta_database;
 	//! The table this read scans, when it is a branch's own copy, and whether its local rows have been
@@ -1079,7 +1096,12 @@ static unique_ptr<GlobalTableFunctionState> Git4DataSnapshotScanInit(ClientConte
 	// the segment lock taken here has to be handed to every Scan call below
 	result->scan_state.Initialize(result->column_ids, nullptr);
 	QueryContext query_context;
-	row_groups.InitializeScan(query_context, result->scan_state.table_state, result->column_ids, nullptr);
+	if (row_groups.GetTotalRows() == 0) {
+		// an empty table: there is no row group to scan, and `InitializeScan` is not written for that
+		result->base_groups_empty = true;
+	} else {
+		row_groups.InitializeScan(query_context, result->scan_state.table_state, result->column_ids, nullptr);
+	}
 
 	if (bind_data.deltas.empty()) {
 		return std::move(result);
@@ -1121,10 +1143,14 @@ static unique_ptr<GlobalTableFunctionState> Git4DataSnapshotScanInit(ClientConte
 		read.chunk->Initialize(Allocator::Get(context), scan_types);
 		if (!layer.added.empty()) {
 			auto &added_table = Git4DataResolveTable(context, layer.added);
+			auto &added_groups = *added_table.GetStorage().GetRowGroupCollection();
 			read.scan = make_uniq<TableScanState>();
 			read.scan->Initialize(result->column_ids, nullptr);
-			added_table.GetStorage().GetRowGroupCollection()->InitializeScan(query_context, read.scan->table_state,
-			                                                                 result->column_ids, nullptr);
+			if (added_groups.GetTotalRows() == 0) {
+				read.groups_empty = true;
+			} else {
+				added_groups.InitializeScan(query_context, read.scan->table_state, result->column_ids, nullptr);
+			}
 			read.storage = added_table.GetStorage();
 		}
 		Git4DataCollectRemovedKeys(context, layer.removed, ordered_key_types, key_columns.size(), layer.bound,
@@ -1174,7 +1200,11 @@ static void Git4DataSnapshotScanFunction(ClientContext &context, TableFunctionIn
 			ScanOptions options(state.own_storage && state.delta_database
 			                        ? Git4DataDeltaTransactionData(context, state.delta_database, state.bound)
 			                        : TransactionData(MAX_TRANSACTION_ID, state.bound));
-			state.scan_state.table_state.Scan(options, state.scan_chunk);
+			if (!state.base_groups_empty) {
+				state.scan_state.table_state.Scan(options, state.scan_chunk);
+			}
+			// an empty base leaves the chunk at zero rows, exactly as a scan of one would, and the branch
+			// below is what reads the caller's own uncommitted rows on top of it
 			if (state.scan_chunk.size() == 0 && state.own_storage && state.base_storage && state.delta_database) {
 				auto &local_transaction = DuckTransaction::Get(context, *state.delta_database);
 				LocalStorage::Get(local_transaction)
@@ -1434,6 +1464,10 @@ struct Git4DataDiffState : public GlobalTableFunctionState {
 	// one scan per side: a scan state is consumed as it walks, so the second pass needs its own
 	TableScanState left_scan;
 	TableScanState right_scan;
+	//! Whether a side's collection has no row groups at all, as for the read's base: nothing to scan, and
+	//! the side's own uncommitted rows are what is read instead
+	bool left_groups_empty = false;
+	bool right_groups_empty = false;
 	DataChunk scan_chunk;
 	//! One hash column per key column, filled per chunk while a side is walked
 	DataChunk key_hashes;
@@ -1948,10 +1982,14 @@ static void Git4DataDiffSetupDeltas(ClientContext &context, const vector<Git4Dat
 		read.chunk->Initialize(Allocator::Get(context), scan_types);
 		if (!layer.added.empty()) {
 			auto &added_table = Git4DataResolveTable(context, layer.added);
+			auto &added_groups = *added_table.GetStorage().GetRowGroupCollection();
 			read.scan = make_uniq<TableScanState>();
 			read.scan->Initialize(column_ids, nullptr);
-			added_table.GetStorage().GetRowGroupCollection()->InitializeScan(query_context, read.scan->table_state,
-			                                                                 column_ids, nullptr);
+			if (added_groups.GetTotalRows() == 0) {
+				read.groups_empty = true;
+			} else {
+				added_groups.InitializeScan(query_context, read.scan->table_state, column_ids, nullptr);
+			}
 			read.storage = added_table.GetStorage();
 		}
 		Git4DataCollectRemovedKeys(context, layer.removed, key_types, key_count, layer.bound, read.removed);
@@ -2038,11 +2076,19 @@ static unique_ptr<GlobalTableFunctionState> Git4DataDiffInit(ClientContext &cont
 	auto &left_table = Git4DataResolveTable(context, bind_data.left_table);
 	auto &left_groups = *left_table.GetStorage().GetRowGroupCollection();
 	result->left_scan.Initialize(result->column_ids, nullptr);
-	left_groups.InitializeScan(query_context, result->left_scan.table_state, result->column_ids, nullptr);
+	if (left_groups.GetTotalRows() == 0) {
+		result->left_groups_empty = true;
+	} else {
+		left_groups.InitializeScan(query_context, result->left_scan.table_state, result->column_ids, nullptr);
+	}
 	auto &right_table = Git4DataResolveTable(context, bind_data.right_table);
 	auto &right_groups = *right_table.GetStorage().GetRowGroupCollection();
 	result->right_scan.Initialize(result->column_ids, nullptr);
-	right_groups.InitializeScan(query_context, result->right_scan.table_state, result->column_ids, nullptr);
+	if (right_groups.GetTotalRows() == 0) {
+		result->right_groups_empty = true;
+	} else {
+		right_groups.InitializeScan(query_context, result->right_scan.table_state, result->column_ids, nullptr);
+	}
 	return std::move(result);
 }
 
@@ -2089,7 +2135,11 @@ static void Git4DataDiffCollect(ClientContext &context, Git4DataDiffState &state
 		if (side_local_open) {
 			LocalStorage::Get(side_transaction).Scan(scan.local_state, state.column_ids, state.scan_chunk);
 		} else {
-			scan.table_state.Scan(options, state.scan_chunk);
+			const bool side_groups_empty =
+			    &scan == &state.left_scan ? state.left_groups_empty : state.right_groups_empty;
+			if (!side_groups_empty) {
+				scan.table_state.Scan(options, state.scan_chunk);
+			}
 			if (state.scan_chunk.size() == 0 && side_own_storage && side_storage) {
 				LocalStorage::Get(side_transaction).InitializeScan(*side_storage, scan.local_state, nullptr);
 				side_local_open = true;

@@ -201,9 +201,18 @@ static void Git4DataScanRegistryTable(AttachedDatabase &db, TableCatalogEntry &t
 	for (idx_t i = 0; i < types.size(); i++) {
 		column_ids.emplace_back(i);
 	}
+	auto &groups = *table.GetStorage().GetRowGroupCollection();
+	// **A collection with no row groups cannot be scanned, and a registry table is empty whenever its kind has
+	// no rows yet** - `git4data.branches`, `storage` and `deltas` are all empty in a database whose only
+	// reference is a snapshot, which is the ordinary case. `RowGroupCollection::InitializeScan` asserts on the
+	// root segment (`row_group_collection.cpp`, `D_ASSERT(row_group)`), so an assertion-enabled build - the
+	// configuration upstream's own CI uses - refused to *open* such a database, measured on a fresh file with
+	// one snapshot in it. Nothing to read is nothing to hand to the callback.
+	if (groups.GetTotalRows() == 0) {
+		return;
+	}
 	TableScanState scan;
 	scan.Initialize(column_ids, nullptr);
-	auto &groups = *table.GetStorage().GetRowGroupCollection();
 	QueryContext query_context;
 	groups.InitializeScan(query_context, scan.table_state, column_ids, nullptr);
 	DataChunk chunk;
