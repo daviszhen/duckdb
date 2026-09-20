@@ -36,6 +36,7 @@
 #include "duckdb/logging/log_manager.hpp"
 #include "duckdb/transaction/duck_transaction_manager.hpp"
 #include "duckdb/transaction/duck_transaction.hpp"
+#include "duckdb/transaction/meta_transaction.hpp"
 #include "duckdb/transaction/local_storage.hpp"
 #include "duckdb/parser/parser.hpp"
 #include "duckdb/parser/parsed_expression_iterator.hpp"
@@ -2076,7 +2077,7 @@ static string PragmaGit4DataCreateBranch(ClientContext &context, const FunctionP
 	}
 	// uncommitted until this transaction commits, like the snapshot above
 	transaction_manager.MarkReferenceUncommitted(
-	    "branch", name, context.GetConnectionId(),
+	    "branch", name, &MetaTransaction::Get(context),
 	    DuckTransaction::Get(context, transaction_manager.GetDB()).GetTransactionId());
 	// the branch is a row now, like a snapshot: it goes to the log with the statement this returns
 	auto escape = [](const string &value) {
@@ -2250,7 +2251,7 @@ static string PragmaGit4DataCreateSnapshot(ClientContext &context, const Functio
 	// makes it this transaction's alone is that the row is in no committed state yet. The marker is dropped
 	// when its transaction ends, so nothing has to clear it on the way out.
 	transaction_manager.MarkReferenceUncommitted(
-	    "snapshot", name, context.GetConnectionId(),
+	    "snapshot", name, &MetaTransaction::Get(context),
 	    DuckTransaction::Get(context, transaction_manager.GetDB()).GetTransactionId());
 	// The reference is a row in the registry tables from here on: it is written with ordinary DML, in the
 	// caller's transaction, so it reaches the log like any other change and the next open brings it back.

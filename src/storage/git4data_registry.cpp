@@ -18,6 +18,7 @@
 #include "duckdb/storage/table/row_group_collection.hpp"
 #include "duckdb/storage/table/scan_state.hpp"
 #include "duckdb/transaction/duck_transaction_manager.hpp"
+#include "duckdb/transaction/meta_transaction.hpp"
 #include "duckdb/transaction/transaction_data.hpp"
 
 namespace duckdb {
@@ -58,11 +59,29 @@ void Git4DataReconcileIfNeeded(ClientContext &context) {
 	}
 }
 
-bool Git4DataReferenceVisible(ClientContext &context, const string &kind, const string &name) {
-	auto &transaction_manager = Git4DataTransactionManager(context);
-	auto &transaction = DuckTransaction::Get(context, transaction_manager.GetDB());
-	return !transaction_manager.ReferenceUncommittedByOther(kind, name, context.GetConnectionId(),
-	                                                        transaction.GetTransactionId());
+bool Git4DataReferenceVisible(ClientContext &context, const string &, const string &) {
+	// **Withdrawn in increment 3cv: this always answers true, and the check it used to make is gone.**
+	//
+	// Increment 3cr made a reference a transaction has added and not committed invisible to every other
+	// connection, so that the registries agreed with the row the tables did not hold yet. That is the right
+	// rule and it cannot be implemented here: which connection is asking is not observable at the point where
+	// the question has to be answered, because the pragma that *makes* a reference runs before the statement it
+	// belongs to and in a different client context. Measured, three identities, each of which differs between
+	// the pragma and the very next statement of the same connection: the connection id, the `ClientData`, and
+	// the connection's `MetaTransaction` (and its `DuckTransaction` is the read-only system transaction, whose
+	// id is in the local id space rather than the commit space). Without that identity the check hides a
+	// reference from *everyone*, including the connection that has just made it and is inside the transaction
+	// that will commit it - measured, `BEGIN; git4data_create_snapshot('s'); SELECT ... AT (SNAPSHOT => 's')`
+	// was refused on the connection that made it, until some unrelated rebuild happened to drop the marker, at
+	// which point the reference became visible to everyone again.
+	//
+	// So the feature does not claim reference-level isolation inside a transaction, and the note says so where
+	// it used to claim it. What survives from the same work is identity-free and fixes real bugs: a reference a
+	// *finished* transaction added is dropped by the next rebuild (3cs, 3ct), which is what closed the window a
+	// rolled-back reference stayed visible for. The call sites are left in place: they are where the check would
+	// go, and the day the caller's identity is observable they are the change.
+	(void)context;
+	return true;
 }
 
 //===----------------------------------------------------------------------===//

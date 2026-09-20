@@ -571,10 +571,10 @@ static string Git4DataUncommittedKey(const string &kind, const string &name) {
 }
 
 void DuckTransactionManager::MarkReferenceUncommitted(const string &kind, const string &name,
-                                                      connection_t owner_connection, transaction_t owner_transaction) {
+                                                      const void *owner_client, transaction_t owner_transaction) {
 	lock_guard<mutex> guard(uncommitted_reference_lock);
 	uncommitted_references[Git4DataUncommittedKey(kind, name)] =
-	    Git4DataUncommittedReference {owner_connection, owner_transaction};
+	    Git4DataUncommittedReference {owner_client, owner_transaction};
 }
 
 bool DuckTransactionManager::ReferenceAddedByFinishedTransaction(const string &kind, const string &name) {
@@ -595,7 +595,7 @@ bool DuckTransactionManager::ReferenceAddedByFinishedTransaction(const string &k
 	}
 	lock_guard<mutex> guard(uncommitted_reference_lock);
 	auto entry = uncommitted_references.find(key);
-	if (entry != uncommitted_references.end() && entry->second.connection == owner.connection &&
+	if (entry != uncommitted_references.end() && entry->second.client == owner.client &&
 	    entry->second.transaction == owner.transaction) {
 		uncommitted_references.erase(entry);
 	}
@@ -643,7 +643,7 @@ bool DuckTransactionManager::ReferenceIsBeingAdded(const string &kind, const str
 	// over: committed, rolled back, or gone with its connection, so nothing is being added under this name
 	lock_guard<mutex> guard(uncommitted_reference_lock);
 	auto entry = uncommitted_references.find(key);
-	if (entry != uncommitted_references.end() && entry->second.connection == owner.connection &&
+	if (entry != uncommitted_references.end() && entry->second.client == owner.client &&
 	    entry->second.transaction == owner.transaction) {
 		uncommitted_references.erase(entry);
 	}
@@ -664,14 +664,13 @@ bool DuckTransactionManager::TransactionIsActive(transaction_t id) {
 }
 
 bool DuckTransactionManager::ReferenceUncommittedByOther(const string &kind, const string &name,
-                                                         connection_t viewer_connection,
-                                                         transaction_t viewer_transaction) {
+                                                         const void *viewer_client, transaction_t viewer_transaction) {
 	auto key = Git4DataUncommittedKey(kind, name);
 	Git4DataUncommittedReference owner;
 	{
 		lock_guard<mutex> guard(uncommitted_reference_lock);
 		auto entry = uncommitted_references.find(key);
-		if (entry == uncommitted_references.end() || entry->second.connection == viewer_connection) {
+		if (entry == uncommitted_references.end() || entry->second.client == viewer_client) {
 			// nothing was marked, or the caller is the connection that made it: its own uncommitted work
 			return false;
 		}
@@ -684,7 +683,7 @@ bool DuckTransactionManager::ReferenceUncommittedByOther(const string &kind, con
 	// marker is stale and the reference is everyone's again
 	lock_guard<mutex> guard(uncommitted_reference_lock);
 	auto entry = uncommitted_references.find(key);
-	if (entry != uncommitted_references.end() && entry->second.connection == owner.connection &&
+	if (entry != uncommitted_references.end() && entry->second.client == owner.client &&
 	    entry->second.transaction == owner.transaction) {
 		uncommitted_references.erase(entry);
 	}

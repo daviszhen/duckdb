@@ -332,12 +332,12 @@ public:
 	//! reference that is not there yet. Measured before it: a snapshot created inside one connection's
 	//! transaction was listed by another connection and read through it, while the registry table itself
 	//! correctly showed nothing.
-	void MarkReferenceUncommitted(const string &kind, const string &name, connection_t owner_connection,
+	void MarkReferenceUncommitted(const string &kind, const string &name, const void *owner_client,
 	                              transaction_t owner_transaction);
 	//! Whether this reference is one *another* transaction added and has not committed. A marker whose
 	//! transaction is no longer active is stale - it committed, rolled back, or its connection ended - and is
 	//! dropped here rather than left to hide the reference for the rest of the session.
-	bool ReferenceUncommittedByOther(const string &kind, const string &name, connection_t viewer_connection,
+	bool ReferenceUncommittedByOther(const string &kind, const string &name, const void *viewer_client,
 	                                 transaction_t viewer_transaction);
 	//! Drop the caller references memory holds that no running transaction is adding. Only for a rebuild in a
 	//! database whose registry tables are *not* there: a committed reference is a row, so such a database has
@@ -531,12 +531,18 @@ private:
 	atomic<idx_t> active_checkpoint;
 	//! Source of checkpoint identities
 	atomic<idx_t> next_checkpoint_id = {0};
-	//! Who added a reference that is not committed yet: the connection, so that connection sees its own work
-	//! whatever transaction its next statement runs in, and the transaction, which is what says whether the
-	//! marker still means anything - a transaction that is over has committed, rolled back or died with its
+	//! Who added a reference that is not committed yet: the client that added it, so that client sees its own
+	//! work whatever transaction its next statement runs in, and the transaction, which is what says whether
+	//! the marker still means anything - a transaction that is over has committed, rolled back or died with its
 	//! connection, and then the reference is everyone's.
+	//!
+	//! The identity is the `ClientData` the connection's added-records list hangs off, not its connection id:
+	//! measured, a reference made by a statement of one connection carried a *different* connection id from the
+	//! one its own next statement reported, so a connection's own listing hid what its transaction had just
+	//! made. The `ClientData` is the object both statements share, which is the same reason the rollback
+	//! reconcile can use its list.
 	struct Git4DataUncommittedReference {
-		connection_t connection;
+		const void *client;
 		transaction_t transaction;
 	};
 	//! The references a transaction has added and not committed, as "<kind>\t<name>". It guards nothing else:
