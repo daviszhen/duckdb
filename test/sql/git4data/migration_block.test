@@ -82,9 +82,21 @@ SELECT (SELECT count(*) FROM git4data.branches WHERE name = 'b'),
 1	1	1	1
 
 # A reopen reads the tables and no longer the block, which is where a migration that covered only the
-# snapshots lost every branch: the file is detached - which checkpoints it - and attached again.
+# snapshots lost every branch: the runner restarts - which closes and checkpoints every database, this fixture
+# included - and the fixture is attached again, so the file is opened fresh.
+#
+# The reopen used to be `USE memory`, `DETACH old`, `ATTACH ...`: the fixture has to be the *default* database
+# for the pragmas below (a pragma acts on the database it is called in), and detaching the default one is
+# refused, so the test had to switch away from it first - and `USE memory` names the *runner's* database by its
+# catalog, which is only `memory` when the runner opened one in memory. Measured, under the repository's own
+# `force_storage` and `storage_compatibility` configs (which hand the runner a *file*) that line fails with
+# `Catalog Error: SET schema: No catalog + schema named "memory" found`. The database switched to is one this
+# test names itself, so the runner's name for its own never has to be known.
 statement ok
-USE memory
+ATTACH '{TEST_DIR}/migration_scratch.db' AS scratch
+
+statement ok
+USE scratch
 
 statement ok
 DETACH old
