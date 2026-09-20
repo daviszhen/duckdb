@@ -64,6 +64,12 @@ void Git4DataCheckRegistrySchema(const string &schema);
 //! table and every reference with it, and `CREATE TABLE git4data.mine (...)` put a caller's table in the
 //! feature's own schema - neither goes through the guard the write, drop and alter statements have.
 void Git4DataCheckRegistryCreate(const string &schema, const string &table);
+//! Rebuild the registries if a rollback has happened since the last rebuild, whichever connection made it.
+//! The registries are shared, so a rollback anywhere can have taken a record away that memory still holds:
+//! consuming the flag on the transaction manager - not only the one on the calling client - is what keeps a
+//! rolled-back reference from being readable by another connection until the rolling-back one asks again.
+void Git4DataReconcileIfNeeded(ClientContext &context);
+
 //! Whether a caller may use a reference of this kind under this name. A reference is a row in the registry
 //! tables, so one another transaction has added and has not committed is not there yet - the tables say so
 //! themselves, and this is what keeps the in-memory registries from disagreeing with them. Measured before it:

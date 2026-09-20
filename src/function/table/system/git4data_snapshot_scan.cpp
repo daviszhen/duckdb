@@ -1029,12 +1029,8 @@ unique_ptr<FunctionData> Git4DataSnapshotScanFun::CreateBindData(ClientContext &
 	auto &db_manager = DatabaseManager::Get(context);
 	auto attached = db_manager.GetDatabase(context, DatabaseManager::GetDefaultDatabase(context));
 	auto &transaction_manager = DuckTransactionManager::Get(*attached);
-	if (context.client_data->git4data_registry_reload_needed) {
-		context.client_data->git4data_registry_reload_needed = false;
-		// a rollback may have removed a reference this read is about to resolve
-		Git4DataReconcileRegistry(*attached, context.client_data->git4data_added_records);
-		context.client_data->git4data_added_records.clear();
-	}
+	// a rollback may have removed a reference this read is about to resolve, whoever made it
+	Git4DataReconcileIfNeeded(context);
 	Git4DataReadPlan plan;
 	ResolveGit4DataRead(context, transaction_manager, table_name, reference_name, kind, plan);
 	result->table_name = plan.table_name;
@@ -1590,12 +1586,8 @@ unique_ptr<FunctionData> Git4DataDiffFun::CreateBindData(ClientContext &context,
 	auto &db_manager = DatabaseManager::Get(context);
 	auto attached = db_manager.GetDatabase(context, DatabaseManager::GetDefaultDatabase(context));
 	auto &transaction_manager = DuckTransactionManager::Get(*attached);
-	if (context.client_data->git4data_registry_reload_needed) {
-		context.client_data->git4data_registry_reload_needed = false;
-		// a rollback may have removed a reference this read is about to resolve
-		Git4DataReconcileRegistry(*attached, context.client_data->git4data_added_records);
-		context.client_data->git4data_added_records.clear();
-	}
+	// a rollback may have removed a reference this read is about to resolve, whoever made it
+	Git4DataReconcileIfNeeded(context);
 	auto left_plan = ResolveGit4DataReferencePlan(context, transaction_manager, table_name, left_name);
 	auto right_plan = ResolveGit4DataReferencePlan(context, transaction_manager, table_name, right_name);
 	result->left_table = left_plan.table_name;
@@ -1629,6 +1621,8 @@ unique_ptr<FunctionData> Git4DataDiffFun::CreateBindData(ClientContext &context,
 
 static unique_ptr<FunctionData> Git4DataDiffBind(ClientContext &context, TableFunctionBindInput &input,
                                                  vector<LogicalType> &return_types, vector<Identifier> &names) {
+	// the two names this resolves are references, so a rollback anywhere has to be reconciled first
+	Git4DataReconcileIfNeeded(context);
 	auto result =
 	    Git4DataDiffFun::CreateBindData(context, input.inputs[0].GetValue<string>(), input.inputs[1].GetValue<string>(),
 	                                    input.inputs[2].GetValue<string>());
@@ -2469,12 +2463,9 @@ void Git4DataSnapshotScanFun::RegisterFunction(BuiltinFunctions &set) {
 static DuckTransactionManager &GetGit4DataTransactionManagerForListing(ClientContext &context) {
 	auto &db_manager = DatabaseManager::Get(context);
 	auto attached = db_manager.GetDatabase(context, DatabaseManager::GetDefaultDatabase(context));
-	if (context.client_data->git4data_registry_reload_needed) {
-		context.client_data->git4data_registry_reload_needed = false;
-		// a rollback may have removed a reference this listing is about to read
-		Git4DataReconcileRegistry(*attached, context.client_data->git4data_added_records);
-		context.client_data->git4data_added_records.clear();
-	}
+	// a rollback may have removed a reference this listing is about to read, and it may have been another
+	// connection's - the registries are shared, so the flag that says so is on the transaction manager too
+	Git4DataReconcileIfNeeded(context);
 	return DuckTransactionManager::Get(*attached);
 }
 

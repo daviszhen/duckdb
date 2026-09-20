@@ -32,6 +32,32 @@ static DuckTransactionManager &Git4DataTransactionManager(ClientContext &context
 	return DuckTransactionManager::Get(*attached);
 }
 
+void Git4DataReconcileIfNeeded(ClientContext &context) {
+	auto &transaction_manager = Git4DataTransactionManager(context);
+	auto connection_flag = context.client_data->git4data_registry_reload_needed;
+	auto shared_flag = transaction_manager.ConsumeRegistryReloadNeeded();
+	if (!connection_flag && !shared_flag) {
+		return;
+	}
+	context.client_data->git4data_registry_reload_needed = false;
+	// What this connection added is dropped from memory and whatever the tables hold is put back - a reconcile
+	// rather than a clear-and-reload, which would take another connection's uncommitted records with it
+	// (measured, with two connections).
+	//
+	// The `added` list is *this* connection's, so it is passed only when the rollback was this connection's:
+	// it says what its own rollback took back, and none of those records is in a table. A rebuild asked for by
+	// **another** connection's rollback must not drop records this one has not committed - they are in no table
+	// yet either, which is exactly what the markers are for. Measured with the list passed either way: passing
+	// it dropped the caller's own uncommitted snapshot out of memory, so its next read of a reference it had
+	// just made was refused.
+	static const vector<string> no_records;
+	Git4DataReconcileRegistry(transaction_manager.GetDB(),
+	                          connection_flag ? context.client_data->git4data_added_records : no_records);
+	if (connection_flag) {
+		context.client_data->git4data_added_records.clear();
+	}
+}
+
 bool Git4DataReferenceVisible(ClientContext &context, const string &kind, const string &name) {
 	auto &transaction_manager = Git4DataTransactionManager(context);
 	auto &transaction = DuckTransaction::Get(context, transaction_manager.GetDB());
@@ -230,6 +256,15 @@ void Git4DataReconcileRegistry(AttachedDatabase &db, const vector<string> &added
 		}
 		Git4DataSnapshot existing;
 		if (!transaction_manager.snapshots.Get(snapshot.name, existing)) {
+			// When the tables are there they are the truth, and a record they do not hold is one a rollback
+			// took back - put back only while some transaction is *still adding* it, which is what makes it
+			// another connection's uncommitted work instead of a reference that never committed. Measured
+			// before this: a rolled-back reference stayed in the shared registry until the rolling-back
+			// connection next used the feature, and another connection listed it and read through it until
+			// then (increment 3cr measured the window, this closes it).
+			if (tables_have_snapshots && !transaction_manager.ReferenceIsBeingAdded("snapshot", snapshot.name)) {
+				continue;
+			}
 			transaction_manager.snapshots.Create(snapshot.name, snapshot.pin, snapshot.created, snapshot.line);
 		}
 	}
@@ -239,6 +274,10 @@ void Git4DataReconcileRegistry(AttachedDatabase &db, const vector<string> &added
 		}
 		Git4DataBranch existing;
 		if (!transaction_manager.branches.Get(branch.name, existing)) {
+			// the same rule as the snapshots above, and the branch's mappings go with it
+			if (tables_have_snapshots && !transaction_manager.ReferenceIsBeingAdded("branch", branch.name)) {
+				continue;
+			}
 			transaction_manager.branches.Restore(branch.name, branch.pin, branch.parent, branch.created,
 			                                     branch.base_line);
 		}

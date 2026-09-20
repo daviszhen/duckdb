@@ -577,6 +577,30 @@ void DuckTransactionManager::MarkReferenceUncommitted(const string &kind, const 
 	    Git4DataUncommittedReference {owner_connection, owner_transaction};
 }
 
+bool DuckTransactionManager::ReferenceIsBeingAdded(const string &kind, const string &name) {
+	auto key = Git4DataUncommittedKey(kind, name);
+	Git4DataUncommittedReference owner;
+	{
+		lock_guard<mutex> guard(uncommitted_reference_lock);
+		auto entry = uncommitted_references.find(key);
+		if (entry == uncommitted_references.end()) {
+			return false;
+		}
+		owner = entry->second;
+	}
+	if (TransactionIsActive(owner.transaction)) {
+		return true;
+	}
+	// over: committed, rolled back, or gone with its connection, so nothing is being added under this name
+	lock_guard<mutex> guard(uncommitted_reference_lock);
+	auto entry = uncommitted_references.find(key);
+	if (entry != uncommitted_references.end() && entry->second.connection == owner.connection &&
+	    entry->second.transaction == owner.transaction) {
+		uncommitted_references.erase(entry);
+	}
+	return false;
+}
+
 bool DuckTransactionManager::TransactionIsActive(transaction_t id) {
 	if (id == MAX_TRANSACTION_ID) {
 		return false;

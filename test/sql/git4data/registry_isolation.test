@@ -144,21 +144,33 @@ SELECT count(*) FROM git4data_snapshots() WHERE snapshot_name = 'gone'
 statement ok con1
 ROLLBACK
 
-# The connection that rolled back puts its own view back the next time it uses the feature, and the row it
-# rolled back goes from memory then - which is what makes the record nobody's. That is the sequencing this
-# asserts, and the gap left is recorded in the design note rather than hidden: until the rolling-back
-# connection touches the feature again, the record it rolled back is still in the shared registry, so another
-# connection can list it in that window.
+# A rolled-back reference is gone for everyone at once, and there is no window: the tables are the truth, so a
+# record they do not hold is not put back by a rebuild unless some transaction is *still adding* it. Before
+# increment 3cs this window lasted until the rolling-back connection next used the feature - measured, another
+# connection listed the name and read through it in the meantime (3cr records the measurement) - because the
+# rebuild put every in-memory record back.
+query III con2
+SELECT (SELECT count(*) FROM git4data_snapshots() WHERE snapshot_name = 'gone'),
+       (SELECT count(*) FROM git4data.snapshots WHERE name = 'gone'),
+       (SELECT count(*) FROM git4data_branches() WHERE branch_name = 'gone')
+----
+0	0	0
+
+statement error con2
+SELECT count(*) FROM t AT (SNAPSHOT => 'gone')
+----
+<REGEX>:.*Snapshot "gone" does not exist.*
+
+# and the rolling-back connection sees the same, whether or not it has touched the feature since
+query I con1
+SELECT count(*) FROM git4data_snapshots() WHERE snapshot_name = 'gone'
+----
+0
+
 statement ok con1
 PRAGMA git4data_snapshots
 
-query II con1
-SELECT (SELECT count(*) FROM git4data_snapshots() WHERE snapshot_name = 'gone'),
-       (SELECT count(*) FROM git4data.snapshots WHERE name = 'gone')
-----
-0	0
-
-query I con2
+query I con1
 SELECT count(*) FROM git4data_snapshots() WHERE snapshot_name = 'gone'
 ----
 0

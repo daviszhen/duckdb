@@ -160,14 +160,10 @@ static DuckTransactionManager &GetGit4DataTransactionManager(ClientContext &cont
 		throw InvalidInputException("Git4Data snapshots require an attached database");
 	}
 	auto &transaction_manager = DuckTransactionManager::Get(*attached);
-	if (context.client_data->git4data_registry_reload_needed) {
-		context.client_data->git4data_registry_reload_needed = false;
-		// a rollback took this connection's rows out of the registry tables. What it added is dropped from
-		// memory and whatever the tables hold is put back - not a clear-and-reload, which would take another
-		// connection's uncommitted records with it (measured, with two connections).
-		Git4DataReconcileRegistry(*attached, context.client_data->git4data_added_records);
-		context.client_data->git4data_added_records.clear();
-	}
+	// A rollback took rows out of the registry tables and memory still holds them. It may have been another
+	// connection's rollback - the registries are shared - so the flag that asks for a rebuild is consumed on
+	// the transaction manager as well as on this client, and every pragma comes through here.
+	Git4DataReconcileIfNeeded(context);
 	return transaction_manager;
 }
 

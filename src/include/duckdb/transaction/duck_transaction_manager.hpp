@@ -339,6 +339,11 @@ public:
 	//! dropped here rather than left to hide the reference for the rest of the session.
 	bool ReferenceUncommittedByOther(const string &kind, const string &name, connection_t viewer_connection,
 	                                 transaction_t viewer_transaction);
+	//! Whether some running transaction has added this reference and not committed it. A marker whose
+	//! transaction is over says nothing about a reference being added *now*, so it is dropped here and the
+	//! answer is false - which is what lets a rebuild tell another connection's uncommitted work apart from a
+	//! reference a rollback took back.
+	bool ReferenceIsBeingAdded(const string &kind, const string &name);
 	//! Whether this manager is still running that transaction
 	bool TransactionIsActive(transaction_t id);
 	//! Whether no transaction that started before the last commit is still active. Such a transaction
