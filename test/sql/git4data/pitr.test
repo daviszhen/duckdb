@@ -28,6 +28,18 @@ SELECT count(*) FROM t AT (SNAPSHOT => '__pitr__')
 ----
 100
 
+# The argument is a length of time, and a negative one is refused rather than read as a window that reaches
+# forward: the check comes first, so the window the database already has is the one it keeps.
+statement error
+PRAGMA git4data_pitr(-1)
+----
+<REGEX>:.*cannot be negative.*
+
+query III
+PRAGMA git4data_pitr_state
+----
+true	3650	true
+
 statement ok
 INSERT INTO t SELECT 100 + range, range FROM range(100)
 

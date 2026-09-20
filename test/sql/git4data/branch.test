@@ -43,7 +43,7 @@ a
 statement error
 PRAGMA git4data_create_branch('a', 'root')
 ----
-<REGEX>:.*already exists.*
+<REGEX>:.*Branch "a" already exists.*
 
 statement error
 PRAGMA git4data_create_branch('c', 'missing')

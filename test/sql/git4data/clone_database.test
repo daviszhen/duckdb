@@ -62,6 +62,17 @@ PRAGMA git4data_clone_database('')
 ----
 <REGEX>:.*A clone needs a path to write to.*
 
+# A clone that cannot be written is reported rather than reported as done: the target's directory does not
+# exist, so the file system's own clone call fails. What is asserted is that the failure is raised and that
+# it names the target - **not** the errno text, which is the platform's, and not which call failed: the copy
+# is one `clonefile` call on macOS and an `open`/`FICLONE` pair on Linux, so all three of the message's
+# spellings are accepted here. Only the macOS branch has been measured (at this head), which is why the
+# other two are named in the pattern rather than assumed to be unreachable.
+statement error
+PRAGMA git4data_clone_database('{TEST_DIR}/clone_no_such_dir_xyz/out.db')
+----
+<REGEX>:.*Could not (clone|create|open) ".*clone_no_such_dir_xyz/out\.db.*
+
 # A clone is the file, and the reference registry is written to the file at a checkpoint rather than through
 # the log, so a clone taken with references made since the last checkpoint would have the tables and none of
 # the references. Measured: the clone reported "Branch \"b\" does not exist", and the same clone taken after

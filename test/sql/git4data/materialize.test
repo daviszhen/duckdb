@@ -110,3 +110,12 @@ query I
 SELECT count(*) FROM t
 ----
 137
+
+# Materializing writes the table it is handed, so a name that is already taken is refused rather than
+# promised - and the sentence names the table the caller wrote, before the statements the pragma would run
+# reach the engine. (The source table's own name is refused by the same check, which is what keeps
+# `materialize('t', 'b', 't')` from giving the branch the live table as its line.)
+statement error
+PRAGMA git4data_materialize('t', 'feature', 't_feature')
+----
+<REGEX>:.*Table "t_feature" already exists.*
