@@ -68,3 +68,51 @@ SELECT (SELECT v FROM t WHERE k = 1), (SELECT count(*) FROM t WHERE k = 3),
        (SELECT count(*) FROM t AT (SNAPSHOT => 'base'))
 ----
 1	1	10
+
+# The clause carries a unit, and the feature answers two of them: SNAPSHOT and BRANCH. DuckDB parses two
+# more - VERSION and TIMESTAMP, which a time-travelling catalog would read - and those are not taken as a
+# reference named after their value: the clause is passed on to the catalog as written, which refuses it. A
+# read of "AT (VERSION => 1)" is therefore an error and not a read of a reference called "1".
+statement error
+SELECT count(*) FROM t AT (VERSION => 1)
+----
+<REGEX>:.*does not support time travel.*
+
+statement error
+SELECT count(*) FROM t AT (TIMESTAMP => '2024-01-01'::TIMESTAMP)
+----
+<REGEX>:.*does not support time travel.*
+
+# The unit picks the registry, so a name that is a branch is not a snapshot: the two are separate lookups,
+# and each says which one came up empty. (`branch.test` asserts the other direction - a snapshot name asked
+# for as a branch.)
+statement error
+SELECT count(*) FROM t AT (SNAPSHOT => 'b')
+----
+<REGEX>:.*Snapshot "b" does not exist.*
+
+# The name is the *value* of the clause, not the text of the statement: a constant expression is evaluated
+# and what it evaluates to is the reference asked for
+query I
+SELECT count(*) FROM t AT (SNAPSHOT => concat('ba', 'se'))
+----
+10
+
+# A value that is not a string is still a name and nothing else - it is not a read of the live table, and
+# not a crash: NULL is in the same position, since "no reference named NULL" is a name that is not there
+statement error
+SELECT count(*) FROM t AT (SNAPSHOT => 42)
+----
+<REGEX>:.*Snapshot "42" does not exist.*
+
+statement error
+SELECT count(*) FROM t AT (SNAPSHOT => NULL)
+----
+<REGEX>:.*Snapshot "NULL" does not exist.*
+
+# the value side is bound as a constant before it becomes a name, so an expression that is not one is
+# refused rather than silently naming something
+statement error
+SELECT count(*) FROM t AT (SNAPSHOT => k)
+----
+<REGEX>:.*AT clause cannot contain column names.*
