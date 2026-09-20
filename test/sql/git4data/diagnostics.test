@@ -31,8 +31,8 @@ PRAGMA git4data_probe('t')
 1100	0	5099
 
 # The probe against a bound is the same measurement taken at that commit rather than at the current
-# retention bound. Its argument is a commit id and a pragma's output cannot be read from, so the test
-# asserts that it runs rather than pinning a value the timeline decides.
+# retention bound. Its numbers are asserted in `probes.test`, against a database built for it; here it is run
+# through the pragma to show both surfaces answer the same thing.
 statement ok
 PRAGMA git4data_probe_at('t', 6)
 
@@ -49,9 +49,23 @@ PRAGMA git4data_probe_all('t')
 ----
 1100	0	5099
 
-# state reports the timeline, so it is asserted as running and not as values
-statement ok
-PRAGMA git4data_state
+# `git4data_state` reports the timeline. It used to be asserted as *running* rather than as values, because a
+# pragma's output could not be read from - the rows are a table function now, so the values are asserted, and
+# as *relations* rather than as numbers: the commit ids are the timeline's and belong to the run, and what is
+# worth pinning is what the columns mean. `pinned_commit_id` is the snapshot's pin, `retention_bound_value` is
+# that pin plus one (a pin is inclusive, the bound is exclusive), `history_retained` says the reference is still
+# holding its history, and the commit counter the file keeps has moved past the last commit.
+query IIIIII
+SELECT (SELECT pinned_commit_id = (SELECT pin FROM git4data.snapshots WHERE name = 'pin')
+        FROM git4data_state()),
+       (SELECT pinned_commit_id = (SELECT pinned_commit_id FROM git4data_snapshots()
+                                    WHERE snapshot_name = 'pin') FROM git4data_state()),
+       (SELECT retention_bound_value = pinned_commit_id + 1 FROM git4data_state()),
+       (SELECT history_retained FROM git4data_state()),
+       (SELECT last_commit_id >= pinned_commit_id FROM git4data_state()),
+       (SELECT start_timestamp_counter > last_commit_id FROM git4data_state())
+----
+1	1	1	1	1	1
 
 statement ok
 CHECKPOINT
@@ -60,3 +74,26 @@ query III
 PRAGMA git4data_probe('t')
 ----
 1100	0	5099
+
+# with nothing pinned the state says so: no pin is left, which reads as a pin past anything the timeline will
+# hand out, and the history is no longer retained by a reference
+statement ok
+PRAGMA git4data_drop_snapshot('pin')
+
+query IIII
+SELECT (SELECT pinned_commit_id > last_commit_id FROM git4data_state()),
+       (SELECT history_retained FROM git4data_state()),
+       (SELECT count(*) FROM git4data.snapshots),
+       (SELECT count(*) FROM git4data_snapshots() WHERE snapshot_name = 'pin')
+----
+1	0	0	0
+
+statement ok
+PRAGMA git4data_create_snapshot('pin2')
+
+# and a reference taken again holds its history again
+query II
+SELECT (SELECT history_retained FROM git4data_state()),
+       (SELECT pinned_commit_id = (SELECT pin FROM git4data.snapshots WHERE name = 'pin2') FROM git4data_state())
+----
+1	1
