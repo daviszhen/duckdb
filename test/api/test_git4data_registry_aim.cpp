@@ -63,8 +63,7 @@ TEST_CASE("git4data: a mapping aimed at a registry table cannot drop it with the
 		// what happens without it is the whole point - the drop goes through and takes the registry table
 		auto refused = con.Query("PRAGMA git4data_drop_branch('b')");
 		CHECK(refused->HasError());
-		CHECK(StringUtil::Contains(refused->GetError(),
-		                           "is one of the tables the reference registry is kept in"));
+		CHECK(StringUtil::Contains(refused->GetError(), "is one of the tables the reference registry is kept in"));
 
 		// and nothing was lost: the registry table is there, the reference is there, and the branch is still the
 		// branch it was - which the row below says, since that is what a reopen reads back

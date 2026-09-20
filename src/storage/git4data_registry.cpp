@@ -133,8 +133,8 @@ string Git4DataEnsureRegistryTables(ClientContext &context) {
 	for (auto &branch : migrating.branches.List()) {
 		result +=
 		    StringUtil::Format("INSERT INTO %s.%s VALUES ('%s', %llu, '%s', TIMESTAMP '%s', '%s');\n",
-			                   GIT4DATA_REGISTRY_SCHEMA, GIT4DATA_BRANCHES_TABLE, escape(branch.name), branch.pin,
-			                   escape(branch.parent), Timestamp::ToString(branch.created), escape(branch.base_line));
+		                       GIT4DATA_REGISTRY_SCHEMA, GIT4DATA_BRANCHES_TABLE, escape(branch.name), branch.pin,
+		                       escape(branch.parent), Timestamp::ToString(branch.created), escape(branch.base_line));
 		for (auto &storage : branch.storage_tables) {
 			result += StringUtil::Format("INSERT INTO %s.%s VALUES ('%s', '%s', '%s', %s);\n", GIT4DATA_REGISTRY_SCHEMA,
 			                             GIT4DATA_STORAGE_TABLE, escape(branch.name), escape(storage.source),
@@ -425,7 +425,7 @@ void Git4DataLoadRegistry(AttachedDatabase &db, bool keep_internal_from_memory) 
 			    // registry here would compare against nothing.
 			    if (name == DuckTransactionManager::PITR_REFERENCE && has_kept_pitr && kept_pitr.pin >= pin) {
 				    transaction_manager.snapshots.Create(kept_pitr.name, kept_pitr.pin, kept_pitr.created,
-					                                     kept_pitr.line);
+				                                         kept_pitr.line);
 				    return;
 			    }
 			    transaction_manager.snapshots.Drop(name);

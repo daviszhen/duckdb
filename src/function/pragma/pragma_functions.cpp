@@ -1178,10 +1178,9 @@ static void Git4DataCheckApplyTargetTable(ClientContext &context, const Qualifie
 	    "git4data_apply was given \"%s\", but the statement writes \"%s\", which is %s: the write would be "
 	    "recorded in the delta of \"%s\". Write the table the branch's delta is for.",
 	    table_name, written_name.ToString(),
-	    by_name ? (same_name
-	                   ? "a different table of that name, in schema \"" +
-	                         by_name->ParentSchema().name.GetIdentifierName() + "\""
-	                   : "a different table")
+	    by_name ? (same_name ? "a different table of that name, in schema \"" +
+	                               by_name->ParentSchema().name.GetIdentifierName() + "\""
+	                         : "a different table")
 	            : "not a table",
 	    table_name);
 }
@@ -1612,8 +1611,7 @@ static string PragmaGit4DataMerge(ClientContext &context, const FunctionParamete
 	auto &transaction_manager = GetGit4DataTransactionManager(context);
 
 	Git4DataBranch left;
-	if (!Git4DataReferenceVisible(context, "branch", left_name) ||
-	    !transaction_manager.branches.Get(left_name, left)) {
+	if (!Git4DataReferenceVisible(context, "branch", left_name) || !transaction_manager.branches.Get(left_name, left)) {
 		throw InvalidInputException("Branch \"%s\" does not exist", left_name);
 	}
 	Git4DataBranch right;
@@ -1928,13 +1926,12 @@ static string PragmaGit4DataMerge(ClientContext &context, const FunctionParamete
 	// first, not only the ones it removed or changed.
 	auto changed_filter = policy == "accept" ? "'added', 'removed', 'changed'" : "'removed', 'changed'";
 	auto dropped_keys = StringUtil::Format("SELECT %s FROM %s WHERE g4d_change IN (%s)%s", key_list, diff_right,
-	                                        changed_filter, conflict_filter);
+	                                       changed_filter, conflict_filter);
 	auto added_keys = StringUtil::Format(
 	    "SELECT %s FROM %s WHERE (%s) IN (SELECT %s FROM %s WHERE g4d_change IN ('added', 'changed')%s) AND (%s) "
 	    "NOT IN (SELECT %s FROM %s)",
 	    key_list, right_image, key_list, key_list, diff_right, conflict_filter, key_list, key_list, read_target);
-	auto added_rows =
-	    StringUtil::Format("SELECT * FROM %s WHERE (%s) IN (%s)", right_image, key_list, added_keys);
+	auto added_rows = StringUtil::Format("SELECT * FROM %s WHERE (%s) IN (%s)", right_image, key_list, added_keys);
 	if (merge_delta) {
 		// the delta is where the change is recorded: a key the merge removes loses the branch's own override
 		// and is recorded removed, and a row it adds is recorded added and loses any removal - the two
@@ -2138,8 +2135,7 @@ static string PragmaGit4DataDropBranch(ClientContext &context, const FunctionPar
 	auto name = parameters.values[0].ToString();
 	auto &transaction_manager = GetGit4DataTransactionManager(context);
 	Git4DataBranch existing;
-	if (!Git4DataReferenceVisible(context, "branch", name) ||
-	    !transaction_manager.branches.Get(name, existing)) {
+	if (!Git4DataReferenceVisible(context, "branch", name) || !transaction_manager.branches.Get(name, existing)) {
 		throw InvalidInputException("Branch \"%s\" does not exist", name);
 	}
 	if (transaction_manager.branches.HasChildren(name)) {
@@ -2243,12 +2239,10 @@ static string PragmaGit4DataLCA(ClientContext &context, const FunctionParameters
 	auto right = parameters.values[1].ToString();
 	auto &transaction_manager = GetGit4DataTransactionManager(context);
 	Git4DataBranch existing;
-	if (!Git4DataReferenceVisible(context, "branch", left) ||
-	    !transaction_manager.branches.Get(left, existing)) {
+	if (!Git4DataReferenceVisible(context, "branch", left) || !transaction_manager.branches.Get(left, existing)) {
 		throw InvalidInputException("Branch \"%s\" does not exist", left);
 	}
-	if (!Git4DataReferenceVisible(context, "branch", right) ||
-	    !transaction_manager.branches.Get(right, existing)) {
+	if (!Git4DataReferenceVisible(context, "branch", right) || !transaction_manager.branches.Get(right, existing)) {
 		throw InvalidInputException("Branch \"%s\" does not exist", right);
 	}
 	string lca;
@@ -2288,8 +2282,7 @@ static string PragmaGit4DataCreateSnapshot(ClientContext &context, const Functio
 	if (parameters.values.size() > 1) {
 		line = parameters.values[1].ToString();
 		Git4DataBranch branch;
-		if (!Git4DataReferenceVisible(context, "branch", line) ||
-		    !transaction_manager.branches.Get(line, branch)) {
+		if (!Git4DataReferenceVisible(context, "branch", line) || !transaction_manager.branches.Get(line, branch)) {
 			throw InvalidInputException("Branch \"%s\" does not exist", line);
 		}
 		// **A branch that inherited a line reads it, and that is a line to capture too** (increment 3bv). The
@@ -2328,7 +2321,7 @@ static string PragmaGit4DataCreateSnapshot(ClientContext &context, const Functio
 	context.client_data->git4data_added_records.push_back("snapshot\t" + name);
 	result +=
 	    StringUtil::Format("INSERT INTO %s.%s VALUES ('%s', %llu, TIMESTAMP '%s', '%s');", GIT4DATA_REGISTRY_SCHEMA,
-		                   GIT4DATA_SNAPSHOTS_TABLE, escape(name), pin, Timestamp::ToString(created), escape(line));
+	                       GIT4DATA_SNAPSHOTS_TABLE, escape(name), pin, Timestamp::ToString(created), escape(line));
 	return result;
 }
 

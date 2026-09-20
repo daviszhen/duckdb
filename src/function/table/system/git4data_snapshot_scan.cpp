@@ -665,7 +665,7 @@ void Git4DataSnapshotScanFun::CheckReferenceSource(ClientContext &context, Table
 	    key,
 	    by_key ? "\"" + by_key->name.GetIdentifierName() + "\" in schema \"" +
 	                 by_key->ParentSchema().name.GetIdentifierName() + "\""
-		       : "no table here");
+	           : "no table here");
 }
 
 //! The table backing a branch for a source table, or empty when the branch has no line of its own
@@ -954,8 +954,7 @@ static void ResolveGit4DataRead(ClientContext &context, DuckTransactionManager &
 		return;
 	}
 	Git4DataBranch branch;
-	if (!Git4DataReferenceVisible(context, "branch", name) ||
-	    !transaction_manager.branches.Get(name, branch)) {
+	if (!Git4DataReferenceVisible(context, "branch", name) || !transaction_manager.branches.Get(name, branch)) {
 		throw InvalidInputException("Branch \"%s\" does not exist", name);
 	}
 	// what the branch holds now: its base, and its own delta if it has one
@@ -1269,8 +1268,8 @@ static void Git4DataSnapshotScanFunction(ClientContext &context, TableFunctionIn
 			return;
 		}
 		SelectionVector kept(count);
-		auto kept_count = Git4DataKeepRows(context, state.removal_views, state.removal_hashes,
-		                                   state.delta_index + 1, *delta.chunk, state.key_positions, kept);
+		auto kept_count = Git4DataKeepRows(context, state.removal_views, state.removal_hashes, state.delta_index + 1,
+		                                   *delta.chunk, state.key_positions, kept);
 		if (kept_count == 0) {
 			continue;
 		}
@@ -1657,7 +1656,7 @@ static unique_ptr<FunctionData> Git4DataDiffBind(ClientContext &context, TableFu
 	Git4DataReconcileIfNeeded(context);
 	auto result =
 	    Git4DataDiffFun::CreateBindData(context, input.inputs[0].GetValue<string>(), input.inputs[1].GetValue<string>(),
-		                                input.inputs[2].GetValue<string>());
+	                                    input.inputs[2].GetValue<string>());
 	auto &bind_data = result->Cast<Git4DataDiffBindData>();
 	// The three columns below are this function's own, and the key columns follow them, carrying names
 	// that belong to the table. A key column with one of those three names would leave the result with
@@ -2312,7 +2311,7 @@ static void Git4DataDiffFunction(ClientContext &context, TableFunctionInput &dat
 							    auto &candidate = state.left_candidates[partner];
 							    candidate.matched = true;
 							    if (!Git4DataDiffSameStoredValues(state, candidate.stored, chunk, state.key_count,
-								                                  row)) {
+							                                      row)) {
 								    state.changed.push_back(Git4DataDiffState::Change {
 								        candidate.row_id, row_id,
 								        Git4DataDiffStoreChangeKey(state, context, chunk, row)});
@@ -2349,7 +2348,7 @@ static void Git4DataDiffFunction(ClientContext &context, TableFunctionInput &dat
 				}
 				state.removed.push_back(
 				    Git4DataDiffState::Change {candidate.row_id, NO_COUNTERPART,
-					                           Git4DataDiffStoreChangeKeyFromLeft(state, context, candidate.stored)});
+				                               Git4DataDiffStoreChangeKeyFromLeft(state, context, candidate.stored)});
 			}
 			state.left_candidates.clear();
 			state.left_heads.clear();
@@ -2444,7 +2443,7 @@ static void Git4DataDiffFunction(ClientContext &context, TableFunctionInput &dat
 					removed_taken[match] = true;
 					state.changed.push_back(
 					    Git4DataDiffState::Change {removed_rows[match].first, added.first,
-						                           Git4DataDiffStoreChangeKeyValues(state, context, added.second)});
+					                               Git4DataDiffStoreChangeKeyValues(state, context, added.second)});
 				}
 			}
 		} else {
@@ -3190,7 +3189,7 @@ static unique_ptr<FunctionData> Git4DataLimitsBind(ClientContext &context, Table
 	auto &transaction_manager = GetGit4DataTransactionManagerForListing(context);
 	result->rows.push_back(
 	    {Value::BIGINT(transaction_manager.snapshot_limit), Value::UBIGINT(transaction_manager.UserSnapshotCount()),
-		 Value::BIGINT(transaction_manager.branch_limit), Value::UBIGINT(transaction_manager.branches.Count())});
+	     Value::BIGINT(transaction_manager.branch_limit), Value::UBIGINT(transaction_manager.branches.Count())});
 	Git4DataRowNames(names, return_types, "snapshot_limit", LogicalType::BIGINT);
 	Git4DataRowNames(names, return_types, "snapshots", LogicalType::UBIGINT);
 	Git4DataRowNames(names, return_types, "branch_limit", LogicalType::BIGINT);
