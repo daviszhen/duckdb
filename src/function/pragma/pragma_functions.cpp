@@ -1600,7 +1600,7 @@ static string PragmaGit4DataMerge(ClientContext &context, const FunctionParamete
 			// ancestor lookup instead ("Branches ... share no ancestor to merge against"), which is a different
 			// sentence about a different problem - the read of the target never happens.
 			Git4DataCheckSourceBoundTable(context, left, merge_delta->source, merge_delta->source_oid,
-			                             merge_source.oid);
+			                              merge_source.oid);
 		}
 		if (!merge_delta) {
 			throw InvalidInputException("Branch \"%s\" has neither a table of its own nor a delta for table "
@@ -1645,8 +1645,8 @@ static string PragmaGit4DataMerge(ClientContext &context, const FunctionParamete
 			                                          Timestamp::GetCurrentTimestamp(), ancestor_branch.base_line)) {
 				throw InternalException("Could not create the internal merge base reference");
 			}
-			context.client_data->git4data_added_records.push_back(
-			    "snapshot\t" + string(DuckTransactionManager::MERGE_BASE_REFERENCE));
+			context.client_data->git4data_added_records.push_back("snapshot\t" +
+			                                                      string(DuckTransactionManager::MERGE_BASE_REFERENCE));
 			base_reference = DuckTransactionManager::MERGE_BASE_REFERENCE;
 			drop_merge_base = true;
 		};
@@ -1692,8 +1692,8 @@ static string PragmaGit4DataMerge(ClientContext &context, const FunctionParamete
 			                                          Timestamp::GetCurrentTimestamp(), ancestor)) {
 				throw InternalException("Could not create the internal merge base reference");
 			}
-			context.client_data->git4data_added_records.push_back(
-			    "snapshot\t" + string(DuckTransactionManager::MERGE_BASE_REFERENCE));
+			context.client_data->git4data_added_records.push_back("snapshot\t" +
+			                                                      string(DuckTransactionManager::MERGE_BASE_REFERENCE));
 			base_reference = DuckTransactionManager::MERGE_BASE_REFERENCE;
 			drop_merge_base = true;
 		};
@@ -1905,11 +1905,10 @@ static string PragmaGit4DataMerge(ClientContext &context, const FunctionParamete
 		auto quoted_added = Git4DataTableSQLName(delta_added);
 		auto quoted_removed = Git4DataTableSQLName(delta_removed);
 		result += StringUtil::Format("DELETE FROM %s WHERE (%s) IN (%s);\n", quoted_added, key_list, dropped_keys);
-		result +=
-		    StringUtil::Format("INSERT INTO %s (%s) SELECT %s FROM (%s) g4d_dk WHERE (%s) NOT IN (SELECT %s FROM "
-		                       "%s) AND (%s) IN (SELECT %s FROM %s);\n",
-		                       quoted_removed, key_list, key_list, dropped_keys, key_list, key_list, quoted_removed,
-		                       key_list, key_list, read_target);
+		result += StringUtil::Format("INSERT INTO %s (%s) SELECT %s FROM (%s) g4d_dk WHERE (%s) NOT IN (SELECT %s FROM "
+		                             "%s) AND (%s) IN (SELECT %s FROM %s);\n",
+		                             quoted_removed, key_list, key_list, dropped_keys, key_list, key_list,
+		                             quoted_removed, key_list, key_list, read_target);
 		result += StringUtil::Format("INSERT INTO %s %s;\n", quoted_added, added_rows);
 		result += StringUtil::Format("DELETE FROM %s WHERE (%s) IN (%s);\n", quoted_removed, key_list, added_keys);
 	} else {
@@ -1917,8 +1916,7 @@ static string PragmaGit4DataMerge(ClientContext &context, const FunctionParamete
 		result += StringUtil::Format(
 		    "INSERT INTO %s SELECT * FROM %s WHERE (%s) IN (SELECT %s FROM %s WHERE g4d_change IN ('added', "
 		    "'changed')%s) AND (%s) NOT IN (SELECT %s FROM %s);\n",
-		    quoted_into, right_image, key_list, key_list, diff_right, conflict_filter, key_list, key_list,
-		    quoted_into);
+		    quoted_into, right_image, key_list, key_list, diff_right, conflict_filter, key_list, key_list, quoted_into);
 	}
 	result += StringUtil::Format("DROP TABLE %s;", conflict_name);
 
@@ -2262,7 +2260,7 @@ static string PragmaGit4DataCreateSnapshot(ClientContext &context, const Functio
 	context.client_data->git4data_added_records.push_back("snapshot\t" + name);
 	result +=
 	    StringUtil::Format("INSERT INTO %s.%s VALUES ('%s', %llu, TIMESTAMP '%s', '%s');", GIT4DATA_REGISTRY_SCHEMA,
-	                       GIT4DATA_SNAPSHOTS_TABLE, escape(name), pin, Timestamp::ToString(created), escape(line));
+		                   GIT4DATA_SNAPSHOTS_TABLE, escape(name), pin, Timestamp::ToString(created), escape(line));
 	return result;
 }
 

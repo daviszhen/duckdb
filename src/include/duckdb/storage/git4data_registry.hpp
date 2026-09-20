@@ -117,12 +117,10 @@ bool Git4DataSourceKeyMatches(ClientContext &context, const string &stored, cons
 //! a stored name resolves to and by the source's oid. A record written before keys carried a schema holds the
 //! name the caller wrote, and a source that has been renamed matches by neither name - the oid is what follows
 //! it, exactly as on a read.
-optional_ptr<const Git4DataStorageTable> Git4DataFindStorageTable(ClientContext &context,
-                                                                const Git4DataBranch &branch,
-                                                            const string &key, idx_t source_oid = 0);
-optional_ptr<const Git4DataBranchDelta> Git4DataFindDeltaTable(ClientContext &context,
-                                                             const Git4DataBranch &branch,
-                                                         const string &key, idx_t source_oid = 0);
+optional_ptr<const Git4DataStorageTable> Git4DataFindStorageTable(ClientContext &context, const Git4DataBranch &branch,
+                                                                  const string &key, idx_t source_oid = 0);
+optional_ptr<const Git4DataBranchDelta> Git4DataFindDeltaTable(ClientContext &context, const Git4DataBranch &branch,
+                                                               const string &key, idx_t source_oid = 0);
 
 //! Refuse a mapping whose source name now reaches a **different** table than the one it was made against.
 //!

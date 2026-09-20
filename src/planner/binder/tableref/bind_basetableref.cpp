@@ -314,8 +314,8 @@ BoundStatement Binder::Bind(BaseTableRef &ref) {
 			auto key = Git4DataSourceKey(table);
 			Git4DataSnapshotScanFun::CheckReferenceSource(context, table, key);
 			logical_get->function = Git4DataSnapshotScanFun::GetFunction();
-			logical_get->bind_data = Git4DataSnapshotScanFun::CreateBindData(
-			    context, key, at_clause->GetValue().ToString(), reference_kind);
+			logical_get->bind_data =
+			    Git4DataSnapshotScanFun::CreateBindData(context, key, at_clause->GetValue().ToString(), reference_kind);
 			// the underlying table declared virtual columns for the base scan; the reference
 			// scan has none, and keeping them would demand projection pushdown it does not do
 			logical_get->virtual_columns.clear();

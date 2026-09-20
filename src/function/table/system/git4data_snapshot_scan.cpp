@@ -316,8 +316,7 @@ static bool Git4DataRowWasRemoved(const Git4DataRemovedKeys &removed, DataChunk 
 //! filter a delta read and a diff spend their extra time in: measured on the script's own shape, 4,000,000 base
 //! rows against 100,000 removed keys cost 50 ms over a plain read of the same rows, about 13 ns a row, and the
 //! `Value` the generic path builds per row is most of it.
-static bool Git4DataTypedRowWasRemoved(const Git4DataKeyColumn &keys, const Git4DataRemovedKeys &removed,
-                                       idx_t row) {
+static bool Git4DataTypedRowWasRemoved(const Git4DataKeyColumn &keys, const Git4DataRemovedKeys &removed, idx_t row) {
 	uint64_t pattern = 0;
 	if (!keys.Pattern(row, pattern)) {
 		return false;
@@ -552,8 +551,7 @@ static idx_t Git4DataKeepRows(ClientContext &context, const vector<Git4DataRemov
 		bool removed = false;
 		for (idx_t i = from; i < removals.size(); i++) {
 			auto was_removed = typed_only ? Git4DataTypedRowWasRemoved(typed_keys, *removals[i], row)
-			                             : Git4DataRowWasRemoved(*removals[i], chunk, key_positions, *hashes[i],
-			                                                     row);
+			                              : Git4DataRowWasRemoved(*removals[i], chunk, key_positions, *hashes[i], row);
 			if (was_removed) {
 				removed = true;
 				break;
@@ -650,7 +648,7 @@ void Git4DataSnapshotScanFun::CheckReferenceSource(ClientContext &context, Table
 	    key,
 	    by_key ? "\"" + by_key->name.GetIdentifierName() + "\" in schema \"" +
 	                 by_key->ParentSchema().name.GetIdentifierName() + "\""
-	           : "no table here");
+		       : "no table here");
 }
 
 //! The table backing a branch for a source table, or empty when the branch has no line of its own
@@ -1125,8 +1123,8 @@ static unique_ptr<GlobalTableFunctionState> Git4DataSnapshotScanInit(ClientConte
 			auto &added_table = Git4DataResolveTable(context, layer.added);
 			read.scan = make_uniq<TableScanState>();
 			read.scan->Initialize(result->column_ids, nullptr);
-			added_table.GetStorage().GetRowGroupCollection()->InitializeScan(
-			    query_context, read.scan->table_state, result->column_ids, nullptr);
+			added_table.GetStorage().GetRowGroupCollection()->InitializeScan(query_context, read.scan->table_state,
+			                                                                 result->column_ids, nullptr);
 			read.storage = added_table.GetStorage();
 		}
 		Git4DataCollectRemovedKeys(context, layer.removed, ordered_key_types, key_columns.size(), layer.bound,
@@ -1194,8 +1192,8 @@ static void Git4DataSnapshotScanFunction(ClientContext &context, TableFunctionIn
 		// every overlay's removals apply to the base: a key one of them took away is not part of the
 		// line, whichever overlay took it
 		SelectionVector kept(count);
-		auto kept_count = Git4DataKeepRows(context, state.removal_views, state.removal_hashes, 0,
-		                                   state.scan_chunk, state.key_positions, kept);
+		auto kept_count = Git4DataKeepRows(context, state.removal_views, state.removal_hashes, 0, state.scan_chunk,
+		                                   state.key_positions, kept);
 		if (kept_count == 0) {
 			// every row of this chunk was removed, so the next one is what to look at
 			continue;
@@ -1625,7 +1623,7 @@ static unique_ptr<FunctionData> Git4DataDiffBind(ClientContext &context, TableFu
 	Git4DataReconcileIfNeeded(context);
 	auto result =
 	    Git4DataDiffFun::CreateBindData(context, input.inputs[0].GetValue<string>(), input.inputs[1].GetValue<string>(),
-	                                    input.inputs[2].GetValue<string>());
+		                                input.inputs[2].GetValue<string>());
 	auto &bind_data = result->Cast<Git4DataDiffBindData>();
 	// The three columns below are this function's own, and the key columns follow them, carrying names
 	// that belong to the table. A key column with one of those three names would leave the result with
@@ -1940,9 +1938,8 @@ static hash_t Git4DataDiffKeyHash(const vector<Value> &key) {
 //! the same order. Each overlay's removed keys are read once here, because a diff walks its base once.
 static void Git4DataDiffSetupDeltas(ClientContext &context, const vector<Git4DataDeltaLayer> &layers,
                                     const vector<StorageIndex> &column_ids, const vector<LogicalType> &scan_types,
-                                    const vector<LogicalType> &key_types, idx_t key_count,
-                                    QueryContext &query_context, vector<Git4DataDeltaRead> &result,
-                                    optional_ptr<AttachedDatabase> &database) {
+                                    const vector<LogicalType> &key_types, idx_t key_count, QueryContext &query_context,
+                                    vector<Git4DataDeltaRead> &result, optional_ptr<AttachedDatabase> &database) {
 	for (auto &layer : layers) {
 		Git4DataDeltaRead read;
 		read.layer = layer;
@@ -2122,8 +2119,8 @@ static void Git4DataDiffCollect(ClientContext &context, Git4DataDiffState &state
 			bool removed = false;
 			for (idx_t s = 0; s < removals.size(); s++) {
 				auto was_removed = typed_only ? Git4DataTypedRowWasRemoved(typed_keys, *removals[s], i)
-				                             : Git4DataRowWasRemoved(*removals[s], state.scan_chunk, key_positions,
-				                                                     *removal_hashes[s], i);
+				                              : Git4DataRowWasRemoved(*removals[s], state.scan_chunk, key_positions,
+				                                                      *removal_hashes[s], i);
 				if (was_removed) {
 					removed = true;
 					break;
@@ -2166,8 +2163,8 @@ static void Git4DataDiffCollect(ClientContext &context, Git4DataDiffState &state
 				bool removed = false;
 				for (idx_t s = index + 1; s < removals.size(); s++) {
 					auto was_removed = typed_only ? Git4DataTypedRowWasRemoved(typed_keys, *removals[s], i)
-					                             : Git4DataRowWasRemoved(*removals[s], *delta.chunk, key_positions,
-					                                                     *removal_hashes[s], i);
+					                              : Git4DataRowWasRemoved(*removals[s], *delta.chunk, key_positions,
+					                                                      *removal_hashes[s], i);
 					if (was_removed) {
 						removed = true;
 						break;
@@ -2259,7 +2256,7 @@ static void Git4DataDiffFunction(ClientContext &context, TableFunctionInput &dat
 							    auto &candidate = state.left_candidates[partner];
 							    candidate.matched = true;
 							    if (!Git4DataDiffSameStoredValues(state, candidate.stored, chunk, state.key_count,
-							                                      row)) {
+								                                  row)) {
 								    state.changed.push_back(Git4DataDiffState::Change {
 								        candidate.row_id, row_id,
 								        Git4DataDiffStoreChangeKey(state, context, chunk, row)});
@@ -2296,7 +2293,7 @@ static void Git4DataDiffFunction(ClientContext &context, TableFunctionInput &dat
 				}
 				state.removed.push_back(
 				    Git4DataDiffState::Change {candidate.row_id, NO_COUNTERPART,
-				                               Git4DataDiffStoreChangeKeyFromLeft(state, context, candidate.stored)});
+					                           Git4DataDiffStoreChangeKeyFromLeft(state, context, candidate.stored)});
 			}
 			state.left_candidates.clear();
 			state.left_heads.clear();
@@ -2391,7 +2388,7 @@ static void Git4DataDiffFunction(ClientContext &context, TableFunctionInput &dat
 					removed_taken[match] = true;
 					state.changed.push_back(
 					    Git4DataDiffState::Change {removed_rows[match].first, added.first,
-					                               Git4DataDiffStoreChangeKeyValues(state, context, added.second)});
+						                           Git4DataDiffStoreChangeKeyValues(state, context, added.second)});
 				}
 			}
 		} else {
@@ -2723,13 +2720,12 @@ static unique_ptr<FunctionData> Git4DataBranchesBind(ClientContext &context, Tab
 		// beside it follows: a caller asking which branches were forked from something can ask one question, and
 		// a row says "nothing here" the same way in both columns.
 		auto parent_value = branch.parent.empty() ? Value(LogicalType::VARCHAR) : Value(branch.parent);
-		result->rows.push_back(
-		    {Value(branch.name), Value::UBIGINT(branch.pin), parent_value, Value(line_value),
-		     Value::TIMESTAMP(branch.created),
-		     Value::BOOLEAN(!branch.storage_tables.empty()), Value::BOOLEAN(!branch.deltas.empty()),
-		     Value::BOOLEAN(storage_missing), Value::BOOLEAN(delta_missing), Value::BOOLEAN(identified),
-		     Value(storage_source), Value(Git4DataJoinedStorageTables(context, branch)), Value(delta_source),
-		     Value(delta_added), Value(delta_removed), Value::BOOLEAN(inherited_missing)});
+		result->rows.push_back({Value(branch.name), Value::UBIGINT(branch.pin), parent_value, Value(line_value),
+		                        Value::TIMESTAMP(branch.created), Value::BOOLEAN(!branch.storage_tables.empty()),
+		                        Value::BOOLEAN(!branch.deltas.empty()), Value::BOOLEAN(storage_missing),
+		                        Value::BOOLEAN(delta_missing), Value::BOOLEAN(identified), Value(storage_source),
+		                        Value(Git4DataJoinedStorageTables(context, branch)), Value(delta_source),
+		                        Value(delta_added), Value(delta_removed), Value::BOOLEAN(inherited_missing)});
 	}
 	names.emplace_back("branch_name");
 	return_types.emplace_back(LogicalType::VARCHAR);
@@ -3095,7 +3091,7 @@ static unique_ptr<FunctionData> Git4DataLimitsBind(ClientContext &context, Table
 	auto &transaction_manager = GetGit4DataTransactionManagerForListing(context);
 	result->rows.push_back(
 	    {Value::BIGINT(transaction_manager.snapshot_limit), Value::UBIGINT(transaction_manager.UserSnapshotCount()),
-	     Value::BIGINT(transaction_manager.branch_limit), Value::UBIGINT(transaction_manager.branches.Count())});
+		 Value::BIGINT(transaction_manager.branch_limit), Value::UBIGINT(transaction_manager.branches.Count())});
 	Git4DataRowNames(names, return_types, "snapshot_limit", LogicalType::BIGINT);
 	Git4DataRowNames(names, return_types, "snapshots", LogicalType::UBIGINT);
 	Git4DataRowNames(names, return_types, "branch_limit", LogicalType::BIGINT);

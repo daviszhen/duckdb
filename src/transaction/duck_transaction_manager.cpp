@@ -570,8 +570,8 @@ static string Git4DataUncommittedKey(const string &kind, const string &name) {
 	return kind + "\t" + name;
 }
 
-void DuckTransactionManager::MarkReferenceUncommitted(const string &kind, const string &name,
-                                                      const void *owner_client, transaction_t owner_transaction) {
+void DuckTransactionManager::MarkReferenceUncommitted(const string &kind, const string &name, const void *owner_client,
+                                                      transaction_t owner_transaction) {
 	lock_guard<mutex> guard(uncommitted_reference_lock);
 	uncommitted_references[Git4DataUncommittedKey(kind, name)] =
 	    Git4DataUncommittedReference {owner_client, owner_transaction};
