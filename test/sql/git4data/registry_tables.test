@@ -199,6 +199,45 @@ ALTER TABLE git4data.snapshots ADD COLUMN extra INTEGER
 ----
 <REGEX>:.*is the schema the reference registry is kept in.*
 
+# **The statements that are not writes but leave the same hole**, each measured and pinned here because the
+# guard is on the *schema* rather than on a list of statement types. A rename takes the table the feature looks
+# up away; dropping the column that holds a reference's pin leaves a row the feature cannot read; TRUNCATE
+# empties the table through the delete path rather than the write path; and a view is a caller's object in the
+# feature's own schema. TRUNCATE is the one worth its own line for a second reason: it was refused before this
+# test existed, and a refusal nothing asserts is a refusal that can be removed without anything noticing.
+statement error
+ALTER TABLE git4data.snapshots RENAME TO sn2
+----
+<REGEX>:.*is the schema the reference registry is kept in.*
+
+statement error
+ALTER TABLE git4data.snapshots DROP COLUMN line
+----
+<REGEX>:.*is the schema the reference registry is kept in.*
+
+statement error
+TRUNCATE git4data.snapshots
+----
+<REGEX>:.*is one of the tables the reference registry is kept in.*
+
+statement error
+CREATE VIEW git4data.v AS SELECT 1
+----
+<REGEX>:.*is in the schema the reference registry is kept in.*
+
+# And where the boundary is: an index on one of those tables is *allowed*, because it changes no row and the
+# feature's statements keep it up to date like any other table's. Pinning the allowance is what makes a future
+# refusal a decision rather than a drift.
+# (the index name is unqualified because DuckDB's CREATE INDEX does not take a schema for it; it lands in the
+# table's schema, which is this one)
+statement ok
+CREATE INDEX ix ON git4data.snapshots(name)
+
+query I
+SELECT count(*) FROM duckdb_indexes() WHERE schema_name = 'git4data' AND index_name = 'ix'
+----
+1
+
 # And creating there is refused too, which DROP and ALTER were standing in for: measured,
 # `CREATE OR REPLACE TABLE git4data.snapshots (a INTEGER)` replaced the table and every reference with it -
 # the count below read 0 - and a caller's own table in the feature's schema went through as well.
