@@ -1,0 +1,208 @@
+# name: test/sql/git4data/registry_agrees_with_tables.test
+# description: The listings and the registry tables agree about which references exist, phase by phase
+# group: [git4data]
+
+# A reference *is* a row in the registry tables; the in-memory registries are a view of them, and the listings
+# read that view while `SELECT ... FROM git4data.snapshots` reads the row. The two have to agree about which
+# references exist - and the three increments before this file (3cr, 3cs, 3ct) were each a case where they did
+# not: an uncommitted reference was listed by another connection, and a rolled-back one survived its own
+# rollback. Each was found by hand. This file asserts the agreement itself, at every phase of the operations
+# that change the registry, so that the next disagreement fails here.
+#
+# The comparison is a set difference in both directions: nothing a listing reports may be missing from the rows,
+# and no row may be missing from the listing. Internal references are excluded on the listing side by
+# `starts_with(name, '__')` - **not** by `LIKE '__%'`, which is a mistake this file made in its first version and
+# which cost a round: `_` is the single-character wildcard, so `'pending' NOT LIKE '__%'` is false and every name
+# of two characters or more was silently excluded, which made the listings look like they disagreed with the
+# tables. They did not.
+
+# a phase is four numbers: listing minus rows, rows minus listing, for snapshots and for branches. The database
+# is a *file* (`load`), because one phase restarts: an in-memory database loses the registry tables with the
+# process, which is not what a restart is being asked about here.
+load {TEST_DIR}/registry_agrees_with_tables.db
+
+statement ok
+CREATE TABLE t (k INTEGER PRIMARY KEY, v INTEGER)
+
+statement ok
+INSERT INTO t SELECT range, range FROM range(10)
+
+statement ok
+CHECKPOINT
+
+# phase 1: two references made in autocommit, so both are rows already
+statement ok
+PRAGMA git4data_create_snapshot('a')
+
+statement ok
+PRAGMA git4data_create_branch('b', '')
+
+query IIII
+SELECT (SELECT count(*) FROM (SELECT snapshot_name AS n FROM git4data_snapshots() WHERE NOT starts_with(snapshot_name, '__') EXCEPT SELECT name FROM git4data.snapshots)),
+       (SELECT count(*) FROM (SELECT name AS n FROM git4data.snapshots EXCEPT SELECT snapshot_name FROM git4data_snapshots() WHERE NOT starts_with(snapshot_name, '__'))),
+       (SELECT count(*) FROM (SELECT branch_name AS n FROM git4data_branches() WHERE NOT starts_with(branch_name, '__') EXCEPT SELECT name FROM git4data.branches)),
+       (SELECT count(*) FROM (SELECT name AS n FROM git4data.branches EXCEPT SELECT branch_name FROM git4data_branches() WHERE NOT starts_with(branch_name, '__')))
+----
+0	0	0	0
+
+query IIII
+SELECT (SELECT count(*) FROM git4data_snapshots() WHERE snapshot_name = 'a'),
+       (SELECT count(*) FROM git4data.snapshots WHERE name = 'a'),
+       (SELECT count(*) FROM git4data_branches() WHERE branch_name = 'b'),
+       (SELECT count(*) FROM git4data.branches WHERE name = 'b')
+----
+1	1	1	1
+
+# phase 2: two references made inside a transaction, and committed at the end of it. What the two sides say
+# while it is still open is measured in `registry_isolation.test`; what phase 3 asserts is the state after it
+# commits, which is the state the tables are the truth for.
+statement ok con1
+BEGIN
+
+statement ok con1
+PRAGMA git4data_create_snapshot('pending')
+
+statement ok con1
+PRAGMA git4data_create_branch('pending_b', '')
+
+statement ok con1
+COMMIT
+
+# phase 3: committed, so both sides show them - to every connection
+query IIII con2
+SELECT (SELECT count(*) FROM (SELECT snapshot_name AS n FROM git4data_snapshots() WHERE NOT starts_with(snapshot_name, '__') EXCEPT SELECT name FROM git4data.snapshots)),
+       (SELECT count(*) FROM (SELECT name AS n FROM git4data.snapshots EXCEPT SELECT snapshot_name FROM git4data_snapshots() WHERE NOT starts_with(snapshot_name, '__'))),
+       (SELECT count(*) FROM (SELECT branch_name AS n FROM git4data_branches() WHERE NOT starts_with(branch_name, '__') EXCEPT SELECT name FROM git4data.branches)),
+       (SELECT count(*) FROM (SELECT name AS n FROM git4data.branches EXCEPT SELECT branch_name FROM git4data_branches() WHERE NOT starts_with(branch_name, '__')))
+----
+0	0	0	0
+
+query IIII con2
+SELECT (SELECT count(*) FROM git4data_snapshots() WHERE NOT starts_with(snapshot_name, '__')),
+       (SELECT count(*) FROM git4data.snapshots),
+       (SELECT count(*) FROM git4data_branches() WHERE NOT starts_with(branch_name, '__')),
+       (SELECT count(*) FROM git4data.branches)
+----
+2	2	2	2
+
+query I con2
+SELECT count(*) FROM t AT (SNAPSHOT => 'pending')
+----
+10
+
+# phase 4: rolled back, and another connection asks first - its rebuild must drop the reference without the
+# rolling-back connection having touched the feature (3cs, 3ct)
+statement ok con1
+BEGIN
+
+statement ok con1
+PRAGMA git4data_create_snapshot('gone')
+
+statement ok con1
+ROLLBACK
+
+query IIII con2
+SELECT (SELECT count(*) FROM git4data_snapshots() WHERE snapshot_name = 'gone'),
+       (SELECT count(*) FROM git4data.snapshots WHERE name = 'gone'),
+       (SELECT count(*) FROM (SELECT snapshot_name AS n FROM git4data_snapshots() WHERE NOT starts_with(snapshot_name, '__') EXCEPT SELECT name FROM git4data.snapshots)),
+       (SELECT count(*) FROM (SELECT name AS n FROM git4data.snapshots EXCEPT SELECT snapshot_name FROM git4data_snapshots() WHERE NOT starts_with(snapshot_name, '__')))
+----
+0	0	0	0
+
+# phase 5: dropped, so both sides lose it - by another connection, because a committed reference is everyone's
+statement ok con2
+PRAGMA git4data_drop_snapshot('a')
+
+query IIII con1
+SELECT (SELECT count(*) FROM git4data_snapshots() WHERE snapshot_name = 'a'),
+       (SELECT count(*) FROM git4data.snapshots WHERE name = 'a'),
+       (SELECT count(*) FROM (SELECT snapshot_name AS n FROM git4data_snapshots() WHERE NOT starts_with(snapshot_name, '__') EXCEPT SELECT name FROM git4data.snapshots)),
+       (SELECT count(*) FROM (SELECT name AS n FROM git4data.snapshots EXCEPT SELECT snapshot_name FROM git4data_snapshots() WHERE NOT starts_with(snapshot_name, '__')))
+----
+0	0	0	0
+
+# phase 6: a mapping made in autocommit is a row in each mapping table, and the listing names the same two
+statement ok
+CREATE TABLE b_add (k INTEGER PRIMARY KEY, v INTEGER)
+
+statement ok
+CREATE TABLE b_del (k INTEGER PRIMARY KEY)
+
+statement ok con2
+PRAGMA git4data_bind_branch_delta('t', 'b', 'b_add', 'b_del')
+
+query IIII con2
+SELECT (SELECT count(*) FROM git4data.deltas WHERE branch = 'b'),
+       (SELECT count(*) FROM git4data_branches() WHERE branch_name = 'b' AND delta_added = 'b_add'
+                                                             AND delta_removed = 'b_del'),
+       (SELECT count(*) FROM git4data.deltas),
+       (SELECT count(*) FROM git4data_branches() WHERE has_delta)
+----
+1	1	1	1
+
+# phase 7: a restart rebuilds both sides from the rows
+restart
+
+query IIII con1
+SELECT (SELECT count(*) FROM git4data_snapshots() WHERE snapshot_name = 'pending'),
+       (SELECT count(*) FROM git4data.snapshots WHERE name = 'pending'),
+       (SELECT count(*) FROM (SELECT snapshot_name AS n FROM git4data_snapshots() WHERE NOT starts_with(snapshot_name, '__') EXCEPT SELECT name FROM git4data.snapshots)),
+       (SELECT count(*) FROM (SELECT name AS n FROM git4data.snapshots EXCEPT SELECT snapshot_name FROM git4data_snapshots() WHERE NOT starts_with(snapshot_name, '__')))
+----
+1	1	0	0
+
+query IIII con1
+SELECT (SELECT count(*) FROM git4data.branches),
+       (SELECT count(*) FROM git4data_branches() WHERE NOT starts_with(branch_name, '__')),
+       (SELECT count(*) FROM git4data.deltas),
+       (SELECT count(*) FROM git4data_branches() WHERE has_delta)
+----
+2	2	1	1
+
+# phase 8: the documented exception, measured. An *uncommitted* mapping is in the shared registry, so the
+# branch's listing reports it, while the two mapping tables have no visible row for it - and a read through the
+# branch behaves as if those rows were not there, because reading a delta's tables is an ordinary read of the
+# caller's tables and isolation applies to them. The reference-level agreement above is unaffected; what it
+# means is that a listing can promise a mapping whose rows another connection cannot see yet, which is why the
+# tables, not the listings, are the truth.
+statement ok con2
+PRAGMA git4data_create_branch('b2', '')
+
+statement ok con1
+BEGIN
+
+statement ok con1
+PRAGMA git4data_bind_branch_delta('t', 'b2', 'b_add', 'b_del')
+
+query IIII con2
+SELECT (SELECT count(*) FROM git4data_branches() WHERE branch_name = 'b2' AND has_delta),
+       (SELECT count(*) FROM git4data.deltas WHERE branch = 'b2'),
+       (SELECT count(*) FROM git4data.branches WHERE name = 'b2'),
+       (SELECT count(*) FROM t AT (BRANCH => 'b2'))
+----
+1	0	1	10
+
+# and the reference-level agreement still holds while that mapping is uncommitted
+query IIII con2
+SELECT (SELECT count(*) FROM (SELECT snapshot_name AS n FROM git4data_snapshots() WHERE NOT starts_with(snapshot_name, '__') EXCEPT SELECT name FROM git4data.snapshots)),
+       (SELECT count(*) FROM (SELECT name AS n FROM git4data.snapshots EXCEPT SELECT snapshot_name FROM git4data_snapshots() WHERE NOT starts_with(snapshot_name, '__'))),
+       (SELECT count(*) FROM (SELECT branch_name AS n FROM git4data_branches() WHERE NOT starts_with(branch_name, '__') EXCEPT SELECT name FROM git4data.branches)),
+       (SELECT count(*) FROM (SELECT name AS n FROM git4data.branches EXCEPT SELECT branch_name FROM git4data_branches() WHERE NOT starts_with(branch_name, '__')))
+----
+0	0	0	0
+
+# a rollback takes it back on both sides once the connection that made it touches the feature - its own
+# reconcile rebuilds the branch from the rows, and the mapping is not among them
+statement ok con1
+ROLLBACK
+
+query I con1
+SELECT count(*) FROM git4data_branches() WHERE NOT starts_with(branch_name, '__')
+----
+3
+
+query II con2
+SELECT (SELECT count(*) FROM git4data_branches() WHERE branch_name = 'b2' AND has_delta),
+       (SELECT count(*) FROM git4data.deltas WHERE branch = 'b2')
+----
+0	0

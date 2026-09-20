@@ -58,13 +58,17 @@ SELECT (SELECT count(*) FROM git4data_snapshots() WHERE snapshot_name = 'pending
 ----
 1	1	1
 
-# What *another* connection sees while that transaction is open is deliberately **not** asserted here. It was,
-# in the first version of this file: the listing showed the reference, the tables held no row, and a read
-# through it answered. A second file written the same day to compare the two views phase by phase measured
-# something that contradicts it - in the same state, on the same connection, a listing that named 'pending' in
-# one query did not count it in the next, and after the commit it omitted a reference the tables held. Those
-# measurements are recorded in the design note as unresolved; until one of them is explained, an assertion here
-# would pin a behaviour that is not reproducible, so there is none.
+# And another connection sees it too, which is the recorded limitation: the listing reads the shared registry,
+# and a read through it answers - while the row is not there yet. (This assertion was removed for one round
+# because a second file appeared to contradict it; the contradiction was a mistake in *that* file's own
+# queries - it filtered names with `NOT LIKE '__%'`, where `_` is the single-character wildcard, so every name
+# of two characters or more was excluded. The listing was right.)
+query III con2
+SELECT (SELECT count(*) FROM git4data_snapshots() WHERE snapshot_name = 'pending'),
+       (SELECT count(*) FROM t AT (SNAPSHOT => 'pending')),
+       (SELECT count(*) FROM git4data_branches() WHERE branch_name = 'pending_b')
+----
+1	1	1
 
 statement ok con1
 COMMIT
