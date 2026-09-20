@@ -296,6 +296,22 @@ SELECT count(*) FROM information_schema.tables WHERE table_schema = 'git4data'
 ----
 0
 
+# **Three filters hold that up**, one in each of the catalog's own table functions - `duckdb_tables`,
+# `duckdb_schemas` and `duckdb_columns` - and only the first of them was asserted here. A caller browsing the
+# database meets the feature's bookkeeping through any of the three: the schema on its own, and the columns of
+# the tables in it.
+query II
+SELECT (SELECT count(*) FROM duckdb_schemas() WHERE schema_name = 'git4data'),
+       (SELECT count(*) FROM information_schema.schemata WHERE schema_name = 'git4data')
+----
+0	0
+
+query II
+SELECT (SELECT count(*) FROM duckdb_columns() WHERE schema_name = 'git4data'),
+       (SELECT count(*) FROM information_schema.columns WHERE table_schema = 'git4data')
+----
+0	0
+
 query I
 SELECT count(*) FROM git4data.snapshots
 ----
