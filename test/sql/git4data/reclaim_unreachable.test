@@ -21,11 +21,16 @@ INSERT INTO t SELECT 1000000 + range, 1000000 + range FROM range(400000)
 statement ok
 DELETE FROM t WHERE i % 2 = 1
 
-query III
-SELECT (SELECT count(*) FROM t), (SELECT count(*) FROM t AT (SNAPSHOT => 'pin')),
-       (SELECT sum("count") FROM pragma_storage_info('t') WHERE column_id = 0 AND segment_type <> 'VALIDITY')
+# What is asserted before the checkpoint below is what a *reader* sees: the live table lost round two's
+# deleted rows from its own view, and the reference still reads every row of round one. The physical count is
+# asserted *after* the checkpoint, where it is the checkpoint's answer: before one, how many rows are still
+# stored is whatever the harness has already merged - measured, 615680 with the test runner (which checkpoints
+# on every commit) and 800000 under a build that streams its queries and does not, with the reads identical in
+# both. An assertion about the stored rows belongs where the checkpoint that decides them has run.
+query II
+SELECT (SELECT count(*) FROM t), (SELECT count(*) FROM t AT (SNAPSHOT => 'pin'))
 ----
-400000	400000	615680
+400000	400000
 
 statement ok
 CHECKPOINT
