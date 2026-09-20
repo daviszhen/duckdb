@@ -220,7 +220,7 @@ void Git4DataReconcileRegistry(AttachedDatabase &db, const vector<string> &added
 	// the tables, if they are there, are read again; if they are not, memory is left as it is. What memory
 	// holds here is the state the rollback has just taken back, so the internal references are read from the
 	// tables alone - the block's copy is the open's to use, not the reconcile's.
-	Git4DataLoadRegistry(db, false);
+	Git4DataLoadRegistry(db);
 	auto tables_have_snapshots = Git4DataRegistryTablesExist(db);
 
 	// What this transaction added goes: its rows went with the rollback, and a reference no disk holds must not
@@ -329,7 +329,7 @@ void Git4DataReconcileRegistry(AttachedDatabase &db, const vector<string> &added
 	}
 }
 
-void Git4DataLoadRegistry(AttachedDatabase &db, bool keep_internal_from_memory) {
+void Git4DataLoadRegistry(AttachedDatabase &db) {
 	if (!Git4DataRegistryTablesExist(db)) {
 		// no registry tables, so this file has no references this build can read. That covers both a file
 		// written before the tables existed - whose records are in the checkpoint's metadata block, and are
@@ -347,29 +347,14 @@ void Git4DataLoadRegistry(AttachedDatabase &db, bool keep_internal_from_memory) 
 	// renamed and to refuse a table that took the name of one it was given - measured, a rebuild that dropped
 	// them made `git4data_apply('g2', ...)` report no delta for a renamed source and let a swapped storage table
 	// be read. A rebuild happens while the process lives, so the ids it already has are still meaningful.
-	// The references the engine moves *itself* are the other thing this rebuild cannot bring back. They are
-	// not rows in these tables - the point-in-time window's reference is created and moved from C++, with no
-	// statement to write a row - so they live in the checkpoint's registry block, which is read at open and
-	// which this call comes after. Clearing the registries would drop them: measured, with a caller's snapshot
-	// in the file too, a window enabled before a restart came back as `reference_held = false`, and the window
-	// then re-pinned itself at the *current* commit on the next checkpoint - silently narrowing the history it
-	// promises to the moment of the restart. What is in memory here was read from that block, so it is kept.
-	vector<Git4DataSnapshot> internal_snapshots;
-	Git4DataSnapshot kept_pitr;
-	bool has_kept_pitr = false;
-	for (auto &snapshot : transaction_manager.snapshots.List()) {
-		if (!keep_internal_from_memory || !StringUtil::StartsWith(snapshot.name, "__")) {
-			continue;
-		}
-		if (snapshot.name == DuckTransactionManager::PITR_REFERENCE) {
-			// the window's reference is decided below by the row and by this copy together, so it is held
-			// apart from the others: those are put back as they were, this one is not
-			kept_pitr = snapshot;
-			has_kept_pitr = true;
-			continue;
-		}
-		internal_snapshots.push_back(snapshot);
-	}
+	// The references the engine moves *itself* - the point-in-time window's, and a merge's base - are rows in
+	// these tables like any other reference, so the rows below are where they come back from and nothing has
+	// to be kept from memory: `git4data_pitr` writes the window's row with its length in the `line` column, and
+	// a merge writes its base's. Until 3ef the checkpoint's registry block carried a second copy of the
+	// window's reference, because the engine *moves* it at a checkpoint with no statement behind the move, and
+	// this function kept whichever of the two was newer. The block carries only the two commit counters now;
+	// what that costs is recorded in 3ef (the row can lag the engine's move, which retains history rather than
+	// releasing it, and the next feature statement writes the moved pin).
 	auto old_branches = transaction_manager.branches.List();
 	transaction_manager.snapshots.Clear();
 	transaction_manager.branches.Clear();
@@ -393,28 +378,17 @@ void Git4DataLoadRegistry(AttachedDatabase &db, bool keep_internal_from_memory) 
 		    auto created = chunk.GetValue(2, row).GetValue<timestamp_t>();
 		    auto line = chunk.GetValue(3, row).GetValue<string>();
 		    if (StringUtil::StartsWith(name, "__")) {
-			    // An internal reference is a row like any other, and this row is what a crash before the next
-			    // checkpoint leaves behind. The block holds the copy the engine *moves*, at a checkpoint, so
-			    // where both are there the newer pin is the one that holds: a pin only moves forward, and
-			    // keeping the older of the two would retain history the window has already let go. The copy
-			    // kept above is the block's, read before the registries were cleared - comparing against the
-			    // registry here would compare against nothing.
-			    if (name == DuckTransactionManager::PITR_REFERENCE && has_kept_pitr && kept_pitr.pin >= pin) {
-				    transaction_manager.snapshots.Create(kept_pitr.name, kept_pitr.pin, kept_pitr.created,
-				                                         kept_pitr.line);
-				    return;
-			    }
-			    transaction_manager.snapshots.Drop(name);
-			    // The window's own reference carries the length of the window, and this row is the only
-			    // record of it that survives a crash before a checkpoint: the block's copy is written by a
-			    // checkpoint, so a window opened and then crashed on came back as a reference with no window
-			    // around it. Read back only from an internal name, where the same column holds this line
+			    // An internal reference is a row like any other, and this row is the only record of it: the
+			    // window's own reference carries the length of the window in this column, and that is what
+			    // makes the window survive a restart - a window opened and then crashed on used to come back
+			    // as a reference with no window around it, because the block's copy was only written by a
+			    // checkpoint. Read back only from an internal name, where the same column holds this line
 			    // rather than the branch a caller's snapshot captured.
 			    if (line.rfind("window_micros=", 0) == 0) {
 				    try {
 					    transaction_manager.RestorePitr(timestamp_t(std::stoll(line.substr(14))));
 				    } catch (...) {
-					    // a line that does not parse leaves the window as the block left it
+					    // a line that does not parse leaves the window off, which is what the default is
 				    }
 			    }
 		    }
@@ -491,12 +465,6 @@ void Git4DataLoadRegistry(AttachedDatabase &db, bool keep_internal_from_memory) 
 				}
 			}
 		}
-	}
-	// and the internal references go back, exactly as they were read from the block - the window's among
-	// them only if nothing above decided it, which it always does: a row is either there, and wins unless
-	// the block's copy is newer, or it is not, and the window is off
-	for (auto &snapshot : internal_snapshots) {
-		transaction_manager.snapshots.Create(snapshot.name, snapshot.pin, snapshot.created, snapshot.line);
 	}
 	// the settings the feature keeps are rows too: the quotas were properties of the checkpoint's registry block
 	// until 3ee, and a row is transactional where a block property was only as durable as the next checkpoint.

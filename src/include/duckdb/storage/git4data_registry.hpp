@@ -48,12 +48,13 @@ bool Git4DataRegistryTablesThere(ClientContext &context);
 //! once the log has been replayed and before the database serves anything: a change to a reference is an
 //! ordinary change to those tables, so the replay is what brings the last of them back.
 //!
-//! `keep_internal_from_memory` says whether the references the engine moves itself may be taken from memory
+//! The registries are rebuilt from the tables, and from nothing else: the references the engine moves itself
+//! are rows too (the window's row carries its length in `line`), so there is no second copy to keep.
 //! as well as from the tables, and only the open wants that: there, memory holds the checkpoint's block,
 //! which carries the pin the engine *moved* at a checkpoint and which no row can know. After a rollback,
 //! memory holds the state the rollback has just undone - measured, a rolled-back `git4data_pitr(1)` won over
 //! the row the rollback restored and left the window at one day - so the tables decide alone.
-void Git4DataLoadRegistry(AttachedDatabase &db, bool keep_internal_from_memory = true);
+void Git4DataLoadRegistry(AttachedDatabase &db);
 //! Throw when a statement writes one of the registry's tables, or drops or alters it. They are ordinary
 //! tables to the engine, so this is the only thing between a caller and a state the feature depends on: a
 //! deleted snapshot row takes its pin with it, and the history that pin holds down is then reclaimed under a

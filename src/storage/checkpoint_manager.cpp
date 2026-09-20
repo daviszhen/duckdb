@@ -311,10 +311,6 @@ void SingleFileCheckpointWriter::CreateCheckpoint() {
 	idx_t registry_offset = 0;
 	auto start_timestamp = transaction_manager.GetStartTimestampCounter();
 	auto last_commit = transaction_manager.GetLastCommit();
-	auto pinned_snapshots = transaction_manager.snapshots.List();
-	auto data_branches = transaction_manager.branches.List();
-	(void)pinned_snapshots;
-	(void)data_branches;
 	{
 		auto registry_writer = make_uniq<MetadataWriter>(metadata_manager);
 		auto registry_pointer = registry_writer->GetMetaBlockPointer();
@@ -327,31 +323,15 @@ void SingleFileCheckpointWriter::CreateCheckpoint() {
 		// counter pinned commit *0*, measured: `last_commit_id` read 7 in the session that made the commits
 		// and 0 in the next one, and a reference taken there read the table as of the beginning.
 		registry_serializer.WriteProperty<uint64_t>(107, "last_commit", last_commit);
-		// the window has to be persisted with the reference it moves, or a restart would leave the
-		// reference behind and never move it again
-		registry_serializer.WriteProperty<bool>(103, "pitr_enabled", transaction_manager.PitrEnabled());
-		registry_serializer.WriteProperty<int64_t>(104, "pitr_window", transaction_manager.PitrWindow().value);
-		// The snapshots a caller made are rows in git4data.snapshots and are not written here. The ones the
-		// feature manages for itself are, because the engine moves them on its own rather than through a
-		// statement: the point-in-time window's reference is created and moved from C++ (measured - leaving it
-		// out lost the window across a restart, and pitr.test read reference_held = false).
-		vector<Git4DataSnapshot> internal_snapshots;
-		for (auto &snapshot : pinned_snapshots) {
-			if (StringUtil::StartsWith(snapshot.name, "__")) {
-				internal_snapshots.push_back(snapshot);
-			}
-		}
-		registry_serializer.WriteList(
-		    100, "snapshots", internal_snapshots.size(), [&](Serializer::List &list, idx_t i) {
-			    list.WriteObject([&](Serializer &obj) {
-				    obj.WriteProperty<string>(100, "name", internal_snapshots[i].name);
-				    obj.WriteProperty<uint64_t>(101, "pin", internal_snapshots[i].pin);
-				    obj.WriteProperty<int64_t>(102, "created", internal_snapshots[i].created.value);
-				    obj.WriteProperty<string>(103, "line", internal_snapshots[i].line);
-			    });
-		    });
-		// The branches are not written at all: every one of them is made by a statement, so every one has a
-		// row.
+		// **The block is a counter record now, and nothing else** (2026-09-20). What it carried besides the
+		// counters - the window's flag and length, the two quotas (3ee), and the list of references the engine
+		// moves itself - is rows in the registry tables: the window's own reference is a row whose `line`
+		// column holds its length, the quotas are rows of `git4data.state`, and a merge's base is a row like
+		// any other. What is left here is what a table row cannot hold: both counters have to be back in place
+		// before any transaction exists, and reading a row needs one. The reader below still *consumes* what a
+		// file from the older build carries in the fields after these two, because the block's deserializer is
+		// positional - it refuses a source with fields left over rather than skipping them - but it carries
+		// none of those records across.
 		registry_serializer.End();
 		registry_writer->Flush();
 		registry_block = registry_pointer.block_pointer;
@@ -504,60 +484,44 @@ void SingleFileCheckpointReader::LoadFromStorage() {
 		// to an answer.
 		auto last_commit = registry_deserializer.ReadPropertyWithExplicitDefault<uint64_t>(107, "last_commit", 0);
 		transaction_manager.SetMinimumLastCommit(last_commit == 0 ? start_timestamp - 1 : last_commit);
-		auto pitr_enabled = registry_deserializer.ReadPropertyWithExplicitDefault<bool>(103, "pitr_enabled", false);
-		auto pitr_window = registry_deserializer.ReadPropertyWithExplicitDefault<int64_t>(104, "pitr_window", 0);
-		if (pitr_enabled) {
-			transaction_manager.RestorePitr(timestamp_t(pitr_window));
-		}
-		// The two quotas used to be read into the transaction manager here, and **they still have to be read
-		// even though nothing uses them**: the block's deserializer is positional and rejects a source that has
-		// fields left over, so a file the previous build wrote fails to open with `expected end of object, but
-		// found field id: 105` - measured with these two lines removed, on the fixture the no-migration check
-		// opens. The values are rows now (`git4data.state`, written by `git4data_limit` and read by the load),
-		// so what is read here is discarded: an old file's quotas are not carried across.
+		// What a file from the older build carries after the two counters is read and discarded: the window's
+		// flag and length, the two quotas (already rows in 3ee) and the two record lists - the references the
+		// engine moves itself, and the branches with their mappings. None of it is carried across (2026-09-20),
+		// but all of it is *parsed*, because the deserializer is positional and rejects a source with fields
+		// left over: measured in 3ee, a reader that stopped before the quotas made an older file unopenable
+		// with `expected end of object, but found field id: 105`. Parsing and ignoring is what lets such a file
+		// open with no references in it, which is the decision.
+		(void)registry_deserializer.ReadPropertyWithExplicitDefault<bool>(103, "pitr_enabled", false);
+		(void)registry_deserializer.ReadPropertyWithExplicitDefault<int64_t>(104, "pitr_window", 0);
 		(void)registry_deserializer.ReadPropertyWithExplicitDefault<int64_t>(105, "snapshot_limit", -1);
 		(void)registry_deserializer.ReadPropertyWithExplicitDefault<int64_t>(106, "branch_limit", -1);
-		// optional as well: a file written since the references moved into their own tables carries no record
-		// list here, only the counter, the window and the quotas
 		registry_deserializer.ReadOptionalList(100, "snapshots", [&](Deserializer::List &list, idx_t i) {
 			return list.ReadObject([&](Deserializer &obj) {
-				auto name = obj.ReadProperty<string>(100, "name");
-				auto pin = obj.ReadProperty<uint64_t>(101, "pin");
-				// zero when the block predates the timestamp being recorded
-				auto created = obj.ReadPropertyWithExplicitDefault<int64_t>(102, "created", 0);
-				// empty when the block predates a reference being able to capture a line
-				auto line = obj.ReadPropertyWithExplicitDefault<string>(103, "line", "");
-				transaction_manager.snapshots.Create(name, pin, timestamp_t(created), line);
+				(void)obj.ReadProperty<string>(100, "name");
+				(void)obj.ReadProperty<uint64_t>(101, "pin");
+				(void)obj.ReadPropertyWithExplicitDefault<int64_t>(102, "created", 0);
+				(void)obj.ReadPropertyWithExplicitDefault<string>(103, "line", "");
 			});
 		});
-		// optional, because the block predates branches in files written before they existed.
-		// Restore() skips the parent check Create performs: a file could legitimately hold a
-		// parent that appears later in the list.
 		registry_deserializer.ReadOptionalList(101, "branches", [&](Deserializer::List &list, idx_t i) {
 			return list.ReadObject([&](Deserializer &obj) {
-				auto name = obj.ReadProperty<string>(100, "name");
-				auto pin = obj.ReadProperty<uint64_t>(101, "pin");
-				auto parent = obj.ReadProperty<string>(102, "parent");
-				auto created = obj.ReadPropertyWithExplicitDefault<int64_t>(103, "created", 0);
-				// empty when the block predates a branch being able to carry a captured line
-				auto base_line = obj.ReadPropertyWithExplicitDefault<string>(105, "line", "");
-				transaction_manager.branches.Restore(name, pin, parent, timestamp_t(created), base_line);
+				(void)obj.ReadProperty<string>(100, "name");
+				(void)obj.ReadProperty<uint64_t>(101, "pin");
+				(void)obj.ReadProperty<string>(102, "parent");
+				(void)obj.ReadPropertyWithExplicitDefault<int64_t>(103, "created", 0);
+				(void)obj.ReadPropertyWithExplicitDefault<string>(105, "line", "");
 				obj.ReadOptionalList(106, "deltas", [&](Deserializer::List &delta_list, idx_t d) {
 					return delta_list.ReadObject([&](Deserializer &delta_obj) {
-						auto source = delta_obj.ReadProperty<string>(100, "source");
-						auto added = delta_obj.ReadProperty<string>(101, "added");
-						auto removed = delta_obj.ReadProperty<string>(102, "removed");
-						transaction_manager.branches.SetDeltaTable(name, source, added, removed);
+						(void)delta_obj.ReadProperty<string>(100, "source");
+						(void)delta_obj.ReadProperty<string>(101, "added");
+						(void)delta_obj.ReadProperty<string>(102, "removed");
 					});
 				});
 				obj.ReadOptionalList(104, "storage_tables", [&](Deserializer::List &storage_list, idx_t s) {
 					return storage_list.ReadObject([&](Deserializer &storage_obj) {
-						auto source = storage_obj.ReadProperty<string>(100, "source");
-						auto storage = storage_obj.ReadProperty<string>(101, "storage");
-						// false when the block predates a mapping saying who created its table, which
-						// only means a second materialize leaves that older copy alone
-						auto owned = storage_obj.ReadPropertyWithExplicitDefault<bool>(102, "owned", false);
-						transaction_manager.branches.SetStorageTable(name, source, storage, 0, 0, owned);
+						(void)storage_obj.ReadProperty<string>(100, "source");
+						(void)storage_obj.ReadProperty<string>(101, "storage");
+						(void)storage_obj.ReadPropertyWithExplicitDefault<bool>(102, "owned", false);
 					});
 				});
 			});
