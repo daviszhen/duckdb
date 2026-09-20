@@ -296,6 +296,16 @@ void Git4DataReconcileRegistry(AttachedDatabase &db, const vector<string> &added
 			                                           delta.added_oid, delta.removed_oid, delta.source_oid);
 		}
 	}
+	// A rollback can also have taken the registry tables themselves away: the statement that makes a database's
+	// *first* reference creates them, so rolling that one back leaves a database with no tables, and then the
+	// reload above returns early and memory is all there is. What memory may not keep is a reference a finished
+	// transaction of this process added - which is exactly what a stale marker says - while a record with no
+	// marker at all came from an older file's metadata block and is left alone. Measured before this: another
+	// connection still listed the rolled-back name and still read through it, because nothing looked at the
+	// markers in that case.
+	if (!tables_have_snapshots) {
+		transaction_manager.DropRecordsNobodyIsAdding();
+	}
 	// The window is a setting as well as a reference, and the reload above decides it from the tables - but
 	// only when they are there, and a database whose *first* reference was the one rolled back has none: the
 	// transaction that created them is the one that was rolled back. Measured, `BEGIN; git4data_pitr(7);

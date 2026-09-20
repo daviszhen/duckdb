@@ -1,0 +1,70 @@
+# name: test/sql/git4data/registry_no_tables.test
+# description: A rollback that took the registry tables with it leaves no reference for anyone to read
+# group: [git4data]
+
+# A database's *first* reference is the statement that also creates the registry tables, so rolling that
+# statement back leaves a database with no tables at all - and then the tables cannot say what memory should
+# hold. What memory may keep is what a running transaction is still adding, plus the engine's own internal
+# references (which live in the checkpoint's block rather than in a row): a *committed* reference is a row, so a
+# database without those tables has none.
+#
+# Measured before increment 3ct, with the fix for the tables-present case (3cs) already in: another connection
+# listed the rolled-back name and read through it - while the connection that rolled it back saw nothing, because
+# its own reconcile drops what it added. This file is the case that leaves: the tables-absent one.
+
+statement ok
+CREATE TABLE t (k INTEGER PRIMARY KEY, v INTEGER)
+
+statement ok
+INSERT INTO t VALUES (1, 1)
+
+statement ok con1
+BEGIN
+
+statement ok con1
+PRAGMA git4data_create_snapshot('gone')
+
+statement ok con1
+ROLLBACK
+
+# the tables went with the rollback, so there is nothing to ask them
+statement error
+SELECT count(*) FROM git4data.snapshots
+----
+<REGEX>:.*(does not exist|Table with name).*
+
+# **Another connection asks first**, which is the whole point: it used to list the rolled-back name and read
+# through it until the connection that rolled it back touched the feature, because a rebuild asked for by
+# anyone else had nothing to compare the record against - the tables are gone, and it was not that connection's
+# `added` list that could say so. The rollback is the last thing con1 did, so nothing has cleaned up yet.
+query I con2
+SELECT count(*) FROM git4data_snapshots() WHERE snapshot_name = 'gone'
+----
+0
+
+statement error con2
+SELECT count(*) FROM t AT (SNAPSHOT => 'gone')
+----
+<REGEX>:.*Snapshot "gone" does not exist.*
+
+# and the connection that rolled it back sees the same when it asks
+query I con1
+SELECT count(*) FROM git4data_snapshots() WHERE snapshot_name = 'gone'
+----
+0
+
+# a reference made *after* all that is an ordinary one: the tables are made again by its own statement
+statement ok
+PRAGMA git4data_create_snapshot('after')
+
+query III
+SELECT (SELECT count(*) FROM git4data.snapshots WHERE name = 'after'),
+       (SELECT count(*) FROM git4data_snapshots() WHERE snapshot_name = 'after'),
+       (SELECT count(*) FROM t AT (SNAPSHOT => 'after'))
+----
+1	1	1
+
+query I
+SELECT count(*) FROM git4data_snapshots() WHERE snapshot_name = 'gone'
+----
+0

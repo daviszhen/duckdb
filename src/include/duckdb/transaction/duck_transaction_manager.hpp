@@ -339,6 +339,16 @@ public:
 	//! dropped here rather than left to hide the reference for the rest of the session.
 	bool ReferenceUncommittedByOther(const string &kind, const string &name, connection_t viewer_connection,
 	                                 transaction_t viewer_transaction);
+	//! Drop the caller references memory holds that no running transaction is adding. Only for a rebuild in a
+	//! database whose registry tables are *not* there: a committed reference is a row, so such a database has
+	//! none, and what memory may keep is what a running transaction is still adding plus the engine's own
+	//! internal references (which live in the checkpoint's block, not in a row).
+	void DropRecordsNobodyIsAdding();
+	//! Whether this reference was added by a transaction that is no longer running, dropping the marker as it
+	//! answers. That is what a rollback leaves behind when it also took the registry tables away, and it is the
+	//! only thing that says so: a record loaded from an older file's metadata block was added by no transaction
+	//! of this process and has no marker at all, so it is not this.
+	bool ReferenceAddedByFinishedTransaction(const string &kind, const string &name);
 	//! Whether some running transaction has added this reference and not committed it. A marker whose
 	//! transaction is over says nothing about a reference being added *now*, so it is dropped here and the
 	//! answer is false - which is what lets a rebuild tell another connection's uncommitted work apart from a

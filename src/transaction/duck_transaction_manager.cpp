@@ -577,6 +577,55 @@ void DuckTransactionManager::MarkReferenceUncommitted(const string &kind, const 
 	    Git4DataUncommittedReference {owner_connection, owner_transaction};
 }
 
+bool DuckTransactionManager::ReferenceAddedByFinishedTransaction(const string &kind, const string &name) {
+	auto key = Git4DataUncommittedKey(kind, name);
+	Git4DataUncommittedReference owner;
+	{
+		lock_guard<mutex> guard(uncommitted_reference_lock);
+		auto entry = uncommitted_references.find(key);
+		if (entry == uncommitted_references.end()) {
+			// no marker: nothing in this process added it, which is what a record read from an older file's
+			// metadata block looks like
+			return false;
+		}
+		owner = entry->second;
+	}
+	if (TransactionIsActive(owner.transaction)) {
+		return false;
+	}
+	lock_guard<mutex> guard(uncommitted_reference_lock);
+	auto entry = uncommitted_references.find(key);
+	if (entry != uncommitted_references.end() && entry->second.connection == owner.connection &&
+	    entry->second.transaction == owner.transaction) {
+		uncommitted_references.erase(entry);
+	}
+	return true;
+}
+
+void DuckTransactionManager::DropRecordsNobodyIsAdding() {
+	// Only a marker that has gone stale is dropped here - a reference some *finished* transaction of this
+	// process added, which a rollback left when it also took the registry tables away. A record with no marker
+	// was not added by a transaction at all: an older file's records arrive from the checkpoint's metadata
+	// block, and measured, dropping those broke `migration_block.test` when this rule was written the broader
+	// way (every record no running transaction is adding).
+	for (auto &snapshot : snapshots.List()) {
+		if (StringUtil::StartsWith(snapshot.name, "__")) {
+			continue;
+		}
+		if (ReferenceAddedByFinishedTransaction("snapshot", snapshot.name)) {
+			snapshots.Drop(snapshot.name);
+		}
+	}
+	for (auto &branch : branches.List()) {
+		if (StringUtil::StartsWith(branch.name, "__")) {
+			continue;
+		}
+		if (ReferenceAddedByFinishedTransaction("branch", branch.name)) {
+			branches.Drop(branch.name);
+		}
+	}
+}
+
 bool DuckTransactionManager::ReferenceIsBeingAdded(const string &kind, const string &name) {
 	auto key = Git4DataUncommittedKey(kind, name);
 	Git4DataUncommittedReference owner;
