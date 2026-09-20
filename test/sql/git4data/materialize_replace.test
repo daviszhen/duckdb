@@ -181,3 +181,70 @@ query I
 SELECT v FROM m_src AT (BRANCH => 'm1') WHERE k = 1
 ----
 111
+
+# **A caller's own binding replaces the mapping the same way, so it leaves the same orphan (3dq).** A copy
+# materialize made is a table of the identical line once nothing points at it, and binding a table of the
+# caller's over it did not take that copy with it - measured, `t_b5` stayed behind with no row naming it and no
+# listing showing it, so the caller would have to remember the name to clean it up. The rule is the same one
+# the replacement above follows, with the same conditions: the table has to be the feature's, it must not be the
+# table being bound now, and no other branch may name it.
+statement ok
+PRAGMA git4data_create_branch('rb', '')
+
+statement ok
+PRAGMA git4data_materialize('t', 'rb', 't_b5')
+
+statement ok
+CREATE TABLE t_hand (k INTEGER PRIMARY KEY, v INTEGER)
+
+statement ok
+INSERT INTO t_hand VALUES (1, 4242)
+
+statement ok
+PRAGMA git4data_bind_branch_table('t', 'rb', 't_hand')
+
+query I
+SELECT v FROM t AT (BRANCH => 'rb') WHERE k = 1
+----
+4242
+
+statement error
+SELECT count(*) FROM t_b5
+----
+<REGEX>:.*Table with name t_b5 does not exist.*
+
+# the table the caller bound is left where it is, which is the rule 3dp settled for the drop: only what the
+# feature created is the feature's to take
+query I
+SELECT count(*) FROM t_hand
+----
+1
+
+# re-binding the *same* table is not a replacement, and must not drop it - this surface is case-insensitive
+# everywhere else, and the spelling here differs only in case
+statement ok
+PRAGMA git4data_bind_branch_table('t', 'rb', 'T_HAND')
+
+query I
+SELECT v FROM t AT (BRANCH => 'rb') WHERE k = 1
+----
+4242
+
+# and a copy another branch names is not this branch's alone to take, the same clause materialize's own
+# replacement carries: `t_shared` is read by `rc` as well
+statement ok
+PRAGMA git4data_create_branch('rc', '')
+
+statement ok
+PRAGMA git4data_materialize('t', 'rb', 't_shared')
+
+statement ok
+PRAGMA git4data_bind_branch_table('t', 'rc', 't_shared')
+
+statement ok
+PRAGMA git4data_bind_branch_table('t', 'rb', 't_hand')
+
+query I
+SELECT count(*) FROM t_shared
+----
+1

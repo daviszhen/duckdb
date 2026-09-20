@@ -889,6 +889,26 @@ static string PragmaGit4DataBindBranchTable(ClientContext &context, const Functi
 	auto record_name = Git4DataTableName(bound_source);
 	auto stored =
 	    Git4DataEscapedList(Git4DataStoredSourceNames(context, before, source_key, bound_source.oid, record_name));
+	// **Rebinding replaces the mapping, so it leaves the same orphan a second materialize does.** A table the
+	// feature created for this branch is a table of the identical line once nothing points at it, and the
+	// measured case is the one `materialize` already handles: the caller binds a table of their own over a copy
+	// materialize made, and the copy stays behind with no row naming it - and no listing shows it, so the caller
+	// would have to remember the name to clean it up. The rule is the same one, so the same three conditions
+	// apply: the table has to be the feature's (`owned`), it must not be the table being bound now, and no other
+	// branch may name it. A table the caller bound by hand is left where it is (3dp), and so is a copy another
+	// branch was given.
+	string replaced;
+	auto previous = Git4DataFindStorageTable(context, before, source_key, bound_source.oid);
+	if (previous && previous->owned) {
+		auto old_resolved = Git4DataResolveTableName(context, previous->storage, previous->oid);
+		// compared by what the names resolve to rather than as text: this surface is case-insensitive
+		// everywhere else, and re-binding the same table under a different spelling must not drop it
+		auto new_resolved = Git4DataResolveTableName(context, storage_table, 0);
+		if (!old_resolved.empty() && !StringUtil::CIEquals(old_resolved, new_resolved) &&
+		    !transaction_manager.branches.OtherBranchUsesTable(branch_name, old_resolved, previous->oid)) {
+			replaced = StringUtil::Format("\nDROP TABLE IF EXISTS %s;", Git4DataTableSQLName(old_resolved));
+		}
+	}
 	Git4DataBindBranchTableImpl(context, parameters);
 	string result = Git4DataEnsureRegistryTables(context);
 	auto escape = [](const string &value) {
@@ -902,7 +922,8 @@ static string PragmaGit4DataBindBranchTable(ClientContext &context, const Functi
 	result += StringUtil::Format("INSERT INTO %s.%s VALUES ('%s', '%s', '%s', %s);", GIT4DATA_REGISTRY_SCHEMA,
 	                             GIT4DATA_STORAGE_TABLE, escape(branch_name), escape(record_name),
 	                             escape(storage_table), owned ? "true" : "false");
-	return result;
+	// last, as in materialize: the row naming the new table is written before the old copy goes
+	return result + replaced;
 }
 
 //! The generated form: the SQL materialize returns binds the branch in memory and writes the row itself,
