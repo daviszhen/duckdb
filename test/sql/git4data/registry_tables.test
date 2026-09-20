@@ -285,6 +285,76 @@ SELECT (SELECT count(*) FROM git4data.snapshots), (SELECT count(*) FROM git4data
 ----
 1	2
 
+# **The rest of the boundary, and the hole it had (3dm).** A view and a table were refused above; a
+# **sequence, a type and a macro** were not, and neither was any of them written without a schema while the
+# session's default schema was this one - an entry type that never reached a check, and a *resolved* schema
+# that the check did not look at because it read the schema the caller wrote. Measured before the fix:
+# `CREATE SEQUENCE git4data.seq` succeeded (and `duckdb_sequences()` then listed `git4data`, so the schema
+# stopped being invisible), and `SET schema='git4data'; CREATE TABLE mine (x INTEGER)` put a caller's table in
+# the feature's own schema. The refusal is on the resolved schema now, which is what closes both, and an
+# **index** stays allowed exactly as the boundary above says - it is a decision, and it is still the one.
+statement error
+CREATE SEQUENCE git4data.seq
+----
+<REGEX>:.*is in the schema the reference registry is kept in.*
+
+statement error
+CREATE TYPE git4data.ty AS INTEGER
+----
+<REGEX>:.*is in the schema the reference registry is kept in.*
+
+statement error
+CREATE MACRO git4data.mac() AS 1
+----
+<REGEX>:.*is in the schema the reference registry is kept in.*
+
+# the same three written without a schema, through the session's default schema - the form the written-schema
+# check could not see
+statement ok
+SET schema='git4data'
+
+statement error
+CREATE TABLE mine (x INTEGER)
+----
+<REGEX>:.*is in the schema the reference registry is kept in.*
+
+statement error
+CREATE SEQUENCE mine_seq
+----
+<REGEX>:.*is in the schema the reference registry is kept in.*
+
+statement error
+CREATE TYPE mine_type AS INTEGER
+----
+<REGEX>:.*is in the schema the reference registry is kept in.*
+
+statement error
+CREATE MACRO mine_macro() AS 1
+----
+<REGEX>:.*is in the schema the reference registry is kept in.*
+
+# the index allowance is not affected by the default schema, because an index is created where its table is
+statement ok
+CREATE INDEX mine_ix ON snapshots(name)
+
+# and reading the registry by name still works while that schema is the default, which is what a caller who
+# sets it is after
+query I
+SELECT count(*) FROM snapshots
+----
+1
+
+statement ok
+SET schema='main'
+
+# none of it put anything of the caller's in the feature's schema: the tables and the one allowed index are
+# all that is there
+query II
+SELECT (SELECT count(*) FROM duckdb_sequences() WHERE schema_name = 'git4data'),
+       (SELECT count(*) FROM duckdb_types() WHERE schema_name = 'git4data')
+----
+0	0
+
 # The schema is the feature's own bookkeeping, so it is not part of what the database looks like to a
 # caller: SHOW TABLES and information_schema.tables are queries over duckdb_tables(), and that function
 # leaves it out. Reading the tables by name still works - that is how a caller sees what the feature keeps.

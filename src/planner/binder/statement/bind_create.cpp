@@ -29,6 +29,7 @@
 #include "duckdb/parser/statement/create_statement.hpp"
 #include "duckdb/parser/common_table_expression_info.hpp"
 #include "duckdb/parser/expression/star_expression.hpp"
+#include "duckdb/storage/git4data_registry.hpp"
 #include "duckdb/parser/query_node/select_node.hpp"
 #include "duckdb/parser/tableref/basetableref.hpp"
 #include "duckdb/parser/tableref/table_function_ref.hpp"
@@ -326,6 +327,19 @@ SchemaCatalogEntry &Binder::BindCreateSchema(CreateInfo &info) {
 	auto &schema = BindSchema(info);
 	if (schema.catalog.IsSystemCatalog()) {
 		throw BinderException("Cannot create entry in system catalog");
+	}
+	// The registry's schema is the feature's own: its tables are how a reference's state is kept, so a caller
+	// cannot put an object there. The check is on the *resolved* schema rather than the one written, which is
+	// what makes it hold for the forms a written-schema check misses: an unqualified name under
+	// `SET schema='git4data'` (measured, it went through), and the entry types that never reached a check at
+	// all - a sequence, a macro, a type. An **index** on one of those tables is the exception and stays
+	// allowed: it changes no row, the feature's own statements keep it up to date like any other table's, and
+	// `registry_tables.test` pins that allowance so that refusing it later would be a decision.
+	//
+	// Statements the feature generates for itself are marked internal and pass: creating these tables is one.
+	if (!internal_statement && Git4DataIsRegistrySchema(schema.name.GetIdentifierName())) {
+		Git4DataCheckRegistryCreate(schema.name.GetIdentifierName(),
+		                            info.GetQualifiedName().Name().GetIdentifierName());
 	}
 	return schema;
 }
@@ -855,13 +869,7 @@ BoundStatement Binder::Bind(CreateStatement &stmt) {
 	}
 	case CatalogType::VIEW_ENTRY: {
 		auto &base = stmt.info->Cast<CreateViewInfo>();
-		// the registry's schema is the feature's own, and a view in it is a caller's object where its tables
-		// are the only thing that should be - measured, `CREATE VIEW git4data.v AS SELECT 1` went through
-		if (!internal_statement) {
-			Git4DataCheckRegistryCreate(base.GetQualifiedName().Schema().GetIdentifierName(),
-			                            base.GetQualifiedName().Name().GetIdentifierName());
-		}
-		// bind the schema
+		// bind the schema (which is where a view in the registry's schema is refused)
 		auto &schema = BindCreateSchema(*stmt.info);
 		if (base.security_type == ViewSecurityType::SECURE_VIEW) {
 			// secure views cannot be persisted in older storage formats - block their creation instead of silently
@@ -953,12 +961,8 @@ BoundStatement Binder::Bind(CreateStatement &stmt) {
 			break;
 		}
 		// The registry's schema is the feature's own, and creating over one of its tables is another way to
-		// take every reference at once - a way that goes through neither DROP nor ALTER
-		if (!internal_statement) {
-			auto &create_info = stmt.info->Cast<CreateTableInfo>();
-			Git4DataCheckRegistryCreate(create_info.GetQualifiedName().Schema().GetIdentifierName(),
-			                            create_info.GetQualifiedName().Name().GetIdentifierName());
-		}
+		// take every reference at once - a way that goes through neither DROP nor ALTER. The refusal is in
+		// `BindCreateSchema`, which `BindCreateTableInfo` reaches with the schema resolved.
 		auto bound_info = BindCreateTableInfo(std::move(stmt.info));
 		auto root = std::move(bound_info->query);
 
