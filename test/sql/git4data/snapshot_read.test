@@ -98,3 +98,54 @@ SELECT count(*) FROM t AT (SNAPSHOT => 'snap_01')
 
 statement ok
 PRAGMA git4data_drop_snapshot('snap_02')
+
+# A reference is kept for a *table*: taken against the table a statement named, and read by naming that table.
+# A common table expression and a view are neither, and the clause cannot be honoured for them - measured before
+# this refusal existed, both shapes *accepted* `AT (SNAPSHOT => ...)` and ignored it, so the read answered from
+# the live table while the caller had asked for a state. Refusing is the only honest answer; the last case is
+# the shape that does work, with the clause inside the subquery where the table is named.
+statement ok
+PRAGMA git4data_create_snapshot('shape')
+
+statement ok
+INSERT INTO t SELECT range + 1000 AS i FROM range(5)
+
+query I
+SELECT count(*) FROM t AT (SNAPSHOT => 'shape')
+----
+89
+
+statement error
+WITH c AS (SELECT * FROM t) SELECT count(*) FROM c AT (SNAPSHOT => 'shape')
+----
+<REGEX>:.*reads a table as the reference saw it.*common table expression.*
+
+statement ok
+CREATE VIEW v AS SELECT * FROM t
+
+statement error
+SELECT count(*) FROM v AT (SNAPSHOT => 'shape')
+----
+<REGEX>:.*reads a table as the reference saw it.*is a view.*
+
+statement error
+SELECT count(*) FROM v AT (BRANCH => 'shape')
+----
+<REGEX>:.*reads a table as the reference saw it.*is a view.*
+
+# the view itself is an ordinary view, and the clause works where a table is named
+query I
+SELECT count(*) FROM v
+----
+94
+
+query I
+SELECT count(*) FROM (SELECT * FROM t AT (SNAPSHOT => 'shape')) x
+----
+89
+
+statement ok
+DROP VIEW v
+
+statement ok
+PRAGMA git4data_drop_snapshot('shape')

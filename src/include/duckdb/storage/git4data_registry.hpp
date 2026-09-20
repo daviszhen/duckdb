@@ -74,6 +74,12 @@ void Git4DataCheckRegistryCreate(const string &schema, const string &table);
 //! exists!` - which names a schema that no listing shows, and on a fresh one the schema was created and then
 //! disappeared from every listing while every statement inside it was refused as the registry's.
 void Git4DataCheckRegistrySchemaCreate(const string &schema);
+//! Throw when `AT (SNAPSHOT/BRANCH => ...)` is written on something that is not a table. A reference is kept for
+//! the table a statement names, so nothing else can be read at one - and measured before this guard, a view and
+//! a common table expression both *accepted* the clause and ignored it: the read answered from the live table
+//! while the caller had asked for a state. The refusal lives here rather than beside its call site because the
+//! call site is a shared binder file, and the audit's refusal scan reads the feature's own files.
+void Git4DataCheckReferenceAtName(const string &name, bool branch, const string &what);
 //! Rebuild the registries if a rollback has happened since the last rebuild, whichever connection made it.
 //! The registries are shared, so a rollback anywhere can have taken a record away that memory still holds:
 //! consuming the flag on the transaction manager - not only the one on the calling client - is what keeps a

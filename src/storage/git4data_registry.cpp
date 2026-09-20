@@ -665,6 +665,12 @@ void Git4DataCheckRegistrySchemaCreate(const string &schema) {
 	    schema);
 }
 
+void Git4DataCheckReferenceAtName(const string &name, bool branch, const string &what) {
+	throw BinderException("AT (%s => ...) reads a table as the reference saw it, and \"%s\" is %s: a reference "
+	                      "is kept for the table a statement names. Name that table, or read without the clause.",
+	                      branch ? "BRANCH" : "SNAPSHOT", name, what);
+}
+
 void Git4DataCheckRegistryTarget(const string &schema, const string &table) {
 	if (!StringUtil::CIEquals(schema, GIT4DATA_REGISTRY_SCHEMA)) {
 		return;

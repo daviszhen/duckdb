@@ -147,10 +147,44 @@ BoundStatement Binder::Bind(BaseTableRef &ref) {
 	// check if the table name refers to a CTE
 
 	// CTE name should never be qualified (i.e. schema_name should be empty)
+	// What the AT clause asks for is decided *here*, before anything can return early: a binding that returns
+	// without looking at it is a clause that was accepted and ignored - measured, a CTE name carried
+	// `AT (SNAPSHOT => 's1')` and the read answered from the live table.
+	auto at_clause = BindAtClause(ref.at_clause);
+	// AT (SNAPSHOT => 'name') and AT (BRANCH => 'name') both ask for the table as that reference
+	// saw it. A DuckCatalog has no time travel, so the clause must not reach the entry lookup;
+	// the read is served by a reference scan instead, wired up once the LogicalGet exists. The
+	// two units select which registry the name is looked up in and nothing else - a branch is a
+	// pinned reference in the same sense a snapshot is.
+	Git4DataRefKind reference_kind = Git4DataRefKind::SNAPSHOT;
+	bool is_reference_at = false;
+	if (at_clause) {
+		auto at_unit = at_clause->Unit().GetIdentifierName();
+		if (at_unit == "SNAPSHOT") {
+			is_reference_at = true;
+		} else if (at_unit == "BRANCH") {
+			is_reference_at = true;
+			reference_kind = Git4DataRefKind::BRANCH;
+		}
+	}
+	// A reference is keyed by a *table*: the one a statement names when the pin is taken, and the one a read
+	// names to ask for that state. Neither a common table expression nor a view is a table, so the clause
+	// cannot be honoured for them - and refusing is the only honest answer, because ignoring it answers from
+	// the live table while the caller asked for a state (2026-09-20, measured on both shapes).
+	auto refuse_reference_at = [&](const char *what) {
+		if (!is_reference_at) {
+			return;
+		}
+		// the name is an identifier, and rendering it with %s would print the quotes it already carries
+		Git4DataCheckReferenceAtName(ref.Table().GetIdentifierName(), reference_kind == Git4DataRefKind::BRANCH,
+		                             what);
+	};
+
 	// unless we want to refer to the recurring table of "using key".
 	BindingAlias binding_alias(ref.GetQualifiedName().Schema(), ref.Table());
 	auto ctebinding = GetCTEBinding(binding_alias);
 	if (ctebinding && ctebinding->CanBeReferenced()) {
+		refuse_reference_at("a common table expression");
 		ctebinding->Reference();
 
 		// There is a CTE binding in the BindContext.
@@ -174,23 +208,6 @@ BoundStatement Binder::Bind(BaseTableRef &ref) {
 
 	// not a CTE
 	// extract a table or view from the catalog
-	auto at_clause = BindAtClause(ref.at_clause);
-	// AT (SNAPSHOT => 'name') and AT (BRANCH => 'name') both ask for the table as that reference
-	// saw it. A DuckCatalog has no time travel, so the clause must not reach the entry lookup;
-	// the read is served by a reference scan instead, wired up once the LogicalGet exists. The
-	// two units select which registry the name is looked up in and nothing else - a branch is a
-	// pinned reference in the same sense a snapshot is.
-	Git4DataRefKind reference_kind = Git4DataRefKind::SNAPSHOT;
-	bool is_reference_at = false;
-	if (at_clause) {
-		auto at_unit = at_clause->Unit().GetIdentifierName();
-		if (at_unit == "SNAPSHOT") {
-			is_reference_at = true;
-		} else if (at_unit == "BRANCH") {
-			is_reference_at = true;
-			reference_kind = Git4DataRefKind::BRANCH;
-		}
-	}
 	auto entry_at_clause = is_reference_at ? nullptr : (at_clause ? at_clause.get() : entry_retriever.GetAtClause());
 	EntryLookupInfo table_lookup(CatalogType::TABLE_ENTRY, QualifiedName(ref.Table()), entry_at_clause, error_context);
 	// resolve the catalog/schema qualification for the lookup only - the reference itself keeps the name as written,
@@ -266,6 +283,9 @@ BoundStatement Binder::Bind(BaseTableRef &ref) {
 		// in catalogs that do not have transactional DDL
 		table_or_view =
 		    entry_retriever.GetEntry(EntryLookupInfo(table_lookup, bound_name), OnEntryNotFound::THROW_EXCEPTION);
+	}
+	if (table_or_view->type != CatalogType::TABLE_ENTRY) {
+		refuse_reference_at(table_or_view->type == CatalogType::VIEW_ENTRY ? "a view" : "not a table");
 	}
 	switch (table_or_view->type) {
 	case CatalogType::TABLE_ENTRY: {
