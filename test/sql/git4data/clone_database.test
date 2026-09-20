@@ -18,8 +18,16 @@ CHECKPOINT
 # clone takes ten milliseconds and no measurable disk, where copying the file takes eight and a half
 # megabytes. That is what "zero-copy" means at the file level; an in-engine clone that shares row groups
 # is the other route and is not built.
-statement ok
+# The row the call returns says what it copied: the file it read, the file it wrote, and whether the log
+# came with them. There is no log here, and the reason is the harness rather than the feature: the sqllogictest
+# runner is given a `checkpoint_wal_size` of 0 (`test/helpers/test_helpers.cpp`), so every commit checkpoints
+# on its own - measured, `wal_size` reads `0 bytes` after a bare `CREATE TABLE` and `glob('{TEST_DIR}/x.db*')`
+# finds the database file alone. The `true` half needs a log kept, which the dirty clone below does by raising
+# the threshold; `git4data-crash-durability-check.sh` takes the same measurement from outside a test file.
+query III
 PRAGMA git4data_clone_database('{TEST_DIR}/clone_database_clone.db')
+----
+<REGEX>:.*clone_database\.db	<REGEX>:.*clone_database_clone\.db	false
 
 # the clone is a database in its own right: attaching it reads the same rows
 statement ok
@@ -78,6 +86,11 @@ PRAGMA git4data_clone_database('{TEST_DIR}/clone_no_such_dir_xyz/out.db')
 # the references. Measured: the clone reported "Branch \"b\" does not exist", and the same clone taken after
 # a checkpoint read the branch's v = 111 and its capture's v = 111. It is refused now, with the statement
 # that resolves it in the message.
+# the threshold is raised here so the writes below stay in the log instead of being checkpointed by the
+# commit that makes them - which is what puts the log in the clone
+statement ok
+PRAGMA checkpoint_threshold='10GB'
+
 statement ok
 CREATE TABLE r (k INTEGER PRIMARY KEY, v INTEGER)
 
@@ -98,9 +111,12 @@ PRAGMA git4data_create_snapshot('rs', 'rb')
 
 # A clone is the file plus its log, and a reference is a row in the registry tables now, so a clone taken
 # without a checkpoint carries it: what used to be refused here ("Run CHECKPOINT first") is the behaviour
-# those tables were introduced to remove.
-statement ok
+# those tables were introduced to remove. The row says the log came with it, which is the caller's only
+# signal that the clone holds what the log holds.
+query III
 PRAGMA git4data_clone_database('{TEST_DIR}/clone_dirty.db')
+----
+<REGEX>:.*clone_database\.db	<REGEX>:.*clone_dirty\.db	true
 
 statement ok
 ATTACH '{TEST_DIR}/clone_dirty.db' AS cloned_dirty

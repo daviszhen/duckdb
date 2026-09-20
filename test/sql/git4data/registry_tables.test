@@ -77,12 +77,14 @@ PRAGMA git4data_forget_internal('rt_only')
 <REGEX>:.*is not one of the references this feature manages for itself.*
 
 # A branch and the tables it reads are rows too, and they are written the same way, so they survive a restart.
-# **What this restart does not stage is the *log* path**: the runner closes the database, and a close
-# checkpoints (measured: the file holds the copy's name afterwards and no log is left), so what carries these
-# rows here is the file. The case the metadata block could not cover - a session whose only change is a
-# reference, left in the log with nothing to make a checkpoint run - is staged by `git4data-crash-durability-
-# check.sh` in the workspace, which turns the shutdown checkpoint off and shows the file holding neither the
-# reference nor the copy while the log holds both.
+# **Why this restart carries them in the file rather than in a log, located in 3dl**: the sqllogictest harness
+# gives every test a `checkpoint_wal_size` of 0 (`test/helpers/test_helpers.cpp`), so each committing
+# transaction checkpoints on its own and a log never has anything in it - measured, `wal_size` reads
+# `0 bytes` after a bare `CREATE TABLE` and `glob('{TEST_DIR}/x.db*')` finds the database file alone. This
+# comment used to say the *close* is what checkpoints, which is where the same measurement was first taken;
+# that is a consequence, not the cause. **The log path is therefore reachable here**, not only in a shell:
+# `PRAGMA checkpoint_threshold='10GB'` keeps the tail in the log, and the case at the end of this file stages
+# it - a reference made after the last checkpoint coming back through the replay.
 statement ok
 CREATE TABLE rt2 (k INTEGER PRIMARY KEY, v INTEGER)
 
@@ -387,3 +389,35 @@ query I
 SELECT count(*) FROM git4data.snapshots WHERE name = 'rb_kept'
 ----
 1
+
+# **The log path, in a test file.** The harness checkpoints every commit (see the note above the `rt2` case),
+# so nothing normally sits in a log; raising the threshold keeps the tail there instead. The last checkpoint
+# above is what put the file's state in place, so everything written after it is carried by the log alone -
+# which makes this the replay doing the carrying. It is the mechanism the registry-in-tables change was for: a
+# session whose only change is a reference has no reason for a checkpoint to run, and the reference has to come
+# back anyway. **What this case depends on, measured in 3dl**: the open's `Git4DataLoadRegistry`
+# (`storage_manager.cpp`, after `WriteAheadLog::Replay`). Commenting that call out fails **31 of the 83 feature
+# files**, this one among them - so the registry read at open is what makes a reopened database answer for its
+# references, and no reconcile on a later use makes up for it. **What it does *not* depend on is the ordering**:
+# moving the load *above* the replay leaves this file passing unchanged, which is recorded here because the
+# comment first written for this case claimed that move would fail - it does not, and the reason is that a
+# registry loaded too early is repaired from the tables on the next use.
+statement ok
+PRAGMA checkpoint_threshold='10GB'
+
+statement ok
+PRAGMA git4data_create_branch('rt_log', '')
+
+# the log is there, and the branch's row is in it rather than in the file
+query I
+SELECT count(*) FROM glob('{TEST_DIR}/registry_tables.db.wal')
+----
+1
+
+restart
+
+query II
+SELECT (SELECT count(*) FROM git4data.branches WHERE name = 'rt_log'),
+       (SELECT count(*) FROM rt2 AT (BRANCH => 'rt_log'))
+----
+1	4

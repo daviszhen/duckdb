@@ -49,9 +49,13 @@ statement ok
 PRAGMA git4data_branches
 
 # and it can be cleared: unbind takes the mapping back, after which the branch reads its pin because
-# that is what it has, not because a table it was promised is missing
-statement ok
+# that is what it has, not because a table it was promised is missing. The row says what was taken back -
+# which shape, and the table the mapping meant (here the one that was dropped) - because a caller clearing
+# a stale promise is the one who needs to know what it was.
+query IIII
 PRAGMA git4data_unbind('t', 'b')
+----
+b	t	storage	t_b
 
 query I
 SELECT v FROM t AT (BRANCH => 'b') WHERE k = 1
@@ -78,8 +82,11 @@ SELECT v FROM t AT (BRANCH => 'b') WHERE k = 1
 ----
 999
 
-statement ok
+# the second shape: a table the caller handed over is reported as well, and it is left where it is
+query IIII
 PRAGMA git4data_unbind('t', 'b')
+----
+b	t	storage	t_manual
 
 query II
 SELECT (SELECT v FROM t AT (BRANCH => 'b') WHERE k = 1), (SELECT v FROM t_manual WHERE k = 1)
@@ -119,8 +126,11 @@ SELECT v FROM t AT (BRANCH => 'd') WHERE k = 3
 ----
 333
 
-statement ok
+# a delta is the other shape, and the row names the table the *added* rows were in
+query IIII
 PRAGMA git4data_unbind('t', 'd')
+----
+d	t	delta	d_add
 
 query I
 SELECT v FROM t AT (BRANCH => 'd') WHERE k = 3
