@@ -913,7 +913,10 @@ static void ResolveGit4DataRead(ClientContext &context, DuckTransactionManager &
                                 Git4DataReadPlan &plan) {
 	if (kind == Git4DataRefKind::SNAPSHOT) {
 		Git4DataSnapshot snapshot;
-		if (!transaction_manager.snapshots.Get(name, snapshot)) {
+		// A snapshot another transaction added and has not committed is not there yet, the same way its row in
+		// the registry table is not: the registries are shared memory and the table is the caller's view
+		if (!Git4DataReferenceVisible(context, "snapshot", name) ||
+		    !transaction_manager.snapshots.Get(name, snapshot)) {
 			throw InvalidInputException("Snapshot \"%s\" does not exist", name);
 		}
 		plan.table_name = table_name;
@@ -936,7 +939,8 @@ static void ResolveGit4DataRead(ClientContext &context, DuckTransactionManager &
 		return;
 	}
 	Git4DataBranch branch;
-	if (!transaction_manager.branches.Get(name, branch)) {
+	if (!Git4DataReferenceVisible(context, "branch", name) ||
+	    !transaction_manager.branches.Get(name, branch)) {
 		throw InvalidInputException("Branch \"%s\" does not exist", name);
 	}
 	// what the branch holds now: its base, and its own delta if it has one
@@ -2620,6 +2624,11 @@ static unique_ptr<FunctionData> Git4DataBranchesBind(ClientContext &context, Tab
 		return a.name < b.name;
 	});
 	for (auto &branch : entries) {
+		// A branch another transaction has added and has not committed is not there yet: the listing reads the
+		// shared registry, and the registry *table* says the same thing by holding no row for it
+		if (!Git4DataReferenceVisible(context, "branch", branch.name)) {
+			continue;
+		}
 		// Both refusals in create_branch and merge key on whether a branch has moved on from its pin, and a
 		// mapping whose table has been dropped falls back to the pinned image rather than failing: a listing
 		// that said only "has_storage" would report a table the branch cannot read. Both are columns.
@@ -2783,6 +2792,10 @@ static unique_ptr<FunctionData> Git4DataSnapshotsBind(ClientContext &context, Ta
 		return a.name < b.name;
 	});
 	for (auto &snapshot : entries) {
+		// the same rule the branches listing follows
+		if (!Git4DataReferenceVisible(context, "snapshot", snapshot.name)) {
+			continue;
+		}
 		if (snapshot.name == DuckTransactionManager::MERGE_BASE_REFERENCE) {
 			// an internal reference, alive for the length of a merge - and left behind by one that failed,
 			// which is why it is neither counted nor shown

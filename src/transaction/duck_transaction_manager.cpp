@@ -565,6 +565,59 @@ DuckTransactionManager::GetCheckpointType(DuckTransaction &transaction, const Un
 	return CheckpointDecision(checkpoint_type);
 }
 
+//! The key a reference is tracked under while it is uncommitted: its kind and the name a caller wrote
+static string Git4DataUncommittedKey(const string &kind, const string &name) {
+	return kind + "\t" + name;
+}
+
+void DuckTransactionManager::MarkReferenceUncommitted(const string &kind, const string &name,
+                                                      connection_t owner_connection, transaction_t owner_transaction) {
+	lock_guard<mutex> guard(uncommitted_reference_lock);
+	uncommitted_references[Git4DataUncommittedKey(kind, name)] =
+	    Git4DataUncommittedReference {owner_connection, owner_transaction};
+}
+
+bool DuckTransactionManager::TransactionIsActive(transaction_t id) {
+	if (id == MAX_TRANSACTION_ID) {
+		return false;
+	}
+	lock_guard<mutex> guard(transaction_lock);
+	for (auto &transaction : active_transactions) {
+		if (transaction->GetTransactionId() == id) {
+			return true;
+		}
+	}
+	return false;
+}
+
+bool DuckTransactionManager::ReferenceUncommittedByOther(const string &kind, const string &name,
+                                                         connection_t viewer_connection,
+                                                         transaction_t viewer_transaction) {
+	auto key = Git4DataUncommittedKey(kind, name);
+	Git4DataUncommittedReference owner;
+	{
+		lock_guard<mutex> guard(uncommitted_reference_lock);
+		auto entry = uncommitted_references.find(key);
+		if (entry == uncommitted_references.end() || entry->second.connection == viewer_connection) {
+			// nothing was marked, or the caller is the connection that made it: its own uncommitted work
+			return false;
+		}
+		owner = entry->second;
+	}
+	if (owner.transaction == viewer_transaction || TransactionIsActive(owner.transaction)) {
+		return true;
+	}
+	// the transaction that added it is over - committed, rolled back, or gone with its connection - so the
+	// marker is stale and the reference is everyone's again
+	lock_guard<mutex> guard(uncommitted_reference_lock);
+	auto entry = uncommitted_references.find(key);
+	if (entry != uncommitted_references.end() && entry->second.connection == owner.connection &&
+	    entry->second.transaction == owner.transaction) {
+		uncommitted_references.erase(entry);
+	}
+	return false;
+}
+
 VisibilityBound DuckTransactionManager::HighestPinnedBound() const {
 	transaction_t highest = 0;
 	bool any = false;

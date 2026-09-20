@@ -32,6 +32,13 @@ static DuckTransactionManager &Git4DataTransactionManager(ClientContext &context
 	return DuckTransactionManager::Get(*attached);
 }
 
+bool Git4DataReferenceVisible(ClientContext &context, const string &kind, const string &name) {
+	auto &transaction_manager = Git4DataTransactionManager(context);
+	auto &transaction = DuckTransaction::Get(context, transaction_manager.GetDB());
+	return !transaction_manager.ReferenceUncommittedByOther(kind, name, context.GetConnectionId(),
+	                                                        transaction.GetTransactionId());
+}
+
 //===----------------------------------------------------------------------===//
 // Creation
 //===----------------------------------------------------------------------===//

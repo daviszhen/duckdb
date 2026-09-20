@@ -64,6 +64,13 @@ void Git4DataCheckRegistrySchema(const string &schema);
 //! table and every reference with it, and `CREATE TABLE git4data.mine (...)` put a caller's table in the
 //! feature's own schema - neither goes through the guard the write, drop and alter statements have.
 void Git4DataCheckRegistryCreate(const string &schema, const string &table);
+//! Whether a caller may use a reference of this kind under this name. A reference is a row in the registry
+//! tables, so one another transaction has added and has not committed is not there yet - the tables say so
+//! themselves, and this is what keeps the in-memory registries from disagreeing with them. Measured before it:
+//! a snapshot created inside one connection's transaction was listed by another connection and read through
+//! it, while `SELECT ... FROM git4data.snapshots` correctly showed nothing.
+bool Git4DataReferenceVisible(ClientContext &context, const string &kind, const string &name);
+
 //! Rebuild the in-memory registries after a rollback. When the tables are there they are read again; when
 //! they are not and the file's records never came from them, the rollback took the tables with it - the very
 //! first reference of a database creates them in the same transaction - so the registries are emptied rather

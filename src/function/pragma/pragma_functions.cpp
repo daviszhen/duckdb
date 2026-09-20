@@ -636,7 +636,8 @@ static string PragmaGit4DataMaterialize(ClientContext &context, const FunctionPa
 	auto &transaction_manager = GetGit4DataTransactionManager(context);
 
 	Git4DataBranch branch;
-	if (!transaction_manager.branches.Get(branch_name, branch)) {
+	if (!Git4DataReferenceVisible(context, "branch", branch_name) ||
+	    !transaction_manager.branches.Get(branch_name, branch)) {
 		throw InvalidInputException("Branch \"%s\" does not exist", branch_name);
 	}
 	// the source has to be there, and the target must not be. The name may be written any way a table can be
@@ -721,7 +722,8 @@ static string PragmaGit4DataUnbind(ClientContext &context, const FunctionParamet
 	auto branch_name = parameters.values[1].ToString();
 	auto &transaction_manager = GetGit4DataTransactionManager(context);
 	Git4DataBranch branch;
-	if (!transaction_manager.branches.Get(branch_name, branch)) {
+	if (!Git4DataReferenceVisible(context, "branch", branch_name) ||
+	    !transaction_manager.branches.Get(branch_name, branch)) {
 		throw InvalidInputException("Branch \"%s\" does not exist", branch_name);
 	}
 	auto escape = [](const string &value) {
@@ -794,7 +796,8 @@ static void Git4DataBindBranchTableImpl(ClientContext &context, const FunctionPa
 	}
 	auto &transaction_manager = GetGit4DataTransactionManager(context);
 	Git4DataBranch branch;
-	if (!transaction_manager.branches.Get(branch_name, branch)) {
+	if (!Git4DataReferenceVisible(context, "branch", branch_name) ||
+	    !transaction_manager.branches.Get(branch_name, branch)) {
 		throw InvalidInputException("Branch \"%s\" does not exist", branch_name);
 	}
 	// both tables have to be there, or the mapping would be a promise the reads then have to break
@@ -859,6 +862,11 @@ static string PragmaGit4DataBindBranchTable(ClientContext &context, const Functi
 	// the branch is read before the binding, because what the mapping replaces is what it held *before* - a row
 	// written by a build that named the source differently is one this statement has to take with it
 	auto &transaction_manager = GetGit4DataTransactionManager(context);
+	// A branch another transaction added and has not committed is not there yet, so a mapping cannot be made
+	// against it - the same rule the reads follow
+	if (!Git4DataReferenceVisible(context, "branch", branch_name)) {
+		throw InvalidInputException("Branch \"%s\" does not exist", branch_name);
+	}
 	Git4DataBranch before;
 	transaction_manager.branches.Get(branch_name, before);
 	auto &bound_source = Git4DataResolveTable(context, source_table);
@@ -900,7 +908,8 @@ static string PragmaGit4DataBindBranchDelta(ClientContext &context, const Functi
 	auto removed_table = parameters.values[3].ToString();
 	auto &transaction_manager = GetGit4DataTransactionManager(context);
 	Git4DataBranch branch;
-	if (!transaction_manager.branches.Get(branch_name, branch)) {
+	if (!Git4DataReferenceVisible(context, "branch", branch_name) ||
+	    !transaction_manager.branches.Get(branch_name, branch)) {
 		throw InvalidInputException("Branch \"%s\" does not exist", branch_name);
 	}
 	auto &source = Git4DataResolveTable(context, source_table);
@@ -1179,7 +1188,8 @@ static string PragmaGit4DataApply(ClientContext &context, const FunctionParamete
 	auto &transaction_manager = GetGit4DataTransactionManager(context);
 
 	Git4DataBranch branch;
-	if (!transaction_manager.branches.Get(branch_name, branch)) {
+	if (!Git4DataReferenceVisible(context, "branch", branch_name) ||
+	    !transaction_manager.branches.Get(branch_name, branch)) {
 		throw InvalidInputException("Branch \"%s\" does not exist", branch_name);
 	}
 	// the source table can be renamed under the mapping, and the mapping follows the table it was bound to:
@@ -1561,11 +1571,13 @@ static string PragmaGit4DataMerge(ClientContext &context, const FunctionParamete
 	auto &transaction_manager = GetGit4DataTransactionManager(context);
 
 	Git4DataBranch left;
-	if (!transaction_manager.branches.Get(left_name, left)) {
+	if (!Git4DataReferenceVisible(context, "branch", left_name) ||
+	    !transaction_manager.branches.Get(left_name, left)) {
 		throw InvalidInputException("Branch \"%s\" does not exist", left_name);
 	}
 	Git4DataBranch right;
-	if (!transaction_manager.branches.Get(right_name, right)) {
+	if (!Git4DataReferenceVisible(context, "branch", right_name) ||
+	    !transaction_manager.branches.Get(right_name, right)) {
 		throw InvalidInputException("Branch \"%s\" does not exist", right_name);
 	}
 	string merge_into;
@@ -2015,7 +2027,8 @@ static string PragmaGit4DataCreateBranch(ClientContext &context, const FunctionP
 		pin = transaction_manager.GetLastCommit();
 	} else {
 		Git4DataBranch parent_branch;
-		if (transaction_manager.branches.Get(parent, parent_branch)) {
+		if (Git4DataReferenceVisible(context, "branch", parent) &&
+		    transaction_manager.branches.Get(parent, parent_branch)) {
 			// A fork takes the state the parent holds, not the commit the parent was pinned at, whenever
 			// the two differ - which they do the moment the parent has a table of its own or a delta. The
 			// child carries the parent as the line it started from and pins the commit it forked at, so
@@ -2044,7 +2057,8 @@ static string PragmaGit4DataCreateBranch(ClientContext &context, const FunctionP
 			}
 		} else {
 			Git4DataSnapshot parent_snapshot;
-			if (!transaction_manager.snapshots.Get(parent, parent_snapshot)) {
+			if (!Git4DataReferenceVisible(context, "snapshot", parent) ||
+			    !transaction_manager.snapshots.Get(parent, parent_snapshot)) {
 				throw InvalidInputException("Reference \"%s\" is neither a branch nor a snapshot, so a branch "
 				                            "cannot descend from it",
 				                            parent);
@@ -2064,6 +2078,10 @@ static string PragmaGit4DataCreateBranch(ClientContext &context, const FunctionP
 	if (!transaction_manager.branches.Create(name, pin, parent, created, parent_is_snapshot, base_line)) {
 		throw InvalidInputException("Branch \"%s\" already exists", name);
 	}
+	// uncommitted until this transaction commits, like the snapshot above
+	transaction_manager.MarkReferenceUncommitted(
+	    "branch", name, context.GetConnectionId(),
+	    DuckTransaction::Get(context, transaction_manager.GetDB()).GetTransactionId());
 	// the branch is a row now, like a snapshot: it goes to the log with the statement this returns
 	auto escape = [](const string &value) {
 		return StringUtil::Replace(value, "'", "''");
@@ -2081,7 +2099,8 @@ static string PragmaGit4DataDropBranch(ClientContext &context, const FunctionPar
 	auto name = parameters.values[0].ToString();
 	auto &transaction_manager = GetGit4DataTransactionManager(context);
 	Git4DataBranch existing;
-	if (!transaction_manager.branches.Get(name, existing)) {
+	if (!Git4DataReferenceVisible(context, "branch", name) ||
+	    !transaction_manager.branches.Get(name, existing)) {
 		throw InvalidInputException("Branch \"%s\" does not exist", name);
 	}
 	if (transaction_manager.branches.HasChildren(name)) {
@@ -2161,10 +2180,12 @@ static string PragmaGit4DataLCA(ClientContext &context, const FunctionParameters
 	auto right = parameters.values[1].ToString();
 	auto &transaction_manager = GetGit4DataTransactionManager(context);
 	Git4DataBranch existing;
-	if (!transaction_manager.branches.Get(left, existing)) {
+	if (!Git4DataReferenceVisible(context, "branch", left) ||
+	    !transaction_manager.branches.Get(left, existing)) {
 		throw InvalidInputException("Branch \"%s\" does not exist", left);
 	}
-	if (!transaction_manager.branches.Get(right, existing)) {
+	if (!Git4DataReferenceVisible(context, "branch", right) ||
+	    !transaction_manager.branches.Get(right, existing)) {
 		throw InvalidInputException("Branch \"%s\" does not exist", right);
 	}
 	string lca;
@@ -2204,7 +2225,8 @@ static string PragmaGit4DataCreateSnapshot(ClientContext &context, const Functio
 	if (parameters.values.size() > 1) {
 		line = parameters.values[1].ToString();
 		Git4DataBranch branch;
-		if (!transaction_manager.branches.Get(line, branch)) {
+		if (!Git4DataReferenceVisible(context, "branch", line) ||
+		    !transaction_manager.branches.Get(line, branch)) {
 			throw InvalidInputException("Branch \"%s\" does not exist", line);
 		}
 		// **A branch that inherited a line reads it, and that is a line to capture too** (increment 3bv). The
@@ -2228,6 +2250,12 @@ static string PragmaGit4DataCreateSnapshot(ClientContext &context, const Functio
 	if (!transaction_manager.snapshots.Create(name, pin, created, line)) {
 		throw InvalidInputException("Snapshot \"%s\" already exists", name);
 	}
+	// The reference is uncommitted until this transaction commits, and the registries are shared memory: what
+	// makes it this transaction's alone is that the row is in no committed state yet. The marker is dropped
+	// when its transaction ends, so nothing has to clear it on the way out.
+	transaction_manager.MarkReferenceUncommitted(
+	    "snapshot", name, context.GetConnectionId(),
+	    DuckTransaction::Get(context, transaction_manager.GetDB()).GetTransactionId());
 	// The reference is a row in the registry tables from here on: it is written with ordinary DML, in the
 	// caller's transaction, so it reaches the log like any other change and the next open brings it back.
 	// A checkpoint is no longer what decides whether a reference survives.
@@ -2259,7 +2287,8 @@ static void PragmaGit4DataForgetInternal(ClientContext &context, const FunctionP
 static string PragmaGit4DataDropSnapshot(ClientContext &context, const FunctionParameters &parameters) {
 	auto name = parameters.values[0].ToString();
 	auto &transaction_manager = GetGit4DataTransactionManager(context);
-	if (!transaction_manager.snapshots.Drop(name)) {
+	// nothing another transaction has not committed can be dropped by this one
+	if (!Git4DataReferenceVisible(context, "snapshot", name) || !transaction_manager.snapshots.Drop(name)) {
 		throw InvalidInputException("Snapshot \"%s\" does not exist", name);
 	}
 	// and the row goes with it, or the next open would bring the reference back out of the table

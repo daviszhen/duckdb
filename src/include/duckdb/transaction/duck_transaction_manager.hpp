@@ -326,6 +326,21 @@ public:
 	bool ConsumeRegistryReloadNeeded() noexcept {
 		return registry_reload_needed.exchange(false);
 	}
+	//! Mark a reference a transaction has just added and has not committed. A reference is a row in the
+	//! registry tables now, so an uncommitted one belongs to the connection that wrote it - but the
+	//! *registries* are shared memory, so without this another connection would see, list and read through a
+	//! reference that is not there yet. Measured before it: a snapshot created inside one connection's
+	//! transaction was listed by another connection and read through it, while the registry table itself
+	//! correctly showed nothing.
+	void MarkReferenceUncommitted(const string &kind, const string &name, connection_t owner_connection,
+	                              transaction_t owner_transaction);
+	//! Whether this reference is one *another* transaction added and has not committed. A marker whose
+	//! transaction is no longer active is stale - it committed, rolled back, or its connection ended - and is
+	//! dropped here rather than left to hide the reference for the rest of the session.
+	bool ReferenceUncommittedByOther(const string &kind, const string &name, connection_t viewer_connection,
+	                                 transaction_t viewer_transaction);
+	//! Whether this manager is still running that transaction
+	bool TransactionIsActive(transaction_t id);
 	//! Whether no transaction that started before the last commit is still active. Such a transaction
 	//! reads rows the last commit has already deleted, so it is the one reader a reference's bounds say
 	//! nothing about; when there is none, a row the last commit deleted is reachable only by a
@@ -501,6 +516,18 @@ private:
 	atomic<idx_t> active_checkpoint;
 	//! Source of checkpoint identities
 	atomic<idx_t> next_checkpoint_id = {0};
+	//! Who added a reference that is not committed yet: the connection, so that connection sees its own work
+	//! whatever transaction its next statement runs in, and the transaction, which is what says whether the
+	//! marker still means anything - a transaction that is over has committed, rolled back or died with its
+	//! connection, and then the reference is everyone's.
+	struct Git4DataUncommittedReference {
+		connection_t connection;
+		transaction_t transaction;
+	};
+	//! The references a transaction has added and not committed, as "<kind>\t<name>". It guards nothing else:
+	//! the registries stay the shared truth, and this only says which of their records a *caller* may not use.
+	mutex uncommitted_reference_lock;
+	unordered_map<string, Git4DataUncommittedReference> uncommitted_references;
 	//! Set of currently running transactions
 	vector<unique_ptr<DuckTransaction>> active_transactions;
 	//! Set of recently committed transactions
