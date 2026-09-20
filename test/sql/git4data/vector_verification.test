@@ -1,0 +1,131 @@
+# name: test/sql/git4data/vector_verification.test
+# description: Every chunk the feature hands back carries one size, checked with the vector verifier on
+# group: [git4data]
+
+# The feature builds some of its output chunks by hand, and a chunk whose vectors disagree about their size is
+# what `SET debug_verification_mode='verify_vectors'` refuses - the mode the repository's own
+# `test/configs/internal_vector_verification.json` runs the whole suite under. Measured before the fix, in that
+# mode: 56 of the 83 feature files failed with
+#
+#   INTERNAL Error: DataChunk::Verify - size mismatch: vector 3 (INTEGER) has size 0 but chunk has size 2
+#
+# from `git4data_diff`, whose first three columns are written with a vector *writer* (which sizes the vector) and
+# whose key columns are written value by value with `SetValue` (which does not) - a merge diffs two lines, which
+# is how the merge tests reached it first. The same shape was in every listing, whose columns are all written
+# with `SetValue`.
+#
+# This file turns the verifier on for its own queries, so the invariant is asserted by the default suite rather
+# than only by the config run: every statement below goes through the executor's verification on the way out.
+
+load {TEST_DIR}/vector_verification.db
+
+statement ok
+SET debug_verification_mode='verify_vectors'
+
+statement ok
+CREATE TABLE t (k INTEGER PRIMARY KEY, v INTEGER)
+
+statement ok
+INSERT INTO t SELECT range, range FROM range(5)
+
+statement ok
+CHECKPOINT
+
+statement ok
+PRAGMA git4data_create_snapshot('s1')
+
+statement ok
+UPDATE t SET v = v + 100 WHERE k < 3
+
+statement ok
+PRAGMA git4data_create_snapshot('s2')
+
+# the diff with a primary key: the path whose key columns were left unsized
+query II
+SELECT g4d_change, k FROM git4data_diff('t', 's1', 's2') ORDER BY k
+----
+changed	0
+changed	1
+changed	2
+
+# the same diff the other way round, and the row-id path of a diff of one table against itself
+query I
+SELECT count(*) FROM git4data_diff('t', 's2', 's1')
+----
+3
+
+query I
+SELECT count(*) FROM git4data_diff('t', 's1', 's1')
+----
+0
+
+# a branch with a line of its own, so the reference scan runs too
+statement ok
+PRAGMA git4data_create_branch('b', '')
+
+statement ok
+PRAGMA git4data_materialize('t', 'b', 't_b')
+
+statement ok
+UPDATE t_b SET v = v + 1000 WHERE k = 4
+
+query II
+SELECT (SELECT count(*) FROM t AT (BRANCH => 'b')), (SELECT v FROM t AT (BRANCH => 'b') WHERE k = 4)
+----
+5	1004
+
+query II
+SELECT (SELECT count(*) FROM t AT (SNAPSHOT => 's1')), (SELECT v FROM t AT (SNAPSHOT => 's1') WHERE k = 1)
+----
+5	1
+
+# every listing, which is the other surface that built its chunks by hand
+query I
+SELECT count(*) FROM git4data_branches() WHERE branch_name = 'b'
+----
+1
+
+query I
+SELECT count(*) FROM git4data_snapshots() WHERE snapshot_name IN ('s1', 's2')
+----
+2
+
+query III
+SELECT (SELECT count(*) FROM git4data_state()), (SELECT count(*) FROM git4data_limits()),
+       (SELECT count(*) FROM git4data_pitr_state())
+----
+1	1	1
+
+# the physical rows the retention bound keeps (five, plus the three versions the update left behind), the rows
+# a read at everything committed sees, and the probe that reports one row per table
+query III
+SELECT (SELECT rows_at_retention_bound FROM git4data_probe('t')),
+       (SELECT rows_visible_at_bound FROM git4data_probe_at('t', 1000000)),
+       (SELECT count(*) FROM git4data_probe_all('t'))
+----
+8	5	1
+
+# a second line forked from the first, so a diff of the two compares by key - the branch that reads values as
+# well as keys - and a merge has an ancestor to work from
+statement ok
+PRAGMA git4data_create_branch('c', 'b')
+
+statement ok
+PRAGMA git4data_materialize('t', 'c', 't_c')
+
+statement ok
+INSERT INTO t_c VALUES (100, 100)
+
+query II
+SELECT g4d_change, k FROM git4data_diff('t', 'b', 'c') ORDER BY g4d_change, k
+----
+added	100
+
+# and a merge, which diffs the two lines internally and lands the result in the target's own table
+statement ok
+PRAGMA git4data_merge('t', 'b', 'c', 'fail')
+
+query I
+SELECT count(*) FROM t AT (BRANCH => 'b') WHERE k = 100
+----
+1

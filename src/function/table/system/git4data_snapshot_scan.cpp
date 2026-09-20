@@ -1232,13 +1232,13 @@ static void Git4DataSnapshotScanFunction(ClientContext &context, TableFunctionIn
 			for (idx_t i = 0; i < output.ColumnCount(); i++) {
 				output.data[i].Reference(state.scan_chunk.data[i]);
 			}
-			output.SetCardinality(count);
+			output.SetChildCardinality(count);
 			return;
 		}
 		for (idx_t i = 0; i < output.ColumnCount(); i++) {
 			output.data[i].Slice(state.scan_chunk.data[i], kept, kept_count);
 		}
-		output.SetCardinality(kept_count);
+		output.SetChildCardinality(kept_count);
 		return;
 	}
 	if (!state.base_done) {
@@ -1265,7 +1265,7 @@ static void Git4DataSnapshotScanFunction(ClientContext &context, TableFunctionIn
 			for (idx_t i = 0; i < output.ColumnCount(); i++) {
 				output.data[i].Reference(delta.chunk->data[i]);
 			}
-			output.SetCardinality(count);
+			output.SetChildCardinality(count);
 			return;
 		}
 		SelectionVector kept(count);
@@ -1277,7 +1277,7 @@ static void Git4DataSnapshotScanFunction(ClientContext &context, TableFunctionIn
 		for (idx_t i = 0; i < output.ColumnCount(); i++) {
 			output.data[i].Slice(delta.chunk->data[i], kept, kept_count);
 		}
-		output.SetCardinality(kept_count);
+		output.SetChildCardinality(kept_count);
 		return;
 	}
 	state.finished = true;
@@ -2237,6 +2237,11 @@ static idx_t Git4DataDiffEmit(DataChunk &output, const Git4DataDiffState &state,
 		return 0;
 	}
 	auto count = MinValue<idx_t>(remaining, STANDARD_VECTOR_SIZE);
+	// The first three columns are written with a writer, which sizes the vector; the key columns are written
+	// value by value, which does not - `DataChunk::SetValue` only sets the value. A chunk whose vectors
+	// disagree about their size is what `verify_vectors` refuses ("DataChunk::Verify - size mismatch: vector 3
+	// (INTEGER) has size 0 but chunk has size 2", measured on a merge, which diffs two lines), so the sizes are
+	// set once the values are in.
 	auto change_writer = FlatVector::Writer<string_t>(output.data[0], count);
 	auto row_writer = FlatVector::Writer<uint64_t>(output.data[1], count);
 	auto counterpart_writer = FlatVector::Writer<uint64_t>(output.data[2], count);
@@ -2257,6 +2262,7 @@ static idx_t Git4DataDiffEmit(DataChunk &output, const Git4DataDiffState &state,
 			output.data[3 + k].SetValue(i, key_block.GetValue(k, entry.key.row));
 		}
 	}
+	output.SetChildCardinality(count);
 	cursor += count;
 	return count;
 }
@@ -2474,7 +2480,9 @@ static void Git4DataDiffFunction(ClientContext &context, TableFunctionInput &dat
 		return;
 	}
 	state.phase = Git4DataDiffState::Phase::DONE;
-	output.SetCardinality(0);
+	// the children too: a chunk that says zero rows while a vector still holds the last batch's size is the
+	// same inconsistency from the other end
+	output.SetChildCardinality(0);
 }
 
 TableFunction Git4DataDiffFun::GetFunction() {
@@ -2545,7 +2553,8 @@ static void Git4DataListingScan(ClientContext &, TableFunctionInput &data_p, Dat
 		state.cursor++;
 		count++;
 	}
-	output.SetCardinality(count);
+	// every column of a listing is written with `SetValue`, so every one of them has to be sized here
+	output.SetChildCardinality(count);
 }
 
 //! The tables a branch reads for its line, comma-joined, resolved to the names they have now
