@@ -1,0 +1,126 @@
+# name: test/sql/git4data/read_only.test
+# description: Git4Data against a database opened read-only: the reads work, the writes are refused, and the session survives the refusal
+# group: [git4data]
+
+# A read-only database is a normal deployment - analytics against a file someone else wrote - and nothing in this
+# feature's suite had ever opened one. What is pinned here is what such a session can do (read at a reference,
+# list the registry) and what happens when it asks for a write: the engine refuses the *generated* statement, so
+# the message names `INSERT`/`DELETE` rather than the pragma the caller wrote, and every refusal is followed by a
+# query of its own because a refused multi-statement operation used to leave the session in an aborted
+# transaction (that defect is fixed, and this is one more place it could come back).
+#
+# The database is built in this file and then re-attached read-only, rather than committed as a fixture: what
+# matters is that it holds a reference, and a fixture would have to be regenerated every time the format moves.
+
+statement ok
+ATTACH '{TEST_DIR}/read_only_src.db' AS src
+
+statement ok
+USE src
+
+statement ok
+CREATE TABLE t(k INTEGER, v INTEGER)
+
+statement ok
+INSERT INTO t SELECT i, i * 10 FROM range(100) t(i)
+
+statement ok
+PRAGMA git4data_create_snapshot('s1')
+
+statement ok
+CHECKPOINT
+
+# a second database, only so that `src` can stop being the default one and be detached
+statement ok
+ATTACH '{TEST_DIR}/read_only_scratch.db' AS scratch
+
+statement ok
+USE scratch
+
+statement ok
+DETACH src
+
+statement ok
+ATTACH '{TEST_DIR}/read_only_src.db' AS src (READ_ONLY)
+
+statement ok
+USE src
+
+# the reads a read-only session exists for, all of them working
+query I
+SELECT count(*) FROM t AT (SNAPSHOT => 's1')
+----
+100
+
+query I
+SELECT count(*) FROM t
+----
+100
+
+query I
+SELECT count(*) FROM git4data.snapshots
+----
+1
+
+query I
+SELECT count(*) FROM git4data.branches
+----
+0
+
+# every write the feature offers is refused, and the session is used again after each refusal
+statement error
+PRAGMA git4data_create_snapshot('x')
+----
+<REGEX>:.*read-only mode.*
+
+query I
+SELECT count(*) FROM t
+----
+100
+
+statement error
+PRAGMA git4data_create_branch('b', 's1')
+----
+<REGEX>:.*read-only mode.*
+
+query I
+SELECT count(*) FROM t
+----
+100
+
+statement error
+PRAGMA git4data_drop_snapshot('s1')
+----
+<REGEX>:.*read-only mode.*
+
+query I
+SELECT count(*) FROM t
+----
+100
+
+statement error
+PRAGMA git4data_pitr(7)
+----
+<REGEX>:.*read-only mode.*
+
+query I
+SELECT count(*) FROM t
+----
+100
+
+# and nothing was written: the reference is still the only row, and the listing still answers
+query I
+SELECT count(*) FROM git4data.snapshots
+----
+1
+
+query I
+SELECT name FROM git4data.snapshots
+----
+s1
+
+# a read at a reference the database does not hold still reports that, rather than the read-only state
+statement error
+SELECT count(*) FROM t AT (SNAPSHOT => 'nope')
+----
+<REGEX>:.*nope.*
