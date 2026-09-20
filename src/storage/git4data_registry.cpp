@@ -89,63 +89,31 @@ bool Git4DataReferenceVisible(ClientContext &context, const string &, const stri
 //===----------------------------------------------------------------------===//
 string Git4DataEnsureRegistryTables(ClientContext &context) {
 	if (Git4DataRegistryTablesThere(context)) {
-		// already there: nothing to create and nothing to migrate, and the records in them are the truth
+		// already there: the records in them are the truth, and there is nothing else to create
 		return string();
 	}
 	// The tables are created by the statement the pragma returns rather than from inside it: a pragma runs
 	// in a transaction that is not allowed to change the catalog (measured: "Attempting to do catalog
 	// changes on a transaction that is read-only"), and the statement it returns runs as an ordinary one.
+	//
+	// **Nothing is migrated into them, and that is a decision rather than an omission** (2026-09-20): the
+	// build before this one kept a caller's references in a metadata block of the checkpoint, and carrying
+	// those records across was the reason this function used to emit INSERTs for everything already in
+	// memory. The block is being deleted rather than maintained - a file written by that build opens with no
+	// references in it, as it would if the block had never existed - so a legacy record is not read, not
+	// carried, and not kept. What the tables hold is what this build wrote.
 	string result;
 	result += "CREATE SCHEMA IF NOT EXISTS " GIT4DATA_REGISTRY_SCHEMA ";\n";
 	// A snapshot: the name it is held under, the commit it pins, when it was taken, and the branch whose own
 	// line it captured (empty when it captured the table as a commit saw it).
 	result += "CREATE TABLE IF NOT EXISTS " GIT4DATA_REGISTRY_SCHEMA "." GIT4DATA_SNAPSHOTS_TABLE
 	          "(name VARCHAR, pin UBIGINT, created TIMESTAMP, line VARCHAR);\n";
-	// A branch and the two mappings are created here too, so a later build that writes them finds them;
-	// nothing writes them yet, and the metadata block still carries them.
 	result += "CREATE TABLE IF NOT EXISTS " GIT4DATA_REGISTRY_SCHEMA "." GIT4DATA_BRANCHES_TABLE
 	          "(name VARCHAR, pin UBIGINT, parent VARCHAR, created TIMESTAMP, base_line VARCHAR);\n";
 	result += "CREATE TABLE IF NOT EXISTS " GIT4DATA_REGISTRY_SCHEMA "." GIT4DATA_STORAGE_TABLE
 	          "(branch VARCHAR, source VARCHAR, storage VARCHAR, owned BOOLEAN);\n";
 	result += "CREATE TABLE IF NOT EXISTS " GIT4DATA_REGISTRY_SCHEMA "." GIT4DATA_DELTAS_TABLE
 	          "(branch VARCHAR, source VARCHAR, added VARCHAR, removed VARCHAR);\n";
-	// Everything the file already holds has to come across, because the tables are the truth for the
-	// records they carry the moment they exist - and only now, or every later call would insert them again.
-	auto escape = [](const string &value) {
-		return StringUtil::Replace(value, "'", "''");
-	};
-	auto &migrating = Git4DataTransactionManager(context);
-	for (auto &snapshot : migrating.snapshots.List()) {
-		// The references the engine moves itself come across too. They used to be skipped, because a copy
-		// here shadowed the block the engine keeps up to date - measured, a window opened before the tables
-		// existed left a row the reopened database read instead of the block, pointing at the wrong state.
-		// The load now takes the newer of the two pins, so a stale row cannot shadow a moved reference any
-		// more, and the row is what a crash before the next checkpoint has to fall back on.
-		result += StringUtil::Format("INSERT INTO %s.%s VALUES ('%s', %llu, TIMESTAMP '%s', '%s');\n",
-		                             GIT4DATA_REGISTRY_SCHEMA, GIT4DATA_SNAPSHOTS_TABLE, escape(snapshot.name),
-		                             snapshot.pin, Timestamp::ToString(snapshot.created), escape(snapshot.line));
-	}
-	// A branch is three records - the branch, the table it was given for a source, and the delta it differs by
-	// - and every one of them has to come across. The tables are the whole truth for a record the moment they
-	// exist, so a record left in the block is one the next open drops: measured, with only the snapshots
-	// migrated, a file whose records were in the block lost every branch and every mapping as soon as a pragma
-	// created the tables, and the reads then reported "Branch ... does not exist" while the block still held it.
-	for (auto &branch : migrating.branches.List()) {
-		result +=
-		    StringUtil::Format("INSERT INTO %s.%s VALUES ('%s', %llu, '%s', TIMESTAMP '%s', '%s');\n",
-		                       GIT4DATA_REGISTRY_SCHEMA, GIT4DATA_BRANCHES_TABLE, escape(branch.name), branch.pin,
-		                       escape(branch.parent), Timestamp::ToString(branch.created), escape(branch.base_line));
-		for (auto &storage : branch.storage_tables) {
-			result += StringUtil::Format("INSERT INTO %s.%s VALUES ('%s', '%s', '%s', %s);\n", GIT4DATA_REGISTRY_SCHEMA,
-			                             GIT4DATA_STORAGE_TABLE, escape(branch.name), escape(storage.source),
-			                             escape(storage.storage), storage.owned ? "true" : "false");
-		}
-		for (auto &delta : branch.deltas) {
-			result += StringUtil::Format("INSERT INTO %s.%s VALUES ('%s', '%s', '%s', '%s');\n",
-			                             GIT4DATA_REGISTRY_SCHEMA, GIT4DATA_DELTAS_TABLE, escape(branch.name),
-			                             escape(delta.source), escape(delta.added), escape(delta.removed));
-		}
-	}
 	return result;
 }
 
@@ -328,7 +296,8 @@ void Git4DataReconcileRegistry(AttachedDatabase &db, const vector<string> &added
 	// *first* reference creates them, so rolling that one back leaves a database with no tables, and then the
 	// reload above returns early and memory is all there is. What memory may not keep is a reference a finished
 	// transaction of this process added - which is exactly what a stale marker says - while a record with no
-	// marker at all came from an older file's metadata block and is left alone. Measured before this: another
+	// marker at all came from the checkpoint's block rather than from a statement of this process, and is left
+	// alone. Measured before this: another
 	// connection still listed the rolled-back name and still read through it, because nothing looked at the
 	// markers in that case.
 	if (!tables_have_snapshots) {
@@ -357,8 +326,10 @@ void Git4DataReconcileRegistry(AttachedDatabase &db, const vector<string> &added
 
 void Git4DataLoadRegistry(AttachedDatabase &db, bool keep_internal_from_memory) {
 	if (!Git4DataRegistryTablesExist(db)) {
-		// an older file, whose records are in the checkpoint's metadata block: they were loaded by the block
-		// reader, and there is nothing here to read
+		// no registry tables, so this file has no references this build can read. That covers both a file
+		// written before the tables existed - whose records are in the checkpoint's metadata block, and are
+		// deliberately not carried across (2026-09-20) - and one in which nothing has taken a reference yet.
+		// Nothing is rebuilt from the block here, and there is nothing in the tables to read.
 		return;
 	}
 	auto &transaction_manager = DuckTransactionManager::Get(db);

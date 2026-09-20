@@ -286,8 +286,8 @@ static string PragmaGit4DataPitr(ClientContext &context, const FunctionParameter
 		throw InvalidInputException("A point-in-time recovery window cannot be negative");
 	}
 	constexpr int64_t MICROS_PER_DAY = 24LL * 60 * 60 * 1000000;
-	// the tables first: the migration copies what the file already holds into them, and it has to see the
-	// references that were there before this statement opened the window
+	// the tables first, because the statement this returns is what creates them and the window's own row is
+	// inserted after them in the same statement
 	auto result = Git4DataEnsureRegistryTables(context);
 	auto &transaction_manager = GetGit4DataTransactionManager(context);
 	auto created = Timestamp::GetCurrentTimestamp();
@@ -2039,7 +2039,8 @@ static string PragmaGit4DataCreateBranch(ClientContext &context, const FunctionP
 	auto parent = parameters.values[1].ToString();
 	CheckGit4DataReferenceName(name);
 	auto &transaction_manager = GetGit4DataTransactionManager(context);
-	// before the branch joins the registry in memory: the migration into the tables reads that registry
+	// the statement that creates the tables comes before the one that inserts this branch's row: both are
+	// part of what this pragma returns, and they run in that order
 	string result = Git4DataEnsureRegistryTables(context);
 	// the other half of the rule the snapshot side states: the two kinds of reference share a name
 	// namespace wherever one is named without its kind, so they cannot share a name
@@ -2258,9 +2259,9 @@ static string PragmaGit4DataCreateSnapshot(ClientContext &context, const Functio
 	auto name = parameters.values[0].ToString();
 	CheckGit4DataReferenceName(name);
 	auto &transaction_manager = GetGit4DataTransactionManager(context);
-	// The tables are created, and what the file already holds migrated into them, *before* the new reference
-	// joins the in-memory registry: the migration reads that registry, so doing it after would write the row
-	// this call is about twice - measured, a clone of a database with one snapshot had two rows for it.
+	// The tables are created before the row for this reference is inserted - both are parts of the statement
+	// this pragma returns, and they run in that order. There is nothing to copy into them: what a file written
+	// by the older build carries in its metadata block is not read (see `Git4DataEnsureRegistryTables`).
 	string result = Git4DataEnsureRegistryTables(context);
 	// A snapshot and a branch with one name would be indistinguishable wherever a reference is named
 	// without saying which kind it is - a diff, a pick, a restore, and a merge's own image clauses all

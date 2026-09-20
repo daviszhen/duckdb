@@ -31,13 +31,13 @@ struct QueryContext;
 #define GIT4DATA_DELTAS_TABLE    "deltas"
 
 //! Create the schema and the four tables the references are kept in, if they are not there yet, and return
-//! the statements that migrate what a file written before them already holds into them. The tables become
-//! the truth for the records they carry the moment they exist, so a reference that only the metadata block
-//! knows about has to be copied across as they are created - and only then, or every later call would
-//! insert the references again.
+//! the statement that does it. **Nothing is migrated into them**: the build before this one kept a caller's
+//! references in a metadata block of the checkpoint, and the decision of 2026-09-20 is that the block is
+//! deleted rather than carried, so a file written by that build opens with the tables this statement creates
+//! - empty - and the records in its block are not read.
 string Git4DataEnsureRegistryTables(ClientContext &context);
-//! Whether those tables are there. This is what tells a file written before them from one written after:
-//! the older form carries the same records in the checkpoint's metadata block instead.
+//! Whether those tables are there. A file that has none is a file whose references this build does not have:
+//! either one written before the tables existed, or one in which nothing has taken a reference yet.
 bool Git4DataRegistryTablesExist(AttachedDatabase &db);
 //! The same question from a statement, which has a client context of its own
 bool Git4DataRegistryTablesThere(ClientContext &context);

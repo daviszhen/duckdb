@@ -302,10 +302,11 @@ void SingleFileCheckpointWriter::CreateCheckpoint() {
 	// makes that deletion compare as not yet committed, and the deleted rows come back.
 	// What is written here is what the block is still for: the commit-id counter, the point-in-time window and
 	// the two quotas. The references themselves are rows in the registry tables now, so they are not written
-	// into this block any more - the lists below are what an older file carries, and the reader still accepts
-	// them so such a file opens and is migrated into the tables on its first change. Dropping the block
-	// altogether is not an option: the counter has to be restored before any transaction exists, and a table
-	// row cannot be read without one.
+	// into this block any more, and the lists below are written empty - what an older file carries in them is
+	// read by nobody: those records are not carried into the tables (2026-09-20, see
+	// `Git4DataEnsureRegistryTables`), because the block is on its way out rather than being maintained.
+	// What keeps the block itself alive for now is the counter: it has to be restored before any transaction
+	// exists, and a table row cannot be read without one.
 	idx_t registry_block = 0;
 	idx_t registry_offset = 0;
 	auto start_timestamp = transaction_manager.GetStartTimestampCounter();
