@@ -114,6 +114,11 @@ string Git4DataEnsureRegistryTables(ClientContext &context) {
 	          "(branch VARCHAR, source VARCHAR, storage VARCHAR, owned BOOLEAN);\n";
 	result += "CREATE TABLE IF NOT EXISTS " GIT4DATA_REGISTRY_SCHEMA "." GIT4DATA_DELTAS_TABLE
 	          "(branch VARCHAR, source VARCHAR, added VARCHAR, removed VARCHAR);\n";
+	// The quotas are settings rather than references, and they are rows for the same reason the references are:
+	// a row is transactional and reaches the log, where a property of the checkpoint's registry block was
+	// neither. `git4data_limit` writes them and the load below reads them back.
+	result += "CREATE TABLE IF NOT EXISTS " GIT4DATA_REGISTRY_SCHEMA "." GIT4DATA_STATE_TABLE
+	          "(key VARCHAR, value VARCHAR);\n";
 	return result;
 }
 
@@ -492,6 +497,22 @@ void Git4DataLoadRegistry(AttachedDatabase &db, bool keep_internal_from_memory) 
 	// the block's copy is newer, or it is not, and the window is off
 	for (auto &snapshot : internal_snapshots) {
 		transaction_manager.snapshots.Create(snapshot.name, snapshot.pin, snapshot.created, snapshot.line);
+	}
+	// the settings the feature keeps are rows too: the quotas were properties of the checkpoint's registry block
+	// until 3ee, and a row is transactional where a block property was only as durable as the next checkpoint.
+	// A key that is not there leaves the value at its default, which is what a database with no quotas at all
+	// has - and what a file from the older build has, whose block this build does not read.
+	if (auto state = Git4DataRegistryTable(db, GIT4DATA_STATE_TABLE)) {
+		Git4DataScanRegistryTable(db, *state, {LogicalType::VARCHAR, LogicalType::VARCHAR},
+		                          [&](DataChunk &chunk, idx_t row) {
+			                          auto key = chunk.GetValue(0, row).GetValue<string>();
+			                          auto value = chunk.GetValue(1, row).GetValue<string>();
+			                          if (StringUtil::CIEquals(key, "snapshot_limit")) {
+				                          transaction_manager.snapshot_limit = std::stoll(value);
+			                          } else if (StringUtil::CIEquals(key, "branch_limit")) {
+				                          transaction_manager.branch_limit = std::stoll(value);
+			                          }
+		                          });
 	}
 	// what is in the tables is on disk, so a checkpoint does not have to force itself for the registries
 	transaction_manager.snapshots.MarkClean();

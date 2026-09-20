@@ -1995,25 +1995,34 @@ static void CheckGit4DataReferenceLimit(const string &plural, idx_t count, int64
 
 //! Set how many snapshots or branches this database may hold: -1 unlimited, 0 disabled, a positive
 //! number is the most. The recovery window's own reference is not counted.
-static void PragmaGit4DataLimit(ClientContext &context, const FunctionParameters &parameters) {
+//!
+//! The value is a row in `git4data.state` rather than a property of the checkpoint's registry block (3ee). The
+//! pragma therefore returns a statement where it used to set a field and mark the registries dirty - the mark
+//! existed because a checkpoint skips its body when the log is empty, so a quota set in a session that changed
+//! nothing else was lost (measured, `limits.test` read -1 for a limit of 3 after a restart). A row is written
+//! through the caller's transaction and reaches the log, so there is nothing to remember to flush.
+static string PragmaGit4DataLimit(ClientContext &context, const FunctionParameters &parameters) {
 	auto kind = StringUtil::Lower(parameters.values[0].ToString());
 	auto limit = parameters.values[1].GetValue<int64_t>();
 	if (limit < -1) {
 		throw InvalidInputException("A limit is -1 for unlimited, 0 to disable, or a positive number");
 	}
 	auto &transaction_manager = GetGit4DataTransactionManager(context);
+	string key;
 	if (kind == "snapshot") {
 		transaction_manager.snapshot_limit = limit;
+		key = "snapshot_limit";
 	} else if (kind == "branch") {
 		transaction_manager.branch_limit = limit;
+		key = "branch_limit";
 	} else {
 		throw InvalidInputException("Limits are set for \"snapshot\" or \"branch\", not \"%s\"", kind);
 	}
-	// the quota is written in the same block as the registry, and a checkpoint skips its body when the log is
-	// empty: without this, setting a quota and checkpointing in a session that changed nothing else lost it -
-	// measured, limits.test read -1 for a limit of 3 after a restart
-	transaction_manager.snapshots.MarkDirty();
-	transaction_manager.branches.MarkDirty();
+	auto result = Git4DataEnsureRegistryTables(context);
+	result += StringUtil::Format(
+	    "DELETE FROM %s.%s WHERE key = '%s';\nINSERT INTO %s.%s VALUES ('%s', '%lld');\n", GIT4DATA_REGISTRY_SCHEMA,
+	    GIT4DATA_STATE_TABLE, key, GIT4DATA_REGISTRY_SCHEMA, GIT4DATA_STATE_TABLE, key, (long long)limit);
+	return result;
 }
 
 static string PragmaGit4DataLimits(ClientContext &context, const FunctionParameters &parameters) {

@@ -29,6 +29,9 @@ struct QueryContext;
 #define GIT4DATA_BRANCHES_TABLE  "branches"
 #define GIT4DATA_STORAGE_TABLE   "storage"
 #define GIT4DATA_DELTAS_TABLE    "deltas"
+//! The one table that holds no references: the database-wide settings the feature keeps, which used to be
+//! properties of the checkpoint's registry block. Rows are `key`/`value`.
+#define GIT4DATA_STATE_TABLE     "state"
 
 //! Create the schema and the four tables the references are kept in, if they are not there yet, and return
 //! the statement that does it. **Nothing is migrated into them**: the build before this one kept a caller's

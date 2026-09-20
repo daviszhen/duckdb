@@ -331,8 +331,6 @@ void SingleFileCheckpointWriter::CreateCheckpoint() {
 		// reference behind and never move it again
 		registry_serializer.WriteProperty<bool>(103, "pitr_enabled", transaction_manager.PitrEnabled());
 		registry_serializer.WriteProperty<int64_t>(104, "pitr_window", transaction_manager.PitrWindow().value);
-		registry_serializer.WriteProperty<int64_t>(105, "snapshot_limit", transaction_manager.snapshot_limit);
-		registry_serializer.WriteProperty<int64_t>(106, "branch_limit", transaction_manager.branch_limit);
 		// The snapshots a caller made are rows in git4data.snapshots and are not written here. The ones the
 		// feature manages for itself are, because the engine moves them on its own rather than through a
 		// statement: the point-in-time window's reference is created and moved from C++ (measured - leaving it
@@ -511,10 +509,14 @@ void SingleFileCheckpointReader::LoadFromStorage() {
 		if (pitr_enabled) {
 			transaction_manager.RestorePitr(timestamp_t(pitr_window));
 		}
-		transaction_manager.snapshot_limit =
-		    registry_deserializer.ReadPropertyWithExplicitDefault<int64_t>(105, "snapshot_limit", -1);
-		transaction_manager.branch_limit =
-		    registry_deserializer.ReadPropertyWithExplicitDefault<int64_t>(106, "branch_limit", -1);
+		// The two quotas used to be read into the transaction manager here, and **they still have to be read
+		// even though nothing uses them**: the block's deserializer is positional and rejects a source that has
+		// fields left over, so a file the previous build wrote fails to open with `expected end of object, but
+		// found field id: 105` - measured with these two lines removed, on the fixture the no-migration check
+		// opens. The values are rows now (`git4data.state`, written by `git4data_limit` and read by the load),
+		// so what is read here is discarded: an old file's quotas are not carried across.
+		(void)registry_deserializer.ReadPropertyWithExplicitDefault<int64_t>(105, "snapshot_limit", -1);
+		(void)registry_deserializer.ReadPropertyWithExplicitDefault<int64_t>(106, "branch_limit", -1);
 		// optional as well: a file written since the references moved into their own tables carries no record
 		// list here, only the counter, the window and the quotas
 		registry_deserializer.ReadOptionalList(100, "snapshots", [&](Deserializer::List &list, idx_t i) {

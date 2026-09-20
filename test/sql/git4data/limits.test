@@ -156,6 +156,15 @@ PRAGMA git4data_limits
 ----
 3	3	2	2
 
+# Where that came from is a row now, not a property of the checkpoint's registry block (3ee): the quotas are
+# settings the feature keeps in `git4data.state`, written by the pragma through the caller's transaction, so
+# they no longer depend on a checkpoint having run after the pragma.
+query II
+SELECT key, value FROM git4data.state ORDER BY key
+----
+branch_limit	2
+snapshot_limit	3
+
 # And it is still in force after the restart.
 statement error
 PRAGMA git4data_create_snapshot('s5')
