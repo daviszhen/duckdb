@@ -155,3 +155,36 @@ query I
 SELECT count(*) FROM t
 ----
 200
+
+# **What turning the window off does, and that it stays off.** This file turned the window off and on again
+# while exercising the migration, but never asserted the state that the *first* half leaves: the off call is a
+# delete in the caller's transaction, so the setting and the reference that carried it go together - and a
+# window that came back after a reopen would be a window nobody opened. The crash-durability script covers the
+# killed-process case; this is the ordinary close.
+statement ok
+PRAGMA git4data_pitr_off
+
+query IIII
+SELECT (SELECT pitr_enabled FROM git4data_pitr_state()),
+       (SELECT reference_held FROM git4data_pitr_state()),
+       (SELECT count(*) FROM git4data.snapshots WHERE starts_with(name, '__')),
+       (SELECT count(*) FROM git4data_snapshots() WHERE starts_with(snapshot_name, '__'))
+----
+false	false	0	0
+
+# the window is off, so a read at its reference is refused rather than answered
+statement error
+SELECT count(*) FROM t AT (SNAPSHOT => '__pitr__')
+----
+<REGEX>:.*does not exist.*
+
+restart
+
+# and it is still off, with no reference left behind in the file
+query IIII
+SELECT (SELECT pitr_enabled FROM git4data_pitr_state()),
+       (SELECT reference_held FROM git4data_pitr_state()),
+       (SELECT count(*) FROM git4data.snapshots WHERE starts_with(name, '__')),
+       (SELECT count(*) FROM git4data_snapshots() WHERE starts_with(snapshot_name, '__'))
+----
+false	false	0	0
