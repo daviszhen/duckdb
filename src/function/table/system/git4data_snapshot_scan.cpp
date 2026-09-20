@@ -355,12 +355,15 @@ struct Git4DataDeltaRead {
 
 //! The hash of a row's key for every removal set that uses hashes, so the per-row loop below can look a
 //! row up in each of them. It is one column per key column per set, computed for the chunk rather than
-//! for a row, which is what keeps a filter over two sets from costing two string builds a row.
-static void Git4DataHashForRemovals(const vector<Git4DataRemovedKeys> &removals,
+//! for a row, which is what keeps a filter over two sets from costing two string builds a row. The sets are
+//! *pointed at* rather than held: a set of half a million keys is tens of megabytes, and a diff that copied
+//! its sides' sets to filter its base held two of each - measured, a diff that changes every row of a
+//! million peaked at 298 MiB that way and 255 MiB without the copies.
+static void Git4DataHashForRemovals(const vector<Git4DataRemovedKeys *> &removals,
                                     vector<unique_ptr<DataChunk>> &hashes, idx_t from, DataChunk &chunk,
                                     const vector<idx_t> &key_positions) {
 	for (idx_t i = from; i < removals.size(); i++) {
-		if (!removals[i].Empty() && !removals[i].typed && removals[i].hashes_usable) {
+		if (!removals[i]->Empty() && !removals[i]->typed && removals[i]->hashes_usable) {
 			Git4DataHashKeyColumns(chunk, key_positions, *hashes[i]);
 		}
 	}
@@ -370,13 +373,13 @@ static void Git4DataHashForRemovals(const vector<Git4DataRemovedKeys> &removals,
 //! row when every overlay that comes after the one it came from leaves it alone: the base is filtered by
 //! all of them, and an overlay's own added rows only by the overlays that come after it - a key an overlay
 //! removed is gone from everything below it, and a row added on top of that is there again.
-static idx_t Git4DataKeepRows(ClientContext &context, const vector<Git4DataRemovedKeys> &removals,
+static idx_t Git4DataKeepRows(ClientContext &context, const vector<Git4DataRemovedKeys *> &removals,
                               vector<unique_ptr<DataChunk>> &hashes, idx_t from, DataChunk &chunk,
                               const vector<idx_t> &key_positions, SelectionVector &kept) {
 	auto count = chunk.size();
 	bool any = false;
 	for (idx_t i = from; i < removals.size(); i++) {
-		if (!removals[i].Empty()) {
+		if (!removals[i]->Empty()) {
 			any = true;
 			break;
 		}
@@ -389,7 +392,7 @@ static idx_t Git4DataKeepRows(ClientContext &context, const vector<Git4DataRemov
 	for (idx_t row = 0; row < count; row++) {
 		bool removed = false;
 		for (idx_t i = from; i < removals.size(); i++) {
-			if (Git4DataRowWasRemoved(removals[i], chunk, key_positions, *hashes[i], row)) {
+			if (Git4DataRowWasRemoved(*removals[i], chunk, key_positions, *hashes[i], row)) {
 				removed = true;
 				break;
 			}
@@ -409,8 +412,11 @@ struct Git4DataSnapshotScanState : public GlobalTableFunctionState {
 	vector<idx_t> key_positions;
 	//! The overlays this read applies, in the order they apply, with the keys each removed
 	vector<Git4DataDeltaRead> deltas;
-	//! The removals of every overlay, one bucket each, because the base is filtered by all of them
+	//! The removals of every overlay, one bucket each, because the base is filtered by all of them. The sets
+	//! are held here once and pointed at by the filters, so no read keeps two copies of a half-million-key set
 	vector<Git4DataRemovedKeys> removals;
+	//! The same sets, in the same order, as the filters walk them
+	vector<Git4DataRemovedKeys *> removal_views;
 	vector<unique_ptr<DataChunk>> removal_hashes;
 	//! The overlay whose added rows are being read, and once the base is behind this read
 	idx_t delta_index = 0;
@@ -978,6 +984,10 @@ static unique_ptr<GlobalTableFunctionState> Git4DataSnapshotScanInit(ClientConte
 		result->removal_hashes[i]->Initialize(Allocator::Get(context), hash_types);
 		result->deltas.push_back(std::move(read));
 	}
+	// the sets are all in place, so the filters point at them rather than hold copies of them
+	for (auto &entry : result->removals) {
+		result->removal_views.push_back(&entry);
+	}
 	return std::move(result);
 }
 
@@ -1022,8 +1032,8 @@ static void Git4DataSnapshotScanFunction(ClientContext &context, TableFunctionIn
 		// every overlay's removals apply to the base: a key one of them took away is not part of the
 		// line, whichever overlay took it
 		SelectionVector kept(count);
-		auto kept_count = Git4DataKeepRows(context, state.removals, state.removal_hashes, 0, state.scan_chunk,
-		                                   state.key_positions, kept);
+		auto kept_count = Git4DataKeepRows(context, state.removal_views, state.removal_hashes, 0,
+		                                   state.scan_chunk, state.key_positions, kept);
 		if (kept_count == 0) {
 			// every row of this chunk was removed, so the next one is what to look at
 			continue;
@@ -1069,8 +1079,8 @@ static void Git4DataSnapshotScanFunction(ClientContext &context, TableFunctionIn
 			return;
 		}
 		SelectionVector kept(count);
-		auto kept_count = Git4DataKeepRows(context, state.removals, state.removal_hashes, state.delta_index + 1,
-		                                   *delta.chunk, state.key_positions, kept);
+		auto kept_count = Git4DataKeepRows(context, state.removal_views, state.removal_hashes,
+		                                   state.delta_index + 1, *delta.chunk, state.key_positions, kept);
 		if (kept_count == 0) {
 			continue;
 		}
@@ -1901,8 +1911,11 @@ static void Git4DataDiffCollect(ClientContext &context, Git4DataDiffState &state
 	ScanOptions options(side_own_storage ? TransactionData(side_view.GetTransactionId(), bound)
 	                                     : TransactionData(MAX_TRANSACTION_ID, bound));
 	// The base is filtered by every overlay's removals: a key one of them took away is not part of the
-	// side, whichever overlay took it.
-	vector<Git4DataRemovedKeys> removals;
+	// side, whichever overlay took it. The sets are *pointed at*, not copied: they belong to the side and
+	// live for the whole walk, and a copy of a half-million-key set is tens of megabytes that a diff was
+	// paying twice - measured, a diff that changes every row of a million peaked at 298 MiB with the copies
+	// and 255 MiB without them.
+	vector<Git4DataRemovedKeys *> removals;
 	vector<unique_ptr<DataChunk>> removal_hashes;
 	vector<LogicalType> hash_types;
 	for (idx_t i = 0; i < key_positions.size(); i++) {
@@ -1912,7 +1925,7 @@ static void Git4DataDiffCollect(ClientContext &context, Git4DataDiffState &state
 		auto hashes = make_uniq<DataChunk>();
 		hashes->Initialize(Allocator::Get(context), hash_types);
 		removal_hashes.push_back(std::move(hashes));
-		removals.push_back(delta.removed);
+		removals.push_back(&delta.removed);
 	}
 	while (true) {
 		state.scan_chunk.Reset();
@@ -1939,7 +1952,8 @@ static void Git4DataDiffCollect(ClientContext &context, Git4DataDiffState &state
 		for (idx_t i = 0; i < count; i++) {
 			bool removed = false;
 			for (idx_t s = 0; s < removals.size(); s++) {
-				if (Git4DataRowWasRemoved(removals[s], state.scan_chunk, key_positions, *removal_hashes[s], i)) {
+				if (Git4DataRowWasRemoved(*removals[s], state.scan_chunk, key_positions, *removal_hashes[s],
+				                          i)) {
 					removed = true;
 					break;
 				}
@@ -1972,7 +1986,8 @@ static void Git4DataDiffCollect(ClientContext &context, Git4DataDiffState &state
 			for (idx_t i = 0; i < count; i++) {
 				bool removed = false;
 				for (idx_t s = index + 1; s < removals.size(); s++) {
-					if (Git4DataRowWasRemoved(removals[s], *delta.chunk, key_positions, *removal_hashes[s], i)) {
+					if (Git4DataRowWasRemoved(*removals[s], *delta.chunk, key_positions, *removal_hashes[s],
+					                          i)) {
 						removed = true;
 						break;
 					}
