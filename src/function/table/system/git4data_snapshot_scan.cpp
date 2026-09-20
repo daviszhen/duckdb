@@ -2490,6 +2490,14 @@ TableFunction Git4DataDiffFun::GetFunction() {
 	                  Git4DataDiffFunction, Git4DataDiffBind);
 	fun.init_global = Git4DataDiffInit;
 	fun.projection_pushdown = false;
+	// A plan that carries this function is not round-tripped by `debug_verify_serializer`, and claiming it can be
+	// is worse than useless: a table function's arguments are not part of the serialized plan, so the
+	// deserializer re-binds the function with an **empty** input list - measured under that mode,
+	// `INTERNAL Error: Attempted to access index 0 within vector of size 0` inside `Git4DataSnapshotScanBind`,
+	// reached from `LogicalGet::Deserialize`. The bind data is not serialized either, so the honest declaration is
+	// that this function does not claim serialization support (the flag exists for exactly this:
+	// `LogicalGet::SupportSerialization` consults it).
+	fun.verify_serialization = false;
 	return fun;
 }
 
@@ -2503,6 +2511,14 @@ TableFunction Git4DataSnapshotScanFun::GetFunction() {
 	// always produce every column and let the projection happen above, so a LogicalGet built
 	// from this function by the binder does not have to translate column ids
 	fun.projection_pushdown = false;
+	// A plan that carries this function is not round-tripped by `debug_verify_serializer`, and claiming it can be
+	// is worse than useless: a table function's arguments are not part of the serialized plan, so the
+	// deserializer re-binds the function with an **empty** input list - measured under that mode,
+	// `INTERNAL Error: Attempted to access index 0 within vector of size 0` inside `Git4DataSnapshotScanBind`,
+	// reached from `LogicalGet::Deserialize`. The bind data is not serialized either, so the honest declaration is
+	// that this function does not claim serialization support (the flag exists for exactly this:
+	// `LogicalGet::SupportSerialization` consults it).
+	fun.verify_serialization = false;
 	return fun;
 }
 
@@ -3083,6 +3099,14 @@ TableFunction Git4DataProbeFun::GetFunction() {
 	TableFunction fun("git4data_probe", {LogicalType::VARCHAR}, Git4DataListingScan, Git4DataProbeBind);
 	fun.init_global = Git4DataListingInit;
 	fun.projection_pushdown = false;
+	// A plan that carries this function is not round-tripped by `debug_verify_serializer`, and claiming it can be
+	// is worse than useless: a table function's arguments are not part of the serialized plan, so the
+	// deserializer re-binds the function with an **empty** input list - measured under that mode,
+	// `INTERNAL Error: Attempted to access index 0 within vector of size 0` inside `Git4DataSnapshotScanBind`,
+	// reached from `LogicalGet::Deserialize`. The bind data is not serialized either, so the honest declaration is
+	// that this function does not claim serialization support (the flag exists for exactly this:
+	// `LogicalGet::SupportSerialization` consults it).
+	fun.verify_serialization = false;
 	return fun;
 }
 
@@ -3094,6 +3118,14 @@ TableFunction Git4DataProbeAllFun::GetFunction() {
 	TableFunction fun("git4data_probe_all", {LogicalType::VARCHAR}, Git4DataListingScan, Git4DataProbeAllBind);
 	fun.init_global = Git4DataListingInit;
 	fun.projection_pushdown = false;
+	// A plan that carries this function is not round-tripped by `debug_verify_serializer`, and claiming it can be
+	// is worse than useless: a table function's arguments are not part of the serialized plan, so the
+	// deserializer re-binds the function with an **empty** input list - measured under that mode,
+	// `INTERNAL Error: Attempted to access index 0 within vector of size 0` inside `Git4DataSnapshotScanBind`,
+	// reached from `LogicalGet::Deserialize`. The bind data is not serialized either, so the honest declaration is
+	// that this function does not claim serialization support (the flag exists for exactly this:
+	// `LogicalGet::SupportSerialization` consults it).
+	fun.verify_serialization = false;
 	return fun;
 }
 
@@ -3106,6 +3138,14 @@ TableFunction Git4DataProbeAtFun::GetFunction() {
 	                  Git4DataProbeAtBind);
 	fun.init_global = Git4DataListingInit;
 	fun.projection_pushdown = false;
+	// A plan that carries this function is not round-tripped by `debug_verify_serializer`, and claiming it can be
+	// is worse than useless: a table function's arguments are not part of the serialized plan, so the
+	// deserializer re-binds the function with an **empty** input list - measured under that mode,
+	// `INTERNAL Error: Attempted to access index 0 within vector of size 0` inside `Git4DataSnapshotScanBind`,
+	// reached from `LogicalGet::Deserialize`. The bind data is not serialized either, so the honest declaration is
+	// that this function does not claim serialization support (the flag exists for exactly this:
+	// `LogicalGet::SupportSerialization` consults it).
+	fun.verify_serialization = false;
 	return fun;
 }
 

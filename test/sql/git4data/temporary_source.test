@@ -21,9 +21,9 @@ SELECT count(DISTINCT row_group_id) FROM pragma_storage_info('tt')
 1
 
 query I
-SELECT count(*) FROM pragma_storage_info('tt')
+SELECT count(DISTINCT column_name) FROM pragma_storage_info('tt')
 ----
-4
+2
 
 # A pin taken right after the rows were written sees them here. Measured on the shell, that is *not*
 # always so: in a session where the write is the database's very first commit, the pin recorded right

@@ -70,6 +70,13 @@ void PreparedStatementVerification::ConvertConstants(unique_ptr<ParsedExpression
 //! issued - the rewrite is an internal detail, so errors and logging must keep reporting the original query
 static void ReplaceStatement(unique_ptr<SQLStatement> &statement, unique_ptr<SQLStatement> replacement) {
 	replacement->query = statement->query;
+	// Whether the engine wrote this statement is part of what it *means*, not part of how it is written: a
+	// statement a pragma returned is the extension's own, which is what lets it write tables of its own that a
+	// caller is refused (the git4data reference registry is kept that way). A re-parsed, re-serialized or
+	// copied statement that loses the flag is a *different* statement - measured, with
+	// `debug_verify_statement='reparse_statement'`, the feature's own `git4data_create_snapshot` was refused by
+	// the guard that exists to refuse a caller writing the registry: 84 of 84 feature files failing.
+	replacement->internal = statement->internal;
 	statement = std::move(replacement);
 }
 
@@ -212,6 +219,7 @@ void ClientContext::StatementVerification(ClientContextLock &lock, unique_ptr<SQ
 		string name = "__duckdb_verification_prepared_statement_" + UUID::ToString(UUID::GenerateRandomUUID());
 		auto prepare = make_uniq<PrepareStatement>();
 		prepare->name = Identifier(name);
+		prepare->internal = statement->internal;
 		prepare->statement = std::move(prepare_base);
 
 		// execute the PREPARE
@@ -236,6 +244,7 @@ void ClientContext::StatementVerification(ClientContextLock &lock, unique_ptr<SQ
 		// i.e. EXECUTE p('hello', 42)
 		auto execute = make_uniq<ExecuteStatement>();
 		execute->name = Identifier(name);
+		execute->internal = statement->internal;
 		execute->named_values = std::move(prep_verifier.values);
 
 		ReplaceStatement(statement, std::move(execute));

@@ -1,0 +1,144 @@
+# name: test/sql/git4data/verification_modes.test
+# description: The feature's own statements survive every statement and plan verification mode
+# group: [git4data]
+
+# The repository's own CI runs the suite under a set of configurations (`make test_configs`), and three of them
+# rewrite statements or plans before executing them. A rewrite that is "an internal detail" must not change what
+# the statement *is*, and for this feature that includes one flag: a statement a `git4data_*` pragma returns is
+# the engine's own, which is what lets it write tables of its own that a caller is refused. Measured at 3dv, the
+# feature failed those configurations for three separate reasons:
+#
+#   * `debug_verify_statement` (reparse, serialize, copy, prepared) re-parsed the statement and dropped the flag,
+#     so the feature's own `CREATE TABLE git4data.snapshots` was refused by the guard that exists to refuse a
+#     caller - 84 of 84 feature files failing;
+#   * `debug_verify_serializer` serializes and deserializes the *plan*, and `LogicalCreateTable`'s deserializing
+#     constructor re-binds the create through a *fresh* binder - a statement the engine wrote coming back as a
+#     caller's, the same refusal;
+#   * and that mode re-binds a *table function* with no arguments at all, because a function's arguments are not
+#     part of a serialized plan: `INTERNAL Error: Attempted to access index 0 within vector of size 0` inside the
+#     reference scan's bind.
+#
+# Each mode is set here and the surface is walked under it, which is what keeps the fixes honest: the assertions
+# below are ordinary reads and writes that a rewrite must not change the meaning of.
+
+load {TEST_DIR}/verification_modes.db
+
+# The plan serializer is set first, before this database has any reference in it: the feature's tables are
+# created by the statements its first pragma returns, and a `CREATE TABLE git4data.*` is exactly the statement
+# whose plan round trip re-binds it (through a fresh binder, without the flag that says the engine wrote it).
+statement ok
+SET debug_verify_serializer=true
+
+statement ok
+PRAGMA git4data_create_snapshot('s0')
+
+statement ok
+CREATE TABLE t (k INTEGER PRIMARY KEY, v INTEGER)
+
+statement ok
+INSERT INTO t SELECT range, range FROM range(4)
+
+statement ok
+CHECKPOINT
+
+# reparse: the mode that re-parses every statement from its text
+statement ok
+SET debug_verify_statement='reparse_statement'
+
+statement ok
+PRAGMA git4data_create_snapshot('s1')
+
+query I
+SELECT count(*) FROM t AT (SNAPSHOT => 's1')
+----
+4
+
+# serialize: the statement is serialized and read back
+statement ok
+SET debug_verify_statement='serialize_statement'
+
+statement ok
+PRAGMA git4data_create_branch('b', '')
+
+statement ok
+PRAGMA git4data_materialize('t', 'b', 't_b')
+
+statement ok
+UPDATE t_b SET v = 111 WHERE k = 1
+
+query II
+SELECT (SELECT count(*) FROM t AT (BRANCH => 'b')), (SELECT v FROM t AT (BRANCH => 'b') WHERE k = 1)
+----
+4	111
+
+# copy: the statement is copied and the copy executed
+statement ok
+SET debug_verify_statement='copy_statement'
+
+statement ok
+CREATE TABLE t_add (k INTEGER PRIMARY KEY, v INTEGER)
+
+statement ok
+CREATE TABLE t_del (k INTEGER PRIMARY KEY)
+
+statement error
+PRAGMA git4data_bind_branch_delta('t', 'b2', 't_add', 't_del')
+----
+<REGEX>:.*Branch "b2" does not exist.*
+
+statement ok
+PRAGMA git4data_create_branch('b2', 'b')
+
+statement ok
+PRAGMA git4data_bind_branch_delta('t', 'b2', 't_add', 't_del')
+
+statement ok
+PRAGMA git4data_apply('t', 'b2', 'INSERT INTO t VALUES (100, 100)')
+
+query I
+SELECT count(*) FROM t AT (BRANCH => 'b2') WHERE k = 100
+----
+1
+
+# prepared and explain: the statement is prepared with its constants turned into parameters, or explained
+statement ok
+SET debug_verify_statement='prepared_statement'
+
+query II
+SELECT g4d_change, k FROM git4data_diff('t', 's1', 'b') ORDER BY g4d_change, k
+----
+changed	1
+
+statement ok
+SET debug_verify_statement='explain_statement'
+
+query I
+SELECT count(*) FROM git4data_branches() WHERE branch_name = 'b'
+----
+1
+
+# with the plan serializer still on (it was set at the top), the scans and the diff are re-bound as well
+query III
+SELECT (SELECT count(*) FROM t AT (BRANCH => 'b2') WHERE k = 100),
+       (SELECT rows_visible_at_bound FROM git4data_probe_at('t', 1000000)),
+       (SELECT count(*) FROM git4data_probe('t'))
+----
+1	4	1
+
+# a statement that *creates* a table, since the plan round trip is what re-binds a CREATE (and re-binds it
+# through a fresh binder, which is where a statement the engine wrote would come back as a caller's)
+statement ok
+PRAGMA git4data_materialize('t', 'b', 't_b2')
+
+query II
+SELECT (SELECT count(*) FROM t AT (BRANCH => 'b')), (SELECT v FROM t AT (BRANCH => 'b') WHERE k = 1)
+----
+4	111
+
+statement ok
+PRAGMA git4data_drop_branch('b2')
+
+query I
+SELECT count(*) FROM git4data_branches() WHERE branch_name = 'b2'
+----
+0
