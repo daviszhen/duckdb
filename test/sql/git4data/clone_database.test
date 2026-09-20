@@ -125,3 +125,40 @@ query II
 SELECT (SELECT count(*) FROM cloned_dirty.r), (SELECT count(*) FROM cloned_dirty.git4data.snapshots WHERE name = 'rs')
 ----
 4	1
+
+# ---------------------------------------------------------------------------------------------------------
+# **Moving a database that has references is the clone, not an SQL dump.** `EXPORT DATABASE` writes the registry
+# tables out like any other table (measured: `git_data_snapshots.csv`, `git_data_branches.csv`,
+# `git_data_storage.csv`, `git_data_deltas.csv` beside the caller's own), and a row in them carries a **commit id
+# of the database it came from**: `IMPORT DATABASE` is refused, so a reference cannot arrive in another database
+# reading *that* database's timeline. The refusal is doubly guarded, which was measured with each guard disabled
+# in turn: with the create refusal off the import is refused by the write guard instead, and the destination is
+# still left with no tables at all (the dump's `schema.sql` is where it stops). **With both off the import lands**
+# - the snapshot came in with pin 7 while the source database's own last commit was 17, and
+# `SELECT count(*) FROM t AT (SNAPSHOT => 's')` answered 1, the live table, silently. That is the defect this
+# refusal prevents, and the answer for a real migration is the file: `git4data_clone_database` above, or the file
+# system's own copy.
+statement ok
+PRAGMA git4data_create_snapshot('exported')
+
+statement ok
+EXPORT DATABASE '{TEST_DIR}/clone_export' (FORMAT CSV)
+
+# a database of its own, so that the refusal can be read off the destination as well
+statement ok
+ATTACH '{TEST_DIR}/clone_import_target.db' AS import_target
+
+statement ok
+USE import_target
+
+statement error
+IMPORT DATABASE '{TEST_DIR}/clone_export'
+----
+<REGEX>:.*is in the schema the reference registry is kept in.*
+
+# nothing was half-imported: the dump stops at its first statement, so the target database has no tables at all
+# (the count is asked per database, since the listing reports every attached one)
+query I
+SELECT count(*) FROM duckdb_tables() WHERE database_name = 'import_target'
+----
+0
