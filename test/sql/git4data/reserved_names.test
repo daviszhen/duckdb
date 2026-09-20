@@ -129,3 +129,69 @@ SELECT count(*) FROM nf AT (BRANCH => '')
 ----
 10
 
+# The *schema* the registry is kept in has a reserved name too, and it is not enough to guard the tables inside
+# it: a caller can create the schema before the feature ever has. Measured before this guard, on a fresh
+# database: `CREATE SCHEMA git4data` succeeded, and the schema was then hidden from every listing while every
+# statement inside it was refused as the registry's - a schema the caller made and can neither see nor use. On a
+# database that already has a reference the same statement met the catalog's own error instead, "Schema with name
+# "git4data" already exists!", which names a schema that no listing shows. Both are refused the same way now.
+statement error
+CREATE SCHEMA git4data
+----
+<REGEX>:.*the name of the schema the reference registry is kept in.*
+
+# the spelling is the name, so it is refused in any case
+statement error
+CREATE SCHEMA GIT4DATA
+----
+<REGEX>:.*the name of the schema the reference registry is kept in.*
+
+# and `IF NOT EXISTS` is not a way around it either
+statement error
+CREATE SCHEMA IF NOT EXISTS git4data
+----
+<REGEX>:.*the name of the schema the reference registry is kept in.*
+
+# another name is nobody's business but the caller's
+statement ok
+CREATE SCHEMA mine
+
+# the refusals left the feature working: a reference can still be created, and the schema the feature owns is
+# still readable through the listings
+statement ok
+PRAGMA git4data_create_snapshot('after_schema_guard')
+
+query I
+SELECT count(*) FROM (SELECT snapshot_name FROM git4data_snapshots() WHERE snapshot_name = 'after_schema_guard')
+----
+1
+
+# The same statement on a database with no references yet - which is where the feature has *not* created the
+# schema, so this is the half that a check on an existing schema could not have covered. It is also the half
+# that says the feature's own `CREATE SCHEMA IF NOT EXISTS git4data` still goes through: the snapshot below is
+# what creates that schema, and it succeeds.
+statement ok
+ATTACH '{TEST_DIR}/reserved_names_fresh.db' AS fresh
+
+statement ok
+USE fresh
+
+statement ok
+CREATE TABLE t (k INTEGER, v INTEGER)
+
+statement ok
+INSERT INTO t SELECT range, range FROM range(10)
+
+statement error
+CREATE SCHEMA git4data
+----
+<REGEX>:.*the name of the schema the reference registry is kept in.*
+
+statement ok
+PRAGMA git4data_create_snapshot('fresh1')
+
+query II
+SELECT (SELECT count(*) FROM t AT (SNAPSHOT => 'fresh1')), (SELECT count(*) FROM t)
+----
+10	10
+

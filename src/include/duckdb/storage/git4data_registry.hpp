@@ -64,6 +64,12 @@ void Git4DataCheckRegistrySchema(const string &schema);
 //! table and every reference with it, and `CREATE TABLE git4data.mine (...)` put a caller's table in the
 //! feature's own schema - neither goes through the guard the write, drop and alter statements have.
 void Git4DataCheckRegistryCreate(const string &schema, const string &table);
+//! Throw when a statement tries to create the schema the registry is kept in. The name is reserved whether or
+//! not the feature has created that schema yet, and both halves were measured before this guard: on a database
+//! with references the caller met the catalog's duplicate-name error - `Schema with name "git4data" already
+//! exists!` - which names a schema that no listing shows, and on a fresh one the schema was created and then
+//! disappeared from every listing while every statement inside it was refused as the registry's.
+void Git4DataCheckRegistrySchemaCreate(const string &schema);
 //! Rebuild the registries if a rollback has happened since the last rebuild, whichever connection made it.
 //! The registries are shared, so a rollback anywhere can have taken a record away that memory still holds:
 //! consuming the flag on the transaction manager - not only the one on the calling client - is what keeps a

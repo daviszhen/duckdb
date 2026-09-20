@@ -694,6 +694,17 @@ void Git4DataCheckRegistryCreate(const string &schema, const string &table) {
 	    table);
 }
 
+void Git4DataCheckRegistrySchemaCreate(const string &schema) {
+	if (!StringUtil::CIEquals(schema, GIT4DATA_REGISTRY_SCHEMA)) {
+		return;
+	}
+	throw InvalidInputException(
+	    "\"%s\" is the name of the schema the reference registry is kept in, and the name is reserved: a "
+	    "schema of that name is hidden from every listing, and no statement can create or edit anything in it. "
+	    "Use a different name.",
+	    schema);
+}
+
 void Git4DataCheckRegistryTarget(const string &schema, const string &table) {
 	if (!StringUtil::CIEquals(schema, GIT4DATA_REGISTRY_SCHEMA)) {
 		return;

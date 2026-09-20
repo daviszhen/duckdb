@@ -294,6 +294,18 @@ void Binder::BindCreateSchema(CreateSchemaInfo &info) {
 	// component into a catalog (prepending the default catalog when it is a schema)
 	info.SetQualifiedName(ResolveCatalog(context, info.GetQualifiedName()));
 
+	// The name of the registry's schema is reserved, and this is where it is refused - the table guard below
+	// cannot cover it, because the schema is what a table guard is *about* and a caller can create the schema
+	// before the feature ever has. Measured before this: on a database with references the caller met the
+	// catalog's duplicate-name error, which names a schema no listing shows, and on a fresh one the schema was
+	// created and then hidden from every listing while every statement inside it was refused as the registry's.
+	// `SchemaName` rather than the qualified name's last slot: a schema's path ends in an *empty* name, with the
+	// new schema itself in the schema slot - measured, the first version of this check read "" and never fired.
+	// Statements the feature generates for itself are marked internal and pass: creating this schema is one.
+	if (!internal_statement) {
+		Git4DataCheckRegistrySchemaCreate(info.SchemaName().GetIdentifierName());
+	}
+
 	if (info.IsNested()) {
 		// nested schemas can only be persisted with storage version v2.0.0 or higher
 		auto &resolved_catalog = Catalog::GetCatalog(context, info.SchemaCatalog());

@@ -151,10 +151,13 @@ ATTACH '{TEST_DIR}/clone_import_target.db' AS import_target
 statement ok
 USE import_target
 
+# The refusal moved one statement earlier when the schema's own name became reserved (increment 3ec): the dump
+# opens with `CREATE SCHEMA git4data`, so the import stops there rather than at the first table inside it. The
+# consequence is the same, and the assertion below is what says so.
 statement error
 IMPORT DATABASE '{TEST_DIR}/clone_export'
 ----
-<REGEX>:.*is in the schema the reference registry is kept in.*
+<REGEX>:.*the name of the schema the reference registry is kept in.*
 
 # nothing was half-imported: the dump stops at its first statement, so the target database has no tables at all
 # (the count is asked per database, since the listing reports every attached one)
