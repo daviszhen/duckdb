@@ -1,0 +1,210 @@
+# name: test/sql/git4data/delta_key_container.test
+# description: The shapes that choose the container a delta's removed keys are held in, and that each one answers
+# group: [git4data]
+
+# A delta's removed side is read once, whole, and then asked about every base row. With one integer key the keys
+# are held one of two ways - a bitmap over the range they cover, or a hash set when that range is too wide or too
+# sparse for the bits to be the smaller structure - and which one is a property of the *keys*, not of the caller:
+# a table keyed by `range` is the dense case, and a key set spread over a wide range is not. Both containers have
+# to answer exactly, so every shape that chooses between them is read here, and each of these would show a wrong
+# answer rather than a slow one if the container for its shape were built wrong or not built at all.
+#
+# The key is cast to a 64-bit pattern before any of this - the same cast on the removed side and on the base -
+# so a negative key is a large pattern and its range arithmetic is modulo 2^64: a pair like -5 and 3 is a *short*
+# range and can be a bitmap, while -1 and 0 are the two ends of the pattern space and cannot be.
+
+# a dense integer range: 50,000 removed keys out of 100,000, so a bitmap of 100,000 bits
+statement ok
+CREATE TABLE d (k INTEGER PRIMARY KEY, v INTEGER)
+
+statement ok
+INSERT INTO d SELECT range, range * 10 FROM range(100000)
+
+statement ok
+CHECKPOINT
+
+statement ok
+PRAGMA git4data_create_snapshot('d_base')
+
+statement ok
+PRAGMA git4data_create_branch('d_b', '')
+
+statement ok
+CREATE TABLE d_add (k INTEGER PRIMARY KEY, v INTEGER)
+
+statement ok
+CREATE TABLE d_del (k INTEGER PRIMARY KEY)
+
+statement ok
+PRAGMA git4data_bind_branch_delta('d', 'd_b', 'd_add', 'd_del')
+
+statement ok
+PRAGMA git4data_apply('d', 'd_b', 'DELETE FROM d WHERE k % 2 = 0')
+
+# the base is untouched, and the branch has exactly the odd keys
+query II
+SELECT (SELECT count(*) FROM d), (SELECT count(*) FROM d AT (BRANCH => 'd_b'))
+----
+100000	50000
+
+# an even key is gone from the branch, its neighbours are there with the values they had, and the last key of
+# the range - the far end of the bitmap - is one of them
+query IIII
+SELECT (SELECT count(*) FROM d AT (BRANCH => 'd_b') WHERE k = 2),
+       (SELECT v FROM d AT (BRANCH => 'd_b') WHERE k = 3),
+       (SELECT v FROM d AT (BRANCH => 'd_b') WHERE k = 99999),
+       (SELECT count(*) FROM d AT (BRANCH => 'd_b') WHERE k = 100000)
+----
+0	30	999990	0
+
+# and the additions of the same delta are read on top of it, above the range the bits cover
+statement ok
+PRAGMA git4data_apply('d', 'd_b', 'INSERT INTO d VALUES (200000, 7)')
+
+query II
+SELECT (SELECT count(*) FROM d AT (BRANCH => 'd_b')), (SELECT v FROM d AT (BRANCH => 'd_b') WHERE k = 200000)
+----
+50001	7
+
+# a key set spread over a wide range: 0 and 10^12 are 2^40 apart, so the range is not a range a bitmap should
+# cover, and the keys are held as a set instead
+statement ok
+CREATE TABLE sp (k BIGINT PRIMARY KEY, v INTEGER)
+
+statement ok
+INSERT INTO sp VALUES (0, 1), (1000000000000, 2), (3, 3)
+
+statement ok
+CHECKPOINT
+
+statement ok
+PRAGMA git4data_create_snapshot('sp_base')
+
+statement ok
+PRAGMA git4data_create_branch('sp_b', '')
+
+statement ok
+CREATE TABLE sp_add (k BIGINT PRIMARY KEY, v INTEGER)
+
+statement ok
+CREATE TABLE sp_del (k BIGINT PRIMARY KEY)
+
+statement ok
+PRAGMA git4data_bind_branch_delta('sp', 'sp_b', 'sp_add', 'sp_del')
+
+statement ok
+PRAGMA git4data_apply('sp', 'sp_b', 'DELETE FROM sp WHERE k = 1000000000000')
+
+query III
+SELECT (SELECT count(*) FROM sp AT (BRANCH => 'sp_b')),
+       (SELECT v FROM sp AT (BRANCH => 'sp_b') WHERE k = 0),
+       (SELECT count(*) FROM sp AT (BRANCH => 'sp_b') WHERE k = 1000000000000)
+----
+2	1	0
+
+# a negative key beside positive ones: a short range once cast, so it is the bitmap that answers, and the
+# arithmetic that maps a pattern to a bit has to hold across the sign
+statement ok
+CREATE TABLE ng (k INTEGER PRIMARY KEY, v INTEGER)
+
+statement ok
+INSERT INTO ng VALUES (-5, 5), (-1, 1), (3, 3), (7, 7)
+
+statement ok
+CHECKPOINT
+
+statement ok
+PRAGMA git4data_create_snapshot('ng_base')
+
+statement ok
+PRAGMA git4data_create_branch('ng_b', '')
+
+statement ok
+CREATE TABLE ng_add (k INTEGER PRIMARY KEY, v INTEGER)
+
+statement ok
+CREATE TABLE ng_del (k INTEGER PRIMARY KEY)
+
+statement ok
+PRAGMA git4data_bind_branch_delta('ng', 'ng_b', 'ng_add', 'ng_del')
+
+statement ok
+PRAGMA git4data_apply('ng', 'ng_b', 'DELETE FROM ng WHERE k IN (-5, 3)')
+
+query IIII
+SELECT (SELECT count(*) FROM ng AT (BRANCH => 'ng_b')),
+       (SELECT count(*) FROM ng AT (BRANCH => 'ng_b') WHERE k = -5),
+       (SELECT v FROM ng AT (BRANCH => 'ng_b') WHERE k = -1),
+       (SELECT count(*) FROM ng AT (BRANCH => 'ng_b') WHERE k = 7)
+----
+2	0	1	1
+
+# the two ends of the pattern space: -1 and 0 are 2^64 apart, which is a range no bitmap may cover, and the set
+# answers instead - and the extreme of an unsigned key is the same shape
+statement ok
+CREATE TABLE wide (k BIGINT PRIMARY KEY, v INTEGER)
+
+statement ok
+INSERT INTO wide VALUES (-1, 1), (0, 2), (9223372036854775807, 3)
+
+statement ok
+CHECKPOINT
+
+statement ok
+PRAGMA git4data_create_snapshot('wide_base')
+
+statement ok
+PRAGMA git4data_create_branch('wide_b', '')
+
+statement ok
+CREATE TABLE wide_add (k BIGINT PRIMARY KEY, v INTEGER)
+
+statement ok
+CREATE TABLE wide_del (k BIGINT PRIMARY KEY)
+
+statement ok
+PRAGMA git4data_bind_branch_delta('wide', 'wide_b', 'wide_add', 'wide_del')
+
+statement ok
+PRAGMA git4data_apply('wide', 'wide_b', 'DELETE FROM wide WHERE k IN (-1, 9223372036854775807)')
+
+query III
+SELECT (SELECT count(*) FROM wide AT (BRANCH => 'wide_b')),
+       (SELECT v FROM wide AT (BRANCH => 'wide_b') WHERE k = 0),
+       (SELECT count(*) FROM wide AT (BRANCH => 'wide_b') WHERE k = -1)
+----
+1	2	0
+
+statement ok
+CREATE TABLE uns (k UBIGINT PRIMARY KEY, v INTEGER)
+
+statement ok
+INSERT INTO uns VALUES (0, 1), (18446744073709551615, 2), (5, 3)
+
+statement ok
+CHECKPOINT
+
+statement ok
+PRAGMA git4data_create_snapshot('uns_base')
+
+statement ok
+PRAGMA git4data_create_branch('uns_b', '')
+
+statement ok
+CREATE TABLE uns_add (k UBIGINT PRIMARY KEY, v INTEGER)
+
+statement ok
+CREATE TABLE uns_del (k UBIGINT PRIMARY KEY)
+
+statement ok
+PRAGMA git4data_bind_branch_delta('uns', 'uns_b', 'uns_add', 'uns_del')
+
+statement ok
+PRAGMA git4data_apply('uns', 'uns_b', 'DELETE FROM uns WHERE k = 18446744073709551615')
+
+query III
+SELECT (SELECT count(*) FROM uns AT (BRANCH => 'uns_b')),
+       (SELECT v FROM uns AT (BRANCH => 'uns_b') WHERE k = 0),
+       (SELECT v FROM uns AT (BRANCH => 'uns_b') WHERE k = 5)
+----
+2	1	3

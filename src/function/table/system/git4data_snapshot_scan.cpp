@@ -38,9 +38,123 @@ struct Git4DataRemovedKeys {
 	//! it holds, and no allocation happens per row.
 	bool typed = false;
 	unordered_set<uint64_t> bits;
+	//! The same keys as a bitmap over their range, which is what a dense typed set gets: one bit a key
+	//! instead of a hash entry, so both the lookup and the memory are smaller - measured, a branch read of a
+	//! million rows against a delta that removed half of them peaked at 54 MiB with the set and 27 with the
+	//! bits. Only chosen when the keys are dense enough for the bits to cost less than the entries would.
+	vector<uint64_t> bitmap;
+	uint64_t bitmap_base = 0;
+	bool bitmap_usable = false;
 
 	bool Empty() const {
-		return strings.empty() && bits.empty();
+		return strings.empty() && bits.empty() && !bitmap_usable;
+	}
+
+	//! Whether the typed set holds this 64-bit key pattern. The bitmap answers for the range it covers, and a
+	//! key outside it is one the removed side cannot have - the range was taken from the keys it holds.
+	bool HoldsPattern(uint64_t pattern) const {
+		if (bitmap_usable) {
+			if (pattern < bitmap_base) {
+				return false;
+			}
+			auto offset = pattern - bitmap_base;
+			if (offset >= bitmap.size() * 64) {
+				return false;
+			}
+			return ((bitmap[offset / 64] >> (offset % 64)) & 1) != 0;
+		}
+		return bits.find(pattern) != bits.end();
+	}
+};
+
+//! How wide a key range a bitmap may cover: 2^26 bits is eight megabytes, and past that the bits would cost
+//! more than the entries they replace.
+static idx_t Git4DataBitmapSpanLimit() {
+	return idx_t(1) << 26;
+}
+
+//! How many removed keys may be collected as a vector before the container is built as they arrive: 4,000,000
+//! patterns are 32 MB, where the hash set they would become costs about 200.
+static idx_t Git4DataTypedKeysLimit() {
+	return 4000000;
+}
+
+//! Build a typed removal set's container from the keys it holds. A dense range becomes a bitmap; anything else
+//! - keys spread over a wide range, or a key that is not small - keeps the hash set, because the bits would
+//! then be the larger structure.
+static void Git4DataBuildTypedContainer(const vector<uint64_t> &patterns, Git4DataRemovedKeys &result) {
+	if (patterns.empty()) {
+		return;
+	}
+	auto lowest = patterns[0];
+	auto highest = patterns[0];
+	for (auto pattern : patterns) {
+		lowest = MinValue(lowest, pattern);
+		highest = MaxValue(highest, pattern);
+	}
+	auto span = highest - lowest;
+	if (span < Git4DataBitmapSpanLimit() && span <= patterns.size() * 64) {
+		result.bitmap_base = lowest;
+		result.bitmap.assign(NumericCast<idx_t>((span + 64) / 64), 0);
+		for (auto pattern : patterns) {
+			auto offset = pattern - lowest;
+			result.bitmap[offset / 64] |= uint64_t(1) << (offset % 64);
+		}
+		result.bitmap_usable = true;
+		return;
+	}
+	for (auto pattern : patterns) {
+		result.bits.insert(pattern);
+	}
+}
+
+//! One key column as the filters read it: a row's key is taken out of the vector as its own type rather than
+//! through a `Value` built for the row. The type is known only at run time, which is the case the unified
+//! format is for - a dictionary or a constant column reads through it too, so nothing has to be flattened.
+struct Git4DataKeyColumn {
+	UnifiedVectorFormat format;
+	LogicalTypeId type = LogicalTypeId::INVALID;
+
+	void Init(const Vector &keys) {
+		keys.ToUnifiedFormat(format);
+		type = keys.GetType().id();
+	}
+
+	//! The key's 64-bit pattern, cast exactly as `Git4DataIntegerKeyBits` casts it, or false for a NULL key or
+	//! a type that is not a single integer
+	bool Pattern(idx_t row, uint64_t &result) const {
+		auto index = format.sel->get_index(row);
+		if (!format.validity.RowIsValid(index)) {
+			return false;
+		}
+		switch (type) {
+		case LogicalTypeId::TINYINT:
+			result = static_cast<uint64_t>(reinterpret_cast<const int8_t *>(format.data)[index]);
+			return true;
+		case LogicalTypeId::SMALLINT:
+			result = static_cast<uint64_t>(reinterpret_cast<const int16_t *>(format.data)[index]);
+			return true;
+		case LogicalTypeId::INTEGER:
+			result = static_cast<uint64_t>(reinterpret_cast<const int32_t *>(format.data)[index]);
+			return true;
+		case LogicalTypeId::BIGINT:
+			result = static_cast<uint64_t>(reinterpret_cast<const int64_t *>(format.data)[index]);
+			return true;
+		case LogicalTypeId::UTINYINT:
+			result = reinterpret_cast<const uint8_t *>(format.data)[index];
+			return true;
+		case LogicalTypeId::USMALLINT:
+			result = reinterpret_cast<const uint16_t *>(format.data)[index];
+			return true;
+		case LogicalTypeId::UINTEGER:
+			result = reinterpret_cast<const uint32_t *>(format.data)[index];
+			return true;
+		case LogicalTypeId::UBIGINT:
+			result = reinterpret_cast<const uint64_t *>(format.data)[index];
+			return true;
+		default:
+			return false;
+		}
 	}
 };
 
@@ -177,10 +291,6 @@ static bool Git4DataRowWasRemoved(const Git4DataRemovedKeys &removed, DataChunk 
 	// **Without this the string below is built for every row of every side even when the set is empty** -
 	// measured, two million key strings for a diff of a million-row copy against itself, which is what its
 	// 2.370 s was almost entirely made of.
-	// Nothing was removed, which is the common case: a reference with no delta reads its base as it stands.
-	// **Without this the string below is built for every row of every side even when the set is empty** -
-	// measured, two million key strings for a diff of a million-row copy against itself, which is what its
-	// 2.370 s was almost entirely made of.
 	if (removed.Empty()) {
 		return false;
 	}
@@ -193,13 +303,26 @@ static bool Git4DataRowWasRemoved(const Git4DataRemovedKeys &removed, DataChunk 
 		if (!Git4DataIntegerKeyBits(key, bits)) {
 			return false;
 		}
-		return removed.bits.find(bits) != removed.bits.end();
+		return removed.HoldsPattern(bits);
 	}
 	if (removed.hashes_usable && key_hashes.ColumnCount() > 0 &&
 	    removed.hashes.find(Git4DataRowKeyHash(key_hashes, row)) == removed.hashes.end()) {
 		return false;
 	}
 	return removed.strings.find(Git4DataKeyString(chunk, key_positions, row)) != removed.strings.end();
+}
+
+//! Whether a typed set holds this row's key, with the key column already prepared for the chunk. This is the
+//! filter a delta read and a diff spend their extra time in: measured on the script's own shape, 4,000,000 base
+//! rows against 100,000 removed keys cost 50 ms over a plain read of the same rows, about 13 ns a row, and the
+//! `Value` the generic path builds per row is most of it.
+static bool Git4DataTypedRowWasRemoved(const Git4DataKeyColumn &keys, const Git4DataRemovedKeys &removed,
+                                       idx_t row) {
+	uint64_t pattern = 0;
+	if (!keys.Pattern(row, pattern)) {
+		return false;
+	}
+	return removed.HoldsPattern(pattern);
 }
 
 static void Git4DataCollectRemovedKeys(ClientContext &context, const string &removed_table,
@@ -248,16 +371,34 @@ static void Git4DataCollectRemovedKeys(ClientContext &context, const string &rem
 	result.hashes_usable = groups.GetTotalRows() <= Git4DataHashKeysLimit();
 	// One integer key needs neither the strings nor the hashes: its value is the set's key
 	result.typed = key_count == 1 && Git4DataIsIntegerKeyType(key_types[0]);
+	// A typed set's keys are collected first and given a container at the end, because which container is right
+	// depends on the range they cover and that is only known once they are all in. The collection itself is a
+	// vector of patterns, which is 8 bytes a key against the hash set's ~54 - so the collected form is the cheap
+	// one - and past a cap that vector would be the larger structure too, which is when the set is built as the
+	// keys arrive instead.
+	vector<uint64_t> typed_patterns;
+	bool typed_streamed = false;
+	if (result.typed) {
+		typed_streamed = groups.GetTotalRows() > Git4DataTypedKeysLimit();
+	}
 	auto collect = [&]() {
 		if (result.typed) {
+			// The same reading the filter does, on the other side of the read: the keys are taken out of the
+			// column as their own type, so a removed key costs an insert rather than a `Value` and an insert.
+			// **This is where the rest of a delta read's extra time is**: measured with the filter already
+			// reading its column, 500,000 removed keys cost 20 ms over a plain read whatever the base's size,
+			// and 1,000,000 base rows against 100,000 of them cost 10 ms.
+			Git4DataKeyColumn keys;
+			keys.Init(chunk.data[0]);
 			for (idx_t row = 0; row < chunk.size(); row++) {
-				auto key = chunk.GetValue(0, row);
-				if (key.IsNull()) {
+				uint64_t pattern = 0;
+				if (!keys.Pattern(row, pattern)) {
 					continue;
 				}
-				uint64_t bits = 0;
-				if (Git4DataIntegerKeyBits(key, bits)) {
-					result.bits.insert(bits);
+				if (typed_streamed) {
+					result.bits.insert(pattern);
+				} else {
+					typed_patterns.push_back(pattern);
 				}
 			}
 			return;
@@ -298,6 +439,12 @@ static void Git4DataCollectRemovedKeys(ClientContext &context, const string &rem
 			break;
 		}
 		collect();
+	}
+	// Every key is in now, including the caller's uncommitted ones, so the container can be chosen: a bitmap
+	// for a dense range, the hash set otherwise.
+	if (result.typed && !typed_streamed) {
+		Git4DataBuildTypedContainer(typed_patterns, result);
+		vector<uint64_t>().swap(typed_patterns);
 	}
 }
 
@@ -388,11 +535,26 @@ static idx_t Git4DataKeepRows(ClientContext &context, const vector<Git4DataRemov
 		return count;
 	}
 	Git4DataHashForRemovals(removals, hashes, from, chunk, key_positions);
+	// A single integer key is the shape most tables have, and the filter over it is where a delta read's extra
+	// time is spent, so the key column is prepared once for the chunk and read as its own type rather than
+	// through a `Value` built per row. The sets in the window all have to be typed for that to be the *same*
+	// question the generic path asks.
+	Git4DataKeyColumn typed_keys;
+	bool typed_only = key_positions.size() == 1;
+	for (idx_t i = from; i < removals.size() && typed_only; i++) {
+		typed_only = removals[i]->typed;
+	}
+	if (typed_only) {
+		typed_keys.Init(chunk.data[key_positions[0]]);
+	}
 	idx_t kept_count = 0;
 	for (idx_t row = 0; row < count; row++) {
 		bool removed = false;
 		for (idx_t i = from; i < removals.size(); i++) {
-			if (Git4DataRowWasRemoved(*removals[i], chunk, key_positions, *hashes[i], row)) {
+			auto was_removed = typed_only ? Git4DataTypedRowWasRemoved(typed_keys, *removals[i], row)
+			                             : Git4DataRowWasRemoved(*removals[i], chunk, key_positions, *hashes[i],
+			                                                     row);
+			if (was_removed) {
 				removed = true;
 				break;
 			}
@@ -1949,11 +2111,22 @@ static void Git4DataDiffCollect(ClientContext &context, Git4DataDiffState &state
 		// the row id column is not necessarily flat - a scan may hand back a dictionary
 		// the row id sits after the keys, and after the values when those are carried too
 		auto row_ids = state.scan_chunk.data[state.key_count + state.value_count].Values<row_t>();
+		// the same prepared key column the scan path uses, for the same reason
+		Git4DataKeyColumn typed_keys;
+		bool typed_only = key_positions.size() == 1;
+		for (idx_t s = 0; s < removals.size() && typed_only; s++) {
+			typed_only = removals[s]->typed;
+		}
+		if (typed_only) {
+			typed_keys.Init(state.scan_chunk.data[key_positions[0]]);
+		}
 		for (idx_t i = 0; i < count; i++) {
 			bool removed = false;
 			for (idx_t s = 0; s < removals.size(); s++) {
-				if (Git4DataRowWasRemoved(*removals[s], state.scan_chunk, key_positions, *removal_hashes[s],
-				                          i)) {
+				auto was_removed = typed_only ? Git4DataTypedRowWasRemoved(typed_keys, *removals[s], i)
+				                             : Git4DataRowWasRemoved(*removals[s], state.scan_chunk, key_positions,
+				                                                     *removal_hashes[s], i);
+				if (was_removed) {
 					removed = true;
 					break;
 				}
@@ -1983,11 +2156,21 @@ static void Git4DataDiffCollect(ClientContext &context, Git4DataDiffState &state
 			if (state.key_hashes.ColumnCount() > 0) {
 				Git4DataHashForRemovals(removals, removal_hashes, index + 1, *delta.chunk, key_positions);
 			}
+			Git4DataKeyColumn typed_keys;
+			bool typed_only = key_positions.size() == 1;
+			for (idx_t s = index + 1; s < removals.size() && typed_only; s++) {
+				typed_only = removals[s]->typed;
+			}
+			if (typed_only) {
+				typed_keys.Init(delta.chunk->data[key_positions[0]]);
+			}
 			for (idx_t i = 0; i < count; i++) {
 				bool removed = false;
 				for (idx_t s = index + 1; s < removals.size(); s++) {
-					if (Git4DataRowWasRemoved(*removals[s], *delta.chunk, key_positions, *removal_hashes[s],
-					                          i)) {
+					auto was_removed = typed_only ? Git4DataTypedRowWasRemoved(typed_keys, *removals[s], i)
+					                             : Git4DataRowWasRemoved(*removals[s], *delta.chunk, key_positions,
+					                                                     *removal_hashes[s], i);
+					if (was_removed) {
 						removed = true;
 						break;
 					}
