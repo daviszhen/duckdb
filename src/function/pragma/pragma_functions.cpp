@@ -2158,6 +2158,18 @@ static string PragmaGit4DataDropBranch(ClientContext &context, const FunctionPar
 		if (resolved.empty()) {
 			continue;
 		}
+		// **A mapping can name one of the registry's own tables, and the drop below would take it with the
+		// branch.** Nothing this build writes can: a binding is refused if it aims at one of them (3dn). A
+		// *file* written before that could hold such a mapping, and so could one whose records came from the
+		// checkpoint block - which is the case the block fallback exists for - so the drop checks what it is
+		// about to drop. Refused rather than skipped, because a mapping aimed at the registry is a state to
+		// clear and `git4data_unbind` clears it without dropping anything: silently leaving the table behind
+		// would leave the caller with a branch they cannot drop and no sentence saying why.
+		auto mapped = Git4DataResolveTableOrNull(context, resolved);
+		if (mapped && Git4DataIsRegistryTable(*mapped)) {
+			Git4DataCheckRegistryTarget(mapped->ParentSchema().name.GetIdentifierName(),
+			                            mapped->name.GetIdentifierName());
+		}
 		// A table two branches were given is not this one's alone to take: dropping it would leave the
 		// other reading its pinned image, silently - measured, a branch bound to another branch's copy
 		// fell back from v = 111 to the pinned v = 1 when that other branch was dropped. Only the tables
