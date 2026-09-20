@@ -140,6 +140,36 @@ SELECT (SELECT count(*) FROM git4data.deltas WHERE branch = 'b'),
 ----
 1	1	1	1
 
+# phase 6b: and the two surfaces spell a *mapping* the same way, which is a comparison the phases above do not
+# make: the rows in `git4data.deltas` against the columns the branches listing reports for the same mapping,
+# joined on all four of them. Nothing is normalized on either side - the source is the name the caller wrote -
+# so this is an equality and not a lookup, and it fails if either surface ever changes its spelling.
+query II
+SELECT (SELECT count(*) FROM git4data.deltas d JOIN git4data_branches() l
+                 ON l.branch_name = d.branch AND l.delta_source = d.source
+                AND l.delta_added = d.added AND l.delta_removed = d.removed),
+       (SELECT count(*) FROM git4data_branches() l JOIN git4data.deltas d
+                 ON l.branch_name = d.branch AND l.delta_source = d.source
+                AND l.delta_added = d.added AND l.delta_removed = d.removed)
+----
+1	1
+
+# a storage mapping as well, for a *second* source table: a materialize replaces a branch's mapping for the
+# table it names, so putting it on the same source would replace the delta above rather than sit beside it
+statement ok
+CREATE TABLE u (k INTEGER PRIMARY KEY, v INTEGER)
+
+statement ok
+PRAGMA git4data_materialize('u', 'b', 'b_copy')
+
+query II
+SELECT (SELECT count(*) FROM git4data.storage s JOIN git4data_branches() l
+                 ON l.branch_name = s.branch AND l.storage_source = s.source AND l.storage_table = s.storage),
+       (SELECT count(*) FROM git4data_branches() l JOIN git4data.storage s
+                 ON l.branch_name = s.branch AND l.storage_source = s.source AND l.storage_table = s.storage)
+----
+1	1
+
 # phase 7: a restart rebuilds both sides from the rows
 restart
 
