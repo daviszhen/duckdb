@@ -356,3 +356,45 @@ query II
 SELECT (SELECT count(*) FROM h_mid AT (BRANCH => 'h_inner')), (SELECT count(*) FROM h_mid)
 ----
 3	3
+
+# **A table the caller made is not the feature's to drop (3dp).** The rule is stated in three other places -
+# the `owned` field's own comment ("A table bound by hand is left alone"), the replacement a second materialize
+# makes, and `git4data_unbind`, which takes the mapping back and drops nothing - and dropping a branch was the
+# exception: measured, a branch bound to a table the *caller* had made and filled lost it to
+# `git4data_drop_branch`, silently, while unbinding the same branch left it. The same table protected by one
+# path and destroyed by another is a rule a caller cannot hold in their head, so the drop follows the rule too.
+# A copy the feature made (owned) still goes with the branch, which is what the case above asserts.
+statement ok
+CREATE TABLE hand_src (k INTEGER PRIMARY KEY, v INTEGER)
+
+statement ok
+INSERT INTO hand_src VALUES (1, 10)
+
+statement ok
+CREATE TABLE mine (k INTEGER PRIMARY KEY, v INTEGER)
+
+statement ok
+INSERT INTO mine VALUES (1, 999)
+
+statement ok
+CHECKPOINT
+
+statement ok
+PRAGMA git4data_create_branch('hand_own', '')
+
+statement ok
+PRAGMA git4data_bind_branch_table('hand_src', 'hand_own', 'mine')
+
+query I
+SELECT v FROM hand_src AT (BRANCH => 'hand_own') WHERE k = 1
+----
+999
+
+statement ok
+PRAGMA git4data_drop_branch('hand_own')
+
+# the branch is gone, and the caller's table is where they left it - with its rows
+query II
+SELECT (SELECT count(*) FROM git4data.branches WHERE name = 'hand_own'), (SELECT v FROM mine WHERE k = 1)
+----
+0	999

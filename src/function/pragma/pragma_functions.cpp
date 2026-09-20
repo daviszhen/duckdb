@@ -2152,8 +2152,20 @@ static string PragmaGit4DataDropBranch(ClientContext &context, const FunctionPar
 	}
 	string result;
 	for (auto &entry : existing.storage_tables) {
-		// dropping the branch takes the tables it was given with it, and one of them may have been renamed
-		// since - dropping the name it was given instead would leave the table behind, silently
+		// **Only the tables the feature created go with the branch.** `owned` is what records which those are,
+		// and the rule it carries is stated in three other places: the field's own comment ("A table bound by
+		// hand is left alone"), the replacement a second materialize makes (it drops the copy it made and not
+		// the caller's table), and `git4data_unbind` (it takes the mapping back and drops nothing). Dropping a
+		// branch used to be the exception, and it destroyed the caller's table: measured, a branch bound to a
+		// table the caller had made and filled lost it to `git4data_drop_branch`, silently, while unbinding
+		// the same branch left it - the same table protected by one path and destroyed by another, which is
+		// exactly the kind of rule a caller cannot hold in their head. A table bound by hand is left where it
+		// is, as a delta's two tables always have been.
+		if (!entry.owned) {
+			continue;
+		}
+		// one of the tables it made may have been renamed since, and dropping the name it was given instead
+		// would leave the table behind, silently
 		auto resolved = Git4DataResolveTableName(context, entry.storage, entry.oid);
 		if (resolved.empty()) {
 			continue;
