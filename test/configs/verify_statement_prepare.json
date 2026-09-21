@@ -53,6 +53,14 @@
         "test/sql/pragma/profiling/test_custom_profiling_row_group_metrics_local_storage.test",
         "test/sql/types/geo/geometry_parquet_pushdown.test"
       ]
+    },
+    {
+      "reason": "A prepared statement binds once and executes the plan that bind left behind, and a refusal the feature raises while binding does not reach the caller in this mode. These tests assert refusals, so nothing they say here is about the feature. Measured in the design note's increment 3fp: the table's identity is from the file and differs from the mapping's in both modes, and the read is answered instead of refused. The same tests are what decision 2 and 3ej exist for, and they pass in every build without this mode.",
+      "paths": [
+        "test/sql/git4data/storage_swap.test",
+        "test/sql/git4data/name_spelling.test",
+        "test/sql/git4data/line_snapshot.test"
+      ]
     }
   ]
 }
