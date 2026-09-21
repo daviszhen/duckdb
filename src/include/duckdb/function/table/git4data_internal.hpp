@@ -327,6 +327,184 @@ constexpr idx_t Git4DataHashKeysLimit();
 //! A row that has no counterpart on the other side of a diff: the sentinel the comparison walks with.
 constexpr row_t NO_COUNTERPART = -1;
 
+// The diff's own state, which its helpers and its operator both work on, and the bind data the
+// operator is built with. Moved here by increment 3fm so that the helper half of the diff can be a
+// file of its own.
+struct Git4DataDiffState : public GlobalTableFunctionState {
+	//! LEFT walks the first reference, RIGHT the second and works out the difference, EMIT drains it
+	enum class Phase : uint8_t { LEFT, RIGHT, EMIT, DONE };
+
+	// one scan per side: a scan state is consumed as it walks, so the second pass needs its own
+	TableScanState left_scan;
+	TableScanState right_scan;
+	//! Whether a side's collection has no row groups at all, as for the read's base: nothing to scan, and
+	//! the side's own uncommitted rows are what is read instead
+	bool left_groups_empty = false;
+	bool right_groups_empty = false;
+	DataChunk scan_chunk;
+	//! One hash column per key column, filled per chunk while a side is walked
+	DataChunk key_hashes;
+	//! The database the delta's tables live in, so a scan of them can run under the caller's transaction
+	optional_ptr<AttachedDatabase> delta_database;
+	//! The table each side is read from, for the scan of the caller's own uncommitted rows, and whether
+	//! that scan has been set up for the side
+	optional_ptr<DataTable> left_storage;
+	optional_ptr<DataTable> right_storage;
+	bool left_local_open = false;
+	bool right_local_open = false;
+	bool left_own_storage = false;
+	bool right_own_storage = false;
+	vector<StorageIndex> column_ids;
+	idx_t key_count = 0;
+	//! Whether the key is a single integer column, which is what the bits path above needs
+	bool key_is_integer = false;
+	VisibilityBound left_bound;
+	VisibilityBound right_bound;
+	//! Which row ids each side holds. A row-id diff compares physical rows of one table, so the ids are the
+	//! table's own - and those run from zero, which is what makes a *bit* per row enough: the hash sets this
+	//! replaces cost about 35 MiB each at a million rows, and a diff's removals came out in whatever order
+	//! their buckets happened to hold.
+	Git4DataRowSet left_rows;
+	Git4DataRowSet right_rows;
+	//! Key values of the rows on the left, so a removed row can be paired with the added row that
+	//! replaced it. Only filled when the table has a primary key - unless the key is one integer column, in
+	//! which case `left_key_bits` holds it and this map stays empty: a key vector per left row was one
+	//! allocation per row over the whole side, which is what made two reads of one table cost 2.630 s for a
+	//! million rows (increment 3s).
+	//! The left rows' own keys, in blocks of the key columns, for a row-id diff whose key is composite. The
+	//! map this replaces held one `vector<Value>` per row - about 190 MiB for a million composite-key rows,
+	//! measured - and a key is only ever read back for the rows that turn out to be *removed*.
+	vector<unique_ptr<DataChunk>> left_key_blocks;
+	idx_t left_key_block_rows = 0;
+	//! The key's type, so a key can be built back from its bits for the rows that are reported
+	LogicalType integer_key_type;
+	//! Whether the two sides are two different tables, in which case the comparison is made on the
+	//! primary key and the scan carries every column so two rows can be told apart by value.
+	bool compare_by_key = false;
+	//! The overlays each side applies, with the keys each of them removed, and the scan over each
+	//! overlay's added rows. Every side needs its own: a scan is consumed as it walks, and the phases
+	//! run one after the other over the same state - a side that found a scan already open would read no
+	//! added rows at all, which is what a diff of a reference against itself did, reporting its own added
+	//! row as a removed one.
+	vector<Git4DataDeltaRead> left_deltas;
+	vector<Git4DataDeltaRead> right_deltas;
+	//! The types of the bundled scan, so an overlay's chunk can be built to match it
+	vector<LogicalType> scan_types;
+	//! The number of columns after the keys, contiguous in the scan chunk, when comparing by key
+	idx_t value_count = 0;
+	//! Where a stored left row is: which block of rows holds it and which row inside that block
+	struct StoredRow {
+		idx_t block;
+		idx_t row;
+	};
+	//! A row of the left side, held under its primary key
+	struct KeyedRow {
+		//! Where this row's key and values are. The left side is held as the *values themselves* in flat
+		//! columns, a block of `STANDARD_VECTOR_SIZE` rows at a time, rather than as a vector of `Value`
+		//! objects per row: the peak of a million-row diff measured 286 MiB that way and 168 MiB this way
+		//! (increment 3u). A diff is what merge, pick and restore are built on, so this is the memory a
+		//! caller pays to compare two references at all.
+		StoredRow stored;
+		row_t row_id;
+		//! Whether the right side accounted for this row. It used to be a *set* of matched keys - a string
+		//! per matched row on the composite path and a 64-bit pattern per row on the integer one - which cost
+		//! a hash entry per row and, on the composite path, a formatted key string per row: measured, a
+		//! half-million-row diff under a composite key took 5.6 s that way (increment 3w).
+		bool matched = false;
+		//! The key's 64-bit pattern when the key is a single integer column: the map is then bucketed by it,
+		//! which is exact, and matching a right row against it allocates nothing at all
+		uint64_t bits = 0;
+		//! The next row sharing this one's key, as a position in `left_candidates`: the rows that share a key
+		//! are one chain, so a key costs a map entry and nothing else. A `vector` per key - the shape this
+		//! replaces - cost a header and a heap block per distinct key on top of the map entry, measured at
+		//! about 60 MiB over a million rows.
+		idx_t next = DConstants::INVALID_INDEX;
+	};
+	//! The left side, in blocks: every block holds up to `STANDARD_VECTOR_SIZE` rows of the key and value
+	//! columns, and `stored_rows` is how many rows of the last block are used
+	vector<unique_ptr<DataChunk>> left_blocks;
+	idx_t stored_rows = 0;
+	//! The keys the change lists name, in blocks of key columns, with `change_key_rows` rows used in the last
+	vector<unique_ptr<DataChunk>> change_keys;
+	idx_t change_key_rows = 0;
+	//! Every left row, in the order it was read, with `left_heads` saying where each key's chain starts
+	vector<KeyedRow> left_candidates;
+	unordered_map<hash_t, idx_t> left_heads;
+	struct Change {
+		row_t row_id;
+		row_t counterpart;
+		//! Where the row's primary key is, carried so a caller can match it without knowing row ids. The key
+		//! is in blocks of the same shape the left side is held in, so a change costs a row id and a pair of
+		//! indexes rather than a vector of Values of its own: measured on a diff that changes every row of a
+		//! million, this took the peak from 312 MiB to 249 (increment 3v).
+		StoredRow key;
+	};
+	vector<Change> added;
+	vector<Change> removed;
+	vector<Change> changed;
+	idx_t added_cursor = 0;
+	idx_t removed_cursor = 0;
+	idx_t changed_cursor = 0;
+	Phase phase = Phase::LEFT;
+
+	idx_t MaxThreads() const override {
+		return 1;
+	}
+};
+
+struct Git4DataDiffBindData : public TableFunctionData {
+	string table_name;
+	VisibilityBound left_bound;
+	VisibilityBound right_bound;
+	//! The tables the two sides are read from. They are the same table unless a side is a branch
+	//! that has been given a line of its own, which is then read as itself - and a diff that did not
+	//! follow that would compare the pinned image while a pick read the branch's table.
+	string left_table;
+	string right_table;
+	//! Whether each side is read from a branch's *own* copy rather than the source table. A copy is the
+	//! caller's table, so a diff of it has to see what that transaction has written to it.
+	bool left_own_storage = false;
+	bool right_own_storage = false;
+	//! The primary key's physical column indexes, empty when the table has no primary key
+	vector<StorageIndex> key_columns;
+	//! The types of those columns, in the same order
+	vector<LogicalType> key_types;
+	//! The names of those columns, in the same order
+	vector<Identifier> key_names;
+	//! Whether the two sides are two different tables, which is what a branch with a table of its own
+	//! makes them. Different tables do not share row ids - the branch's storage numbers its own rows
+	//! from zero again - so the comparison has to be made on the primary key instead.
+	bool compare_by_key = false;
+	//! A side that differs from its base through overlays is read through them here too: the rows they
+	//! added are part of that side, and the keys they removed are not
+	vector<Git4DataDeltaLayer> left_deltas;
+	vector<Git4DataDeltaLayer> right_deltas;
+};
+
+
+// The keyed-row helpers 3fm moved into git4data_diff_rows.cpp: every function that file defines,
+// because the operator calls most of them and a partial list is a compile error.
+void Git4DataDiffPrimaryKey(TableCatalogEntry &table, vector<StorageIndex> &columns, vector<LogicalType> &types, vector<Identifier> &names);
+static unique_ptr<FunctionData> Git4DataDiffBind(ClientContext &context, TableFunctionBindInput &input, vector<LogicalType> &return_types, vector<Identifier> &names);
+static hash_t Git4DataDiffChunkKeyHash(DataChunk &chunk, idx_t key_count, idx_t row);
+bool Git4DataDiffSameStoredKeyChunk(const Git4DataDiffState &state, const Git4DataDiffState::StoredRow &stored, DataChunk &chunk, idx_t row);
+static vector<Value> Git4DataDiffRowKey(DataChunk &chunk, idx_t key_count, idx_t row);
+static Value Git4DataDiffKeyFromBits(const LogicalType &type, uint64_t bits);
+static bool Git4DataDiffChunkKeyBits(DataChunk &chunk, idx_t row, uint64_t &bits);
+Git4DataDiffState::StoredRow Git4DataDiffStoreRow(Git4DataDiffState &state, ClientContext &context, DataChunk &chunk, idx_t row);
+bool Git4DataDiffSameStoredValues(const Git4DataDiffState &state, const Git4DataDiffState::StoredRow &stored, DataChunk &chunk, idx_t first_value, idx_t row);
+idx_t Git4DataDiffStoreLeftKey(Git4DataDiffState &state, ClientContext &context, DataChunk &chunk, idx_t row);
+vector<Value> Git4DataDiffStoredLeftKey(const Git4DataDiffState &state, idx_t position);
+idx_t Git4DataDiffPair(Git4DataDiffState &state, idx_t head, DataChunk &chunk, idx_t row, bool key_is_bits);
+void Git4DataDiffChainPush(Git4DataDiffState &state, hash_t key, Git4DataDiffState::KeyedRow entry);
+Git4DataDiffState::StoredRow Git4DataDiffChangeKeyBlock(Git4DataDiffState &state, ClientContext &context);
+Git4DataDiffState::StoredRow Git4DataDiffStoreChangeKey(Git4DataDiffState &state, ClientContext &context, DataChunk &chunk, idx_t row);
+static Git4DataDiffState::StoredRow Git4DataDiffStoreChangeKeyFromLeft(Git4DataDiffState &state, ClientContext &context, const Git4DataDiffState::StoredRow &source);
+static Git4DataDiffState::StoredRow Git4DataDiffStoreChangeKeyValues(Git4DataDiffState &state, ClientContext &context, const vector<Value> &key);
+static bool Git4DataDiffSameKey(const vector<Value> &left, const vector<Value> &right);
+hash_t Git4DataDiffKeyHash(const vector<Value> &key);
+static void Git4DataDiffSetupDeltas(ClientContext &context, const vector<Git4DataDeltaLayer> &layers, const vector<StorageIndex> &column_ids, const vector<LogicalType> &scan_types, const vector<LogicalType> &key_types, idx_t key_count, QueryContext &query_context, vector<Git4DataDeltaRead> &result, optional_ptr<AttachedDatabase> &database);
+
 } // namespace duckdb
 
 #endif
