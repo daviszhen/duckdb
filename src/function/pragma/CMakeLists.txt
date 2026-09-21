@@ -1,4 +1,4 @@
-add_library_unity(duckdb_func_pragma OBJECT pragma_functions.cpp
+add_library_unity(duckdb_func_pragma OBJECT pragma_functions.cpp git4data_pragmas.cpp
                   pragma_queries.cpp)
 
 set(ALL_OBJECT_FILES
