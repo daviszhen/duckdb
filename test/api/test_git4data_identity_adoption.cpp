@@ -43,9 +43,17 @@ TEST_CASE("git4data: a read adopts a mapping's identity without writing it", "[g
 		// the read is not refused: there is no fact about the table to compare the mapping against
 		auto adopted = con.Query("SELECT sum(v) FROM t AT (BRANCH => 'b')");
 		CHECK(!adopted->HasError());
+		// A checkpoint here, in the same instance as the adopting read, is what would carry the adopted value
+		// into the table's metadata - and with it, if the write in `Git4DataCheckMappingTable` were removed, the
+		// laundering 3el retracted. It is deliberately **not** asserted: removing that write was measured and
+		// reverted in increment 3fk, because the same write is what keeps the identity of a table the log
+		// recreated, and the crash-durability and load-after-replay instruments fail without it (54/0 -> 55/2
+		// and 26/0 -> 27/3). The reading of this test is the two assertions below, which the write does not
+		// affect.
 	}
 	{
-		// this close checkpoints, so whatever identity the replacement carries now is written with it
+		// the close checkpoints, which is what writes the table's identity into the file - whether that identity
+		// is one the table minted or one a read adopted
 		DuckDB db(path);
 		Connection con(db);
 		REQUIRE_NO_FAIL(con.Query("CHECKPOINT"));

@@ -282,8 +282,19 @@ static void Git4DataCheckMappingTable(ClientContext &context, const string &bran
 		// The table carries an identity nothing has persisted - it was created by a statement the log replayed,
 		// and the statement that assigns an identity is internal and is not logged - so there is no fact about
 		// the table to compare the mapping against and nothing is refused. The mapping's row *is* durable, so
-		// the table adopts its value: the two agree from here, the next checkpoint writes it, and until then no
-		// read is refused on a value this process invented.
+		// the table adopts its value here: the two agree, the next checkpoint writes it, and until then no read
+		// is refused on a value this process invented.
+		//
+		// **This write looks exactly like the laundering 3el retracted in the checkpoint writer, and it is not
+		// the same thing - measured, increment 3fk.** Removing it was tried: the crash-durability instrument
+		// went from 54 checks 0 failed to 55 checks 2 failed and the load-after-replay instrument from 26/0 to
+		// 27/3, because a table the *log* recreated has no identity that can come from anywhere else. The
+		// writer mints a fresh one for every table it checkpoints, so without this write the mapping's value and
+		// the table's diverge at the next checkpoint and a legitimate read is refused. The two cases - a table
+		// the log replayed, and a table that took the mapping's name - are indistinguishable here, which is the
+		// boundary the note calls F-B, and telling them apart needs a durable per-instance token written when
+		// the table is created. Until that exists, this write stays and the laundering it enables is documented
+		// rather than removed.
 		table->GetStorage().GetDataTableInfo()->SetPersistedTableId(mapping_table_id);
 		return;
 	}
