@@ -332,6 +332,26 @@ void SingleFileCheckpointWriter::CreateCheckpoint() {
 		// file from the older build carries in the fields after these two, because the block's deserializer is
 		// positional - it refuses a source with fields left over rather than skipping them - but it carries
 		// none of those records across.
+		//
+		// **Except the window's own reference, which is written here (decision of 2026-09-21, "option A").** The
+		// engine moves that reference at a checkpoint - `AdvancePitr`, called before the retention bound is
+		// worked out - and there is no statement behind the move to write a row, so the row keeps the pin the
+		// window was *opened* at. A row at a stale pin is not merely behind: the checkpoint that moved the
+		// window is the checkpoint that released the state that pin names, so a read at it answers a *newer*
+		// state while reporting the old pin - a wrong answer, measured, and the reason this reference is the one
+		// thing that goes back into the block. The load takes whichever of the two pins is newer.
+		Git4DataSnapshot window_reference;
+		if (transaction_manager.PitrEnabled() &&
+		    transaction_manager.snapshots.Get(DuckTransactionManager::PITR_REFERENCE, window_reference)) {
+			registry_serializer.WriteList(100, "snapshots", 1, [&](Serializer::List &list, idx_t) {
+				list.WriteObject([&](Serializer &obj) {
+					obj.WriteProperty<string>(100, "name", window_reference.name);
+					obj.WriteProperty<uint64_t>(101, "pin", window_reference.pin);
+					obj.WriteProperty<int64_t>(102, "created", window_reference.created.value);
+					obj.WriteProperty<string>(103, "line", window_reference.line);
+				});
+			});
+		}
 		registry_serializer.End();
 		registry_writer->Flush();
 		registry_block = registry_pointer.block_pointer;
@@ -495,14 +515,31 @@ void SingleFileCheckpointReader::LoadFromStorage() {
 		(void)registry_deserializer.ReadPropertyWithExplicitDefault<int64_t>(104, "pitr_window", 0);
 		(void)registry_deserializer.ReadPropertyWithExplicitDefault<int64_t>(105, "snapshot_limit", -1);
 		(void)registry_deserializer.ReadPropertyWithExplicitDefault<int64_t>(106, "branch_limit", -1);
+		// The one record in this list that is *kept* is the window's own reference: the engine moves it with no
+		// statement behind the move, so the block is where the moved pin survives (decision of 2026-09-21,
+		// option A). Everything else an older file carries here - a caller's references - is parsed and dropped
+		// (2026-09-20: the block is not the registry).
+		Git4DataSnapshot kept_pitr;
+		bool has_kept_pitr = false;
 		registry_deserializer.ReadOptionalList(100, "snapshots", [&](Deserializer::List &list, idx_t i) {
 			return list.ReadObject([&](Deserializer &obj) {
-				(void)obj.ReadProperty<string>(100, "name");
-				(void)obj.ReadProperty<uint64_t>(101, "pin");
-				(void)obj.ReadPropertyWithExplicitDefault<int64_t>(102, "created", 0);
-				(void)obj.ReadPropertyWithExplicitDefault<string>(103, "line", "");
+				auto name = obj.ReadProperty<string>(100, "name");
+				auto pin = obj.ReadProperty<uint64_t>(101, "pin");
+				auto created = obj.ReadPropertyWithExplicitDefault<int64_t>(102, "created", 0);
+				auto line = obj.ReadPropertyWithExplicitDefault<string>(103, "line", "");
+				if (name == DuckTransactionManager::PITR_REFERENCE) {
+					kept_pitr.name = name;
+					kept_pitr.pin = pin;
+					kept_pitr.created = timestamp_t(created);
+					kept_pitr.line = line;
+					has_kept_pitr = true;
+				}
 			});
 		});
+		if (has_kept_pitr) {
+			// in place before anything can run a checkpoint: that is what the copy protects
+			transaction_manager.snapshots.Create(kept_pitr.name, kept_pitr.pin, kept_pitr.created, kept_pitr.line);
+		}
 		registry_deserializer.ReadOptionalList(101, "branches", [&](Deserializer::List &list, idx_t i) {
 			return list.ReadObject([&](Deserializer &obj) {
 				(void)obj.ReadProperty<string>(100, "name");

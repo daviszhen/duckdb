@@ -165,3 +165,33 @@ query I
 SELECT count(*) FROM t2
 ----
 300
+
+# ---------------------------------------------------------------------------------------------------------
+# The pin the reopen *reports* comes from the block when the engine has moved the window and no statement has
+# written the row since. The engine moves this reference at a checkpoint with no statement behind the move, so the
+# row keeps the pin the window was opened at while the block carries the one it was moved to (decision of
+# 2026-09-21, option A); the load keeps the newer. The listing reads the registry, so a listing pin strictly
+# newer than the row's is exactly that comparison having been made - and with the block's copy removed both sides
+# are the row, this reads false, and a read at the reported pin answers a *newer* state than the one it names.
+# ---------------------------------------------------------------------------------------------------------
+
+statement ok
+PRAGMA git4data_pitr(0)
+
+# the move happens here, and nothing writes the row afterwards
+statement ok
+CHECKPOINT
+
+restart
+
+query I
+SELECT (SELECT pinned_commit_id FROM git4data_snapshots() WHERE snapshot_name = '__pitr__') >
+       (SELECT pin FROM git4data.snapshots WHERE name = '__pitr__')
+----
+true
+
+# and reading at the window answers the state that pin names, which is the moved one
+query I
+SELECT count(*) FROM t2 AT (SNAPSHOT => '__pitr__')
+----
+300

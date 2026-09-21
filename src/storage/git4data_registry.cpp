@@ -355,6 +355,13 @@ void Git4DataLoadRegistry(AttachedDatabase &db) {
 	// this function kept whichever of the two was newer. The block carries only the two commit counters now;
 	// what that costs is recorded in 3ef (the row can lag the engine's move, which retains history rather than
 	// releasing it, and the next feature statement writes the moved pin).
+	// The block carries the reference the engine *moved*; it has no statement behind the move, so the row
+	// keeps the pin the window was opened at while memory holds the one it was moved to (2026-09-21, option A).
+	// Where both are there the newer pin wins: a pin only moves forward, and taking the older one would name a
+	// state the checkpoint that moved the window has already released - a read at it then answers a *newer*
+	// state while reporting the old pin, which is the wrong answer this comparison exists to prevent.
+	Git4DataSnapshot kept_pitr;
+	bool has_kept_pitr = transaction_manager.snapshots.Get(DuckTransactionManager::PITR_REFERENCE, kept_pitr);
 	auto old_branches = transaction_manager.branches.List();
 	transaction_manager.snapshots.Clear();
 	transaction_manager.branches.Clear();
@@ -378,6 +385,30 @@ void Git4DataLoadRegistry(AttachedDatabase &db) {
 		    auto created = chunk.GetValue(2, row).GetValue<timestamp_t>();
 		    auto line = chunk.GetValue(3, row).GetValue<string>();
 		    if (StringUtil::StartsWith(name, "__")) {
+			    if (name == DuckTransactionManager::PITR_REFERENCE) {
+				    // The block carries this reference too - it is the one the engine moves with no statement
+				    // behind the move (2026-09-21, option A) - so the newer of the two pins is kept. The
+				    // *length* comes from the line, and this row is where it lives: the early return that used to
+				    // be here was harmless while the block also carried the window's flag and length (103/104),
+				    // and it is not any more - measured, `pitr.test` read `pitr_enabled = false` after a restart
+				    // with the row's own line never parsed.
+				    auto window_line = line.rfind("window_micros=", 0) == 0 ? line : kept_pitr.line;
+				    auto window_pin = pin;
+				    auto window_created = created;
+				    if (has_kept_pitr && kept_pitr.pin >= pin) {
+					    window_pin = kept_pitr.pin;
+					    window_created = kept_pitr.created;
+				    }
+				    if (window_line.rfind("window_micros=", 0) == 0) {
+					    try {
+						    transaction_manager.RestorePitr(timestamp_t(std::stoll(window_line.substr(14))));
+					    } catch (...) {
+						    // a line that does not parse leaves the window off, which is what the default is
+					    }
+				    }
+				    transaction_manager.snapshots.Create(name, window_pin, window_created, window_line);
+				    return;
+			    }
 			    // An internal reference is a row like any other, and this row is the only record of it: the
 			    // window's own reference carries the length of the window in this column, and that is what
 			    // makes the window survive a restart - a window opened and then crashed on used to come back
