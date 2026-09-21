@@ -47,6 +47,23 @@ string PragmaGit4DataBindBranchTable(ClientContext &context, const FunctionParam
 void PragmaGit4DataBindInternal(ClientContext &context, const FunctionParameters &parameters);
 string PragmaGit4DataBindBranchDelta(ClientContext &context, const FunctionParameters &parameters);
 
+
+// The reference-lifecycle pragmas, defined in git4data_pragma_references.cpp and registered here.
+string PragmaGit4DataLimit(ClientContext &context, const FunctionParameters &parameters);
+string PragmaGit4DataLimits(ClientContext &context, const FunctionParameters &parameters);
+string PragmaGit4DataCreateBranch(ClientContext &context, const FunctionParameters &parameters);
+string PragmaGit4DataDropBranch(ClientContext &context, const FunctionParameters &parameters);
+string PragmaGit4DataBranches(ClientContext &context, const FunctionParameters &parameters);
+string PragmaGit4DataLCA(ClientContext &context, const FunctionParameters &parameters);
+string PragmaGit4DataCreateSnapshot(ClientContext &context, const FunctionParameters &parameters);
+void PragmaGit4DataForgetInternal(ClientContext &context, const FunctionParameters &parameters);
+string PragmaGit4DataDropSnapshot(ClientContext &context, const FunctionParameters &parameters);
+string PragmaGit4DataSnapshots(ClientContext &context, const FunctionParameters &parameters);
+string PragmaGit4DataState(ClientContext &context, const FunctionParameters &parameters);
+string PragmaGit4DataProbe(ClientContext &context, const FunctionParameters &parameters);
+string PragmaGit4DataProbeAll(ClientContext &context, const FunctionParameters &parameters);
+string PragmaGit4DataProbeAt(ClientContext &context, const FunctionParameters &parameters);
+
 } // namespace duckdb
 
 #endif
