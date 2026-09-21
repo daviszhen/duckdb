@@ -73,3 +73,62 @@ query IIIII
 SELECT ti, si, i, bi, h FROM ty AT (SNAPSHOT => 'ty_snap') WHERE ti = -1
 ----
 -1	-2	-3	-4	-5
+
+# A floating-point key: the comparison path for a key that is *not* an integer, which no test in this directory
+# exercised until now - not one of them used a real or a double key, so `Git4DataIntegerKeyBits` and the hash
+# path beside it were only ever reached by the integer keys the other files use. Measured while hunting for
+# defects: the row whose key is NaN is found by the removed table, which a comparison by *value* could not do
+# (NaN is not equal to itself in SQL), so what matches a key here is not a plain equality.
+statement ok
+CREATE TABLE fk (k DOUBLE PRIMARY KEY, v INTEGER)
+
+statement ok
+INSERT INTO fk VALUES (1.0, 10), ('NaN'::DOUBLE, 20), (2.5, 40)
+
+statement ok
+PRAGMA git4data_create_snapshot('fk_s')
+
+statement ok
+PRAGMA git4data_create_branch('fk_delta', 'fk_s')
+
+statement ok
+CREATE TABLE fk_add (k DOUBLE, v INTEGER)
+
+statement ok
+INSERT INTO fk_add VALUES (99.0, 1)
+
+statement ok
+CREATE TABLE fk_rem (k DOUBLE)
+
+statement ok
+INSERT INTO fk_rem VALUES ('NaN'::DOUBLE)
+
+statement ok
+PRAGMA git4data_bind_branch_delta('fk', 'fk_delta', 'fk_add', 'fk_rem')
+
+query II
+SELECT v, k FROM fk AT (BRANCH => 'fk_delta') ORDER BY v
+----
+1	99.0
+10	1.0
+40	2.5
+
+# the live table still holds the row the delta removed, and a copy of it does too
+query I
+SELECT count(*) FROM fk
+----
+3
+
+statement ok
+PRAGMA git4data_create_branch('fk_copy', 'fk_s')
+
+statement ok
+PRAGMA git4data_materialize('fk', 'fk_copy', 'fk_tb')
+
+statement ok
+DELETE FROM fk_tb WHERE isnan(k)
+
+query I
+SELECT count(*) FROM fk AT (BRANCH => 'fk_copy')
+----
+2
