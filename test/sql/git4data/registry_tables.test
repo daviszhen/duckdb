@@ -69,12 +69,13 @@ SELECT count(*) FROM git4data.snapshots
 1
 
 # git4data_forget_internal is what the merge's generated SQL calls to drop the reference it made for itself.
-# It forgets an internal reference in memory only, so it refuses a name the feature does not reserve: a real
-# snapshot forgotten this way would read again the moment its row was loaded.
+# That one name is the only thing it accepts: it forgets a reference in memory only, so a name it does not
+# own would read again the moment its row was loaded - and the window, which is reserved as well, would lose
+# the reach it promised without saying so.
 statement error
 PRAGMA git4data_forget_internal('rt_only')
 ----
-<REGEX>:.*is not one of the references this feature manages for itself.*
+<REGEX>:.*is not the reference this forgets.*
 
 # A branch and the tables it reads are rows too, and they are written the same way, so they survive a restart.
 # **Why this restart carries them in the file rather than in a log, located in 3dl**: the sqllogictest harness

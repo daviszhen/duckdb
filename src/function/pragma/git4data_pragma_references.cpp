@@ -426,16 +426,21 @@ string PragmaGit4DataCreateSnapshot(ClientContext &context, const FunctionParame
 	return result;
 }
 
-//! Drop an internal reference from the in-memory registry and leave its row to the caller, which is what a
-//! statement the feature generates for itself needs: a pragma that returns a statement cannot be called from
-//! one. It is limited to the names the feature reserves, so a caller cannot forget a reference this way - a
-//! forgotten snapshot would read again the moment its row was loaded.
+//! Drop one reference from the in-memory registry and leave its row to the caller, which is what a statement the
+//! feature generates for itself needs: a pragma that returns a statement cannot be called from one. The merge's
+//! base is the one reference that needs this, so it is the only name accepted here - reserving the `__` prefix was
+//! not enough to make this safe, because the window is reserved too and forgetting it is *not* ending it.
+//! Measured: `git4data_pitr(100)` then `git4data_forget_internal('__pitr__')` left the window enabled with no
+//! reference in the registry while its row stayed in `git4data.snapshots` (the listing read 0 rows, the table 1),
+//! and the next checkpoint put the reference back at the *current* commit, moving the pin from 7 to 25 - so the
+//! reach the window promised shrank without a word.
 void PragmaGit4DataForgetInternal(ClientContext &context, const FunctionParameters &parameters) {
 	auto name = parameters.values[0].ToString();
-	if (!StringUtil::StartsWith(name, "__")) {
+	if (name != DuckTransactionManager::MERGE_BASE_REFERENCE) {
 		throw InvalidInputException(
-		    "\"%s\" is not one of the references this feature manages for itself, and this only forgets one of "
-		    "those from memory. Use git4data_drop_snapshot, which takes its row with it.",
+		    "\"%s\" is not the reference this forgets, which is the base a merge of this feature makes for itself "
+		    "and only out of memory. A reference a caller took is dropped with git4data_drop_snapshot, and a "
+		    "point-in-time recovery window is ended with git4data_pitr_off.",
 		    name);
 	}
 	GetGit4DataTransactionManager(context).snapshots.Drop(name);
@@ -443,6 +448,18 @@ void PragmaGit4DataForgetInternal(ClientContext &context, const FunctionParamete
 
 string PragmaGit4DataDropSnapshot(ClientContext &context, const FunctionParameters &parameters) {
 	auto name = parameters.values[0].ToString();
+	// The rule the creation side states is enforced where a reference is created, and this face was the way
+	// around it. Measured on the window, the one a caller can reach: `git4data_pitr(100)` then
+	// `git4data_drop_snapshot('__pitr__')` dropped the reference the window holds its history with while the
+	// window stayed on - the session read `true, 100, false`, the same database after a restart read
+	// `false, 0, false`, because the row is what a reload decides the window by. The way out it skipped is
+	// the one that ends the window on both sides: `git4data_pitr_off` clears the setting and takes the row.
+	if (StringUtil::StartsWith(name, "__")) {
+		throw InvalidInputException(
+		    "\"%s\" is a name this feature reserves for a reference it manages itself, so it cannot be dropped "
+		    "by hand. A point-in-time recovery window is ended with git4data_pitr_off.",
+		    name);
+	}
 	auto &transaction_manager = GetGit4DataTransactionManager(context);
 	// nothing another transaction has not committed can be dropped by this one
 	if (!Git4DataReferenceVisible(context, "snapshot", name) || !transaction_manager.snapshots.Drop(name)) {

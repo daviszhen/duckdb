@@ -195,3 +195,68 @@ SELECT (SELECT count(*) FROM t AT (SNAPSHOT => 'fresh1')), (SELECT count(*) FROM
 ----
 10	10
 
+# The reserved prefix is refused where a reference is *created*, and the drop face was the way round it.
+# Measured before this guard, on the open window: `git4data_drop_snapshot('__pitr__')` dropped the reference
+# the window holds its history with while the window itself stayed on - the session read
+# `true, 100, false`, and the same database after a restart read `false, 0, false`, because the row is what a
+# reload decides the window by. The history the window promised was then held by nothing, and the way out
+# that would have ended it on both sides is `git4data_pitr_off`.
+statement ok
+PRAGMA git4data_pitr(100)
+
+query III
+PRAGMA git4data_pitr_state
+----
+true	100	true
+
+statement error
+PRAGMA git4data_drop_snapshot('__pitr__')
+----
+<REGEX>:.*reserves for a reference it manages itself.*
+
+statement error
+PRAGMA git4data_drop_snapshot('__merge_base__')
+----
+<REGEX>:.*reserves for a reference it manages itself.*
+
+# forgetting a reference is the other face that reaches these names, and it reaches only the one the merge's
+# own generated SQL forgets. Measured before this guard: the window stayed enabled, the registry held nothing
+# for it while its row stayed in the table, and the next checkpoint put the reference back at the *current*
+# commit - moving the pin from 7 to 25 and shrinking the reach the window promised, with nothing said.
+statement error
+PRAGMA git4data_forget_internal('__pitr__')
+----
+<REGEX>:.*is not the reference this forgets.*
+
+# the refusals took nothing with them: the window is still on and still holds what it promises
+query III
+PRAGMA git4data_pitr_state
+----
+true	100	true
+
+query I
+SELECT count(*) FROM t AT (SNAPSHOT => '__pitr__')
+----
+10
+
+# and the way out the refusal names ends it on both sides
+statement ok
+PRAGMA git4data_pitr_off
+
+query III
+PRAGMA git4data_pitr_state
+----
+false	0	false
+
+# the rule is the reserved prefix alone, so an ordinary name is still dropped by this face
+statement ok
+PRAGMA git4data_create_snapshot('droppable')
+
+statement ok
+PRAGMA git4data_drop_snapshot('droppable')
+
+query I
+SELECT count(*) FROM (SELECT snapshot_name FROM git4data_snapshots() WHERE snapshot_name = 'droppable')
+----
+0
+
