@@ -27,6 +27,8 @@
 #include "duckdb/common/vector_operations/vector_operations.hpp"
 #include "duckdb/parser/constraints/unique_constraint.hpp"
 
+namespace duckdb {
+
 //===----------------------------------------------------------------------===//
 // The listings, as rows rather than as a pragma's printout
 //===----------------------------------------------------------------------===//

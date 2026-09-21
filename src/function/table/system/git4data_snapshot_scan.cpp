@@ -1257,3 +1257,4 @@ void Git4DataSnapshotScanFun::RegisterFunction(BuiltinFunctions &set) {
 	set.AddFunction(GetFunction());
 }
 
+} // namespace duckdb
