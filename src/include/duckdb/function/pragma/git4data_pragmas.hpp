@@ -40,6 +40,11 @@ string PragmaGit4DataPick(ClientContext &context, const FunctionParameters &para
 string PragmaGit4DataApply(ClientContext &context, const FunctionParameters &parameters);
 string PragmaGit4DataMerge(ClientContext &context, const FunctionParameters &parameters);
 
+// Used by the pick, the apply and the merge alike: the columns a generated statement reads.
+case_insensitive_set_t Git4DataScopeColumnNames(ClientContext &context, DuckTransactionManager &transaction_manager, const string &table_name, const vector<string> &references);
+string Git4DataFreeName(const string &base, const case_insensitive_set_t &taken);
+string Git4DataFreeHelperName(ClientContext &context, const string &base, const case_insensitive_set_t &taken);
+
 // The mapping pragmas, defined in git4data_pragma_mappings.cpp and registered here.
 string PragmaGit4DataMaterialize(ClientContext &context, const FunctionParameters &parameters);
 string PragmaGit4DataUnbind(ClientContext &context, const FunctionParameters &parameters);
