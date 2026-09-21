@@ -1627,6 +1627,42 @@ static string Git4DataSharedSnapshotAncestor(DuckTransactionManager &transaction
 //! A key is in conflict when both sides changed it relative to the ancestor. Two sides that ended up
 //! holding the same row have not conflicted, which is what the row comparison is for - without it,
 //! both branches adding the same row would be reported as a conflict and fail a policy of fail.
+//! The internal reference a three-way merge names its base with: the source as of `commit`, read as the line
+//! `line`. It replaces any reference of the same name, because a merge drops its own when it is done and a stale
+//! one would answer the next merge with the state of the one before. Both ways of naming a base go through here
+//! and differ only in what they pass - which is the point: this was ten lines written twice inside the merge.
+static string Git4DataCreateMergeBase(ClientContext &context, DuckTransactionManager &transaction_manager,
+                                      transaction_t commit, const string &line) {
+	transaction_manager.snapshots.Drop(DuckTransactionManager::MERGE_BASE_REFERENCE);
+	if (!transaction_manager.snapshots.Create(DuckTransactionManager::MERGE_BASE_REFERENCE, commit,
+	                                          Timestamp::GetCurrentTimestamp(), line)) {
+		throw InternalException("Could not create the internal merge base reference");
+	}
+	context.client_data->git4data_added_records.push_back("snapshot\t" +
+	                                                      string(DuckTransactionManager::MERGE_BASE_REFERENCE));
+	return DuckTransactionManager::MERGE_BASE_REFERENCE;
+}
+
+//! The commit the two sides parted at: the fork pin of whichever of them is not the ancestor. When one of the two
+//! *is* the ancestor - merging a child back into its parent - the ancestor's own pin is where the *ancestor*
+//! started rather than where they parted, so the other side's pin is what names the state. The measured account
+//! of what that rule fixes is at the call site.
+static transaction_t Git4DataMergeForkCommit(DuckTransactionManager &transaction_manager, const string &left_name,
+                                             const string &right_name, const string &ancestor) {
+	transaction_t fork = 0;
+	Git4DataBranch fork_branch;
+	for (auto &side : {left_name, right_name}) {
+		if (side == ancestor) {
+			continue;
+		}
+		if (transaction_manager.branches.Get(side, fork_branch)) {
+			fork = fork_branch.pin;
+			break;
+		}
+	}
+	return fork;
+}
+
 static string PragmaGit4DataMerge(ClientContext &context, const FunctionParameters &parameters) {
 	auto table_name = parameters.values[0].ToString();
 	auto left_name = parameters.values[1].ToString();
@@ -1702,14 +1738,8 @@ static string PragmaGit4DataMerge(ClientContext &context, const FunctionParamete
 		// of its own read the source's values as the base and reported a conflict on a row only one side had
 		// touched.
 		auto name_pin_as_base = [&]() {
-			transaction_manager.snapshots.Drop(DuckTransactionManager::MERGE_BASE_REFERENCE);
-			if (!transaction_manager.snapshots.Create(DuckTransactionManager::MERGE_BASE_REFERENCE, ancestor_branch.pin,
-			                                          Timestamp::GetCurrentTimestamp(), ancestor_branch.base_line)) {
-				throw InternalException("Could not create the internal merge base reference");
-			}
-			context.client_data->git4data_added_records.push_back("snapshot\t" +
-			                                                      string(DuckTransactionManager::MERGE_BASE_REFERENCE));
-			base_reference = DuckTransactionManager::MERGE_BASE_REFERENCE;
+			base_reference = Git4DataCreateMergeBase(context, transaction_manager, ancestor_branch.pin,
+			                                         ancestor_branch.base_line);
 			drop_merge_base = true;
 		};
 		// The state an ancestor's copy was written from is its own line, read at the commit the two sides
@@ -1725,18 +1755,7 @@ static string PragmaGit4DataMerge(ClientContext &context, const FunctionParamete
 		// the two *is* the ancestor - merging a child back into its parent - the ancestor's own pin is where the
 		// *ancestor* started, not where they parted, so the other side's pin is the one that names the state.
 		auto fork_commit = [&]() {
-			transaction_t fork = 0;
-			Git4DataBranch fork_branch;
-			for (auto &side : {left_name, right_name}) {
-				if (side == ancestor) {
-					continue;
-				}
-				if (transaction_manager.branches.Get(side, fork_branch)) {
-					fork = fork_branch.pin;
-					break;
-				}
-			}
-			return fork;
+			return Git4DataMergeForkCommit(transaction_manager, left_name, right_name, ancestor);
 		};
 		// Naming the base as the ancestor's own *line* at that commit, which is what carries the ancestor's own
 		// change: a delta lives in two tables and a copy is a table of its own, and neither is pointed at by a
@@ -1749,14 +1768,7 @@ static string PragmaGit4DataMerge(ClientContext &context, const FunctionParamete
 				// ancestor's own pin is what is left.
 				fork = ancestor_branch.pin;
 			}
-			transaction_manager.snapshots.Drop(DuckTransactionManager::MERGE_BASE_REFERENCE);
-			if (!transaction_manager.snapshots.Create(DuckTransactionManager::MERGE_BASE_REFERENCE, fork,
-			                                          Timestamp::GetCurrentTimestamp(), ancestor)) {
-				throw InternalException("Could not create the internal merge base reference");
-			}
-			context.client_data->git4data_added_records.push_back("snapshot\t" +
-			                                                      string(DuckTransactionManager::MERGE_BASE_REFERENCE));
-			base_reference = DuckTransactionManager::MERGE_BASE_REFERENCE;
+			base_reference = Git4DataCreateMergeBase(context, transaction_manager, fork, ancestor);
 			drop_merge_base = true;
 		};
 		// Which of the two is the state the two sides parted at depends on when they forked, and the pin says
@@ -1776,8 +1788,6 @@ static string PragmaGit4DataMerge(ClientContext &context, const FunctionParamete
 				name_pin_as_base();
 			}
 		};
-		// A delta is the ancestor's own change to the source, so its name reads as its line *now*; whether its
-		// two tables are empty yet is not asked, because naming the pin is right either way.
 		// A delta is the ancestor's own change to the source, so its name reads as its line *now*; whether its
 		// two tables are empty yet is not asked, because naming the pin is right either way.
 		for (auto &delta_entry : ancestor_branch.deltas) {
