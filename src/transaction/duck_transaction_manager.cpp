@@ -107,7 +107,8 @@ bool BranchRegistry::Create(const string &name, transaction_t pin, const string 
 }
 
 void BranchRegistry::SetStorageTable(const string &branch, const string &source_table, const string &storage_table,
-                                     idx_t storage_oid, idx_t source_oid, bool owned, transaction_t set_at) {
+                                     idx_t storage_oid, idx_t source_oid, bool owned, transaction_t set_at,
+                                     uint64_t table_id) {
 	lock_guard<mutex> guard(lock);
 	auto entry = branches.find(branch);
 	if (entry == branches.end()) {
@@ -120,12 +121,13 @@ void BranchRegistry::SetStorageTable(const string &branch, const string &source_
 			existing.source_oid = source_oid;
 			existing.owned = owned;
 			existing.set_at = set_at;
+			existing.table_id = table_id;
 			dirty.store(true);
 			return;
 		}
 	}
 	entry->second.storage_tables.push_back(
-	    Git4DataStorageTable {source_table, storage_table, storage_oid, source_oid, owned, set_at});
+	    Git4DataStorageTable {source_table, storage_table, storage_oid, source_oid, owned, set_at, table_id});
 	dirty.store(true);
 }
 
@@ -200,7 +202,7 @@ bool BranchRegistry::GetDeltaTable(const string &branch, const string &source_ta
 
 void BranchRegistry::SetDeltaTable(const string &branch, const string &source_table, const string &added,
                                    const string &removed, idx_t added_oid, idx_t removed_oid, idx_t source_oid,
-                                   transaction_t set_at) {
+                                   transaction_t set_at, uint64_t added_table_id, uint64_t removed_table_id) {
 	lock_guard<mutex> guard(lock);
 	auto entry = branches.find(branch);
 	if (entry == branches.end()) {
@@ -214,12 +216,14 @@ void BranchRegistry::SetDeltaTable(const string &branch, const string &source_ta
 			delta.removed_oid = removed_oid;
 			delta.source_oid = source_oid;
 			delta.set_at = set_at;
+			delta.added_table_id = added_table_id;
+			delta.removed_table_id = removed_table_id;
 			dirty.store(true);
 			return;
 		}
 	}
-	entry->second.deltas.push_back(
-	    Git4DataBranchDelta {source_table, added, removed, added_oid, removed_oid, source_oid, set_at});
+	entry->second.deltas.push_back(Git4DataBranchDelta {source_table, added, removed, added_oid, removed_oid,
+	                                                    source_oid, set_at, added_table_id, removed_table_id});
 	dirty.store(true);
 }
 

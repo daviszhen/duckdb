@@ -39,6 +39,12 @@ public:
 	uint64_t GetPersistedTableId() const {
 		return persisted_table_id;
 	}
+	bool PersistedTableIdIsFromDisk() const {
+		return persisted_table_id_on_disk;
+	}
+	void SetPersistedTableIdFromDisk(bool from_disk) {
+		persisted_table_id_on_disk = from_disk;
+	}
 	void SetPersistedTableId(uint64_t id) {
 		persisted_table_id = id;
 	}
@@ -85,6 +91,11 @@ private:
 	//! metadata, read back at open, and compared by the feature (decision of 2026-09-21). A file written before
 	//! this property reads as zero, which means "unknown" - the behaviour before it existed.
 	uint64_t persisted_table_id = 0;
+	//! Whether that identity came *from the file* - set when the checkpoint reader reads it, and when a
+	//! checkpoint writes it. It is what makes the comparison honest: a table created by a statement that the log
+	//! replayed has an identity nothing persisted (the identity is assigned by an internal statement, and
+	//! internal statements are not logged), so the feature compares only where the file carries one.
+	bool persisted_table_id_on_disk = false;
 	//! The physical list of indexes of this table
 	TableIndexList indexes;
 	//! Index storage information of the indexes created by this table

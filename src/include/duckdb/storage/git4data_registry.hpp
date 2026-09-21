@@ -159,7 +159,23 @@ bool Git4DataIsRegistrySchema(const string &schema);
 //! table no reference names has no use for one - and writing it for every table would make *every* file this
 //! build writes unreadable by an older build, since that build's table metadata reader refuses an unknown field
 //! where the feature's pin-free files are readable today (measured, the compatibility table in the note).
-bool Git4DataTableIsMapped(AttachedDatabase &db, const string &table_name);
+bool Git4DataTableIsMapped(AttachedDatabase &db, const Identifier &schema, const Identifier &table);
+//! The identity a mapping recorded for this table, or zero when none has. The row is the *durable* record, so
+//! the checkpoint writes it in preference to an identity this process minted and never persisted - which is what
+//! a table the log recreated has, since the statement that assigns its identity is internal and is not logged.
+uint64_t Git4DataMappedTableIdentity(AttachedDatabase &db, const Identifier &schema, const Identifier &table);
+//! The identity the table carries (`DataTableInfo::persisted_table_id`): what a mapping records when it is bound,
+//! and what a read compares it against to tell that table from another one that took its name.
+uint64_t Git4DataTableIdentity(TableCatalogEntry &table);
+//! Whether that identity came from the file rather than from a statement the process is holding: only then can a
+//! mapping be refused on it, because only then is it a fact about the table rather than about this process.
+bool Git4DataTableIdentityIsFromDisk(TableCatalogEntry &table);
+//! A fresh identity, for a table the feature is about to make or has just made
+uint64_t Git4DataNewTableIdentity();
+//! Give this table a fresh identity and return it. The feature mints the value rather than reading one the
+//! engine happened to assign, because it has to be able to put the *same* value in the mapping's row - and for a
+//! copy `materialize` makes, that row is written by a statement that runs before the CREATE TABLE does.
+uint64_t Git4DataMintTableIdentity(TableCatalogEntry &table);
 //! Whether a table is one the registry keeps its references in
 bool Git4DataIsRegistryTable(const TableCatalogEntry &table);
 //! Throw when a statement writes or drops one of the registry's tables, or the schema that holds them.

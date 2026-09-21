@@ -1,4 +1,5 @@
 #include "duckdb/storage/git4data_registry.hpp"
+#include "duckdb/common/types/uuid.hpp"
 
 #include "duckdb/catalog/catalog.hpp"
 #include "duckdb/catalog/catalog_transaction.hpp"
@@ -114,10 +115,14 @@ string Git4DataEnsureRegistryTables(ClientContext &context) {
 	// capture names a branch and resolves its mapping at the time of the read, so a mapping set after the
 	// capture's pin would answer through a table that did not exist at that pin - measured as no rows at all,
 	// with every listing saying nothing was wrong (3dr, and the decision of 2026-09-21).
+	// `table_id` is the identity the mapped table carries (`DataTableInfo::persisted_table_id`), and it is what
+	// outlives a reopen: the catalog's oids do not (3bs, 3ds), so without it a table dropped and recreated under
+	// the same name while the database was closed is read as the table the mapping was made against - silently.
 	result += "CREATE TABLE IF NOT EXISTS " GIT4DATA_REGISTRY_SCHEMA "." GIT4DATA_STORAGE_TABLE
-	          "(branch VARCHAR, source VARCHAR, storage VARCHAR, owned BOOLEAN, set_at UBIGINT);\n";
+	          "(branch VARCHAR, source VARCHAR, storage VARCHAR, owned BOOLEAN, set_at UBIGINT, table_id UBIGINT);\n";
 	result += "CREATE TABLE IF NOT EXISTS " GIT4DATA_REGISTRY_SCHEMA "." GIT4DATA_DELTAS_TABLE
-	          "(branch VARCHAR, source VARCHAR, added VARCHAR, removed VARCHAR, set_at UBIGINT);\n";
+	          "(branch VARCHAR, source VARCHAR, added VARCHAR, removed VARCHAR, set_at UBIGINT, added_table_id "
+	          "UBIGINT, removed_table_id UBIGINT);\n";
 	// A file written by an earlier build of this branch has those two tables without the column, and a table
 	// the caller cannot be asked to rebuild: the statement adds it, with no value in it, which reads as
 	// "unknown" and is the behaviour before this column existed.
@@ -125,6 +130,12 @@ string Git4DataEnsureRegistryTables(ClientContext &context) {
 	          " ADD COLUMN IF NOT EXISTS set_at UBIGINT;\n";
 	result += "ALTER TABLE " GIT4DATA_REGISTRY_SCHEMA "." GIT4DATA_DELTAS_TABLE
 	          " ADD COLUMN IF NOT EXISTS set_at UBIGINT;\n";
+	result += "ALTER TABLE " GIT4DATA_REGISTRY_SCHEMA "." GIT4DATA_STORAGE_TABLE
+	          " ADD COLUMN IF NOT EXISTS table_id UBIGINT;\n";
+	result += "ALTER TABLE " GIT4DATA_REGISTRY_SCHEMA "." GIT4DATA_DELTAS_TABLE
+	          " ADD COLUMN IF NOT EXISTS added_table_id UBIGINT;\n";
+	result += "ALTER TABLE " GIT4DATA_REGISTRY_SCHEMA "." GIT4DATA_DELTAS_TABLE
+	          " ADD COLUMN IF NOT EXISTS removed_table_id UBIGINT;\n";
 	// The quotas are settings rather than references, and they are rows for the same reason the references are:
 	// a row is transactional and reaches the log, where a property of the checkpoint's registry block was
 	// neither. `git4data_limit` writes them and the load below reads them back.
@@ -465,9 +476,13 @@ void Git4DataLoadRegistry(AttachedDatabase &db) {
 		// read, and a missing value is zero, which reads as "unknown" - no check, the behaviour before the
 		// column existed.
 		const bool has_set_at = storage->GetColumns().LogicalColumnCount() > 4;
+		const bool has_table_id = storage->GetColumns().LogicalColumnCount() > 5;
 		vector<LogicalType> storage_types {LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR,
 		                                   LogicalType::BOOLEAN};
 		if (has_set_at) {
+			storage_types.push_back(LogicalType::UBIGINT);
+		}
+		if (has_table_id) {
 			storage_types.push_back(LogicalType::UBIGINT);
 		}
 		Git4DataScanRegistryTable(db, *storage, storage_types, [&](DataChunk &chunk, idx_t row) {
@@ -479,14 +494,22 @@ void Git4DataLoadRegistry(AttachedDatabase &db) {
 			// means "no check", so a NULL is read as zero rather than refused
 			auto set_at = has_set_at && !chunk.GetValue(4, row).IsNull() ? chunk.GetValue(4, row).GetValue<uint64_t>()
 			                                                             : 0;
-			transaction_manager.branches.SetStorageTable(branch, source, storage, 0, 0, owned, set_at);
+			auto table_id = has_table_id && !chunk.GetValue(5, row).IsNull()
+			                    ? chunk.GetValue(5, row).GetValue<uint64_t>()
+			                    : 0;
+			transaction_manager.branches.SetStorageTable(branch, source, storage, 0, 0, owned, set_at, table_id);
 		});
 	}
 	if (deltas) {
 		const bool has_set_at = deltas->GetColumns().LogicalColumnCount() > 4;
+		const bool has_table_ids = deltas->GetColumns().LogicalColumnCount() > 5;
 		vector<LogicalType> delta_types {LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR,
 		                                 LogicalType::VARCHAR};
 		if (has_set_at) {
+			delta_types.push_back(LogicalType::UBIGINT);
+		}
+		if (has_table_ids) {
+			delta_types.push_back(LogicalType::UBIGINT);
 			delta_types.push_back(LogicalType::UBIGINT);
 		}
 		Git4DataScanRegistryTable(db, *deltas, delta_types, [&](DataChunk &chunk, idx_t row) {
@@ -496,7 +519,14 @@ void Git4DataLoadRegistry(AttachedDatabase &db) {
 			auto removed = chunk.GetValue(3, row).GetValue<string>();
 			auto set_at = has_set_at && !chunk.GetValue(4, row).IsNull() ? chunk.GetValue(4, row).GetValue<uint64_t>()
 			                                                             : 0;
-			transaction_manager.branches.SetDeltaTable(branch, source, added, removed, 0, 0, 0, set_at);
+			auto added_id = has_table_ids && !chunk.GetValue(5, row).IsNull()
+			                    ? chunk.GetValue(5, row).GetValue<uint64_t>()
+			                    : 0;
+			auto removed_id = has_table_ids && !chunk.GetValue(6, row).IsNull()
+			                      ? chunk.GetValue(6, row).GetValue<uint64_t>()
+			                      : 0;
+			transaction_manager.branches.SetDeltaTable(branch, source, added, removed, 0, 0, 0, set_at, added_id,
+			                                           removed_id);
 		});
 	}
 	// put the oids the records had back: the tables do not carry them, and they are what follows a renamed
@@ -674,16 +704,85 @@ optional_ptr<const Git4DataBranchDelta> Git4DataFindDeltaTable(ClientContext &co
 	return nullptr;
 }
 
-bool Git4DataTableIsMapped(AttachedDatabase &db, const string &table_name) {
+uint64_t Git4DataNewTableIdentity() {
+	auto uuid = UUIDv4::GenerateRandomUUID();
+	return uuid.lower == 0 ? 1 : uint64_t(uuid.lower);
+}
+
+uint64_t Git4DataMintTableIdentity(TableCatalogEntry &table) {
+	// an identity belongs to the *table*, not to the mapping that recorded it: two branches can be given the
+	// same table, and minting a fresh value for the second would leave the first reading through a table whose
+	// identity no longer matches its row - measured, every read of the first branch was then refused as a swap
+	auto current = Git4DataTableIdentity(table);
+	if (current != 0) {
+		return current;
+	}
+	auto identity = Git4DataNewTableIdentity();
+	table.GetStorage().GetDataTableInfo()->SetPersistedTableId(identity);
+	return identity;
+}
+
+uint64_t Git4DataTableIdentity(TableCatalogEntry &table) {
+	auto &info = table.GetStorage().GetDataTableInfo();
+	return info ? info->GetPersistedTableId() : 0;
+}
+
+bool Git4DataTableIdentityIsFromDisk(TableCatalogEntry &table) {
+	auto &info = table.GetStorage().GetDataTableInfo();
+	return info && info->PersistedTableIdIsFromDisk();
+}
+
+//! The spellings a mapping may have used for this table: the bare name, and `schema.table` - which is the
+//! feature's own name for a table outside the default schema (Git4DataTableName). Measured: comparing the bare
+//! name only missed `s2.plus`, whose identity was then never written and whose mapping was refused as a swap.
+static vector<string> Git4DataQualifiedCandidates(const Identifier &schema, const Identifier &table) {
+	return {table.GetIdentifierName(), schema.GetIdentifierName() + "." + table.GetIdentifierName()};
+}
+
+static bool Git4DataCandidateMatches(const vector<string> &candidates, const string &name) {
+	for (auto &candidate : candidates) {
+		if (StringUtil::CIEquals(name, candidate)) {
+			return true;
+		}
+	}
+	return false;
+}
+
+uint64_t Git4DataMappedTableIdentity(AttachedDatabase &db, const Identifier &schema, const Identifier &table) {
+	auto candidates = Git4DataQualifiedCandidates(schema, table);
 	auto &transaction_manager = DuckTransactionManager::Get(db);
 	for (auto &branch : transaction_manager.branches.List()) {
 		for (auto &storage : branch.storage_tables) {
-			if (StringUtil::CIEquals(storage.storage, table_name)) {
+			if (Git4DataCandidateMatches(candidates, storage.storage)) {
+				return storage.table_id;
+			}
+		}
+		for (auto &delta : branch.deltas) {
+			if (Git4DataCandidateMatches(candidates, delta.added)) {
+				return delta.added_table_id;
+			}
+			if (Git4DataCandidateMatches(candidates, delta.removed)) {
+				return delta.removed_table_id;
+			}
+		}
+	}
+	return 0;
+}
+
+bool Git4DataTableIsMapped(AttachedDatabase &db, const Identifier &schema, const Identifier &table) {
+	auto candidates = Git4DataQualifiedCandidates(schema, table);
+	auto matches = [&](const string &name) {
+		return Git4DataCandidateMatches(candidates, name);
+	};
+	auto &transaction_manager = DuckTransactionManager::Get(db);
+	for (auto &branch : transaction_manager.branches.List()) {
+		for (auto &storage : branch.storage_tables) {
+			if (matches(storage.storage)) {
 				return true;
 			}
 		}
 		for (auto &delta : branch.deltas) {
-			if (StringUtil::CIEquals(delta.added, table_name) || StringUtil::CIEquals(delta.removed, table_name)) {
+			if (matches(delta.added) || matches(delta.removed)) {
 				return true;
 			}
 		}

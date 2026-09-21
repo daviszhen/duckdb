@@ -708,15 +708,19 @@ static string PragmaGit4DataMaterialize(ClientContext &context, const FunctionPa
 	// The binding is written out rather than called through git4data_bind_branch_table: that one returns the
 	// row's statements, and a pragma that returns a statement cannot be called from one - the same wall the
 	// merge's cleanup hit. So the memory half is the internal pragma and the row is plain DML here.
+	// the copy's identity, minted here because the row below is written by this statement and the table it names
+	// only exists once the statement runs: the pragma that follows the CREATE puts this same value on the table
+	auto identity = Git4DataNewTableIdentity();
 	return StringUtil::Format("CREATE TABLE %s (%s);\nINSERT INTO %s SELECT * FROM %s AT (BRANCH => '%s');\n"
-	                          "PRAGMA git4data_bind_internal('%s', '%s', '%s', 'true');\n"
+	                          "PRAGMA git4data_bind_internal('%s', '%s', '%s', 'true', '%llu');\n"
 	                          "DELETE FROM %s.%s WHERE branch = '%s' AND source IN (%s);\n"
-	                          "INSERT INTO %s.%s VALUES ('%s', '%s', '%s', true, %llu);%s",
+	                          "INSERT INTO %s.%s VALUES ('%s', '%s', '%s', true, %llu, %llu);%s",
 	                          quoted_storage, columns, quoted_storage, Git4DataTableSQLName(source_key), escaped_branch,
-	                          escaped_source, escaped_branch, escaped_storage, GIT4DATA_REGISTRY_SCHEMA,
-	                          GIT4DATA_STORAGE_TABLE, escaped_branch, stored_source, GIT4DATA_REGISTRY_SCHEMA,
-	                          GIT4DATA_STORAGE_TABLE, escaped_branch, escaped_source, escaped_storage,
-	                          (unsigned long long)transaction_manager.GetStartTimestampCounter(), replaced);
+	                          escaped_source, escaped_branch, escaped_storage, (unsigned long long)identity,
+	                          GIT4DATA_REGISTRY_SCHEMA, GIT4DATA_STORAGE_TABLE, escaped_branch, stored_source,
+	                          GIT4DATA_REGISTRY_SCHEMA, GIT4DATA_STORAGE_TABLE, escaped_branch, escaped_source,
+	                          escaped_storage, (unsigned long long)transaction_manager.GetStartTimestampCounter(),
+	                          (unsigned long long)identity, replaced);
 }
 
 //! Take back what a branch was given for a source table: its table of its own, or the delta it differs
@@ -842,15 +846,23 @@ static void Git4DataBindBranchTableImpl(ClientContext &context, const FunctionPa
 		                            "state it pins. Materialize the branch to get a copy.",
 		                            storage_table, source_table);
 	}
+	// the table is the caller's and it exists, so its identity is minted here (a fresh value, not whatever the
+	// engine assigned when it was created): the mapping records that value, and the checkpoint writes it with
+	// the table
+	Git4DataMintTableIdentity(Git4DataResolveTable(context, storage_table));
 	// both oids go with the mapping: the storage table's so a read can tell it from another table that
 	// takes its name after it is dropped, and the source's so the mapping follows the source if it is
 	// renamed
 	// the commit this mapping is set at. The counter is handed out to the *next* transaction, so it is above
 	// every id already committed - which is what makes it usable as "after every pin that exists now": a
 	// capture taken earlier, in this transaction or any other, pins something below it.
+	// the table's own identity, which is what tells it from a table that takes its name while the database is
+	// closed - and the value the mapping's row carries (the row is written by the caller's form below, and for
+	// a copy `materialize` makes by the internal pragma that runs after the CREATE TABLE)
 	transaction_manager.branches.SetStorageTable(branch_name, record_name, storage_table, storage_entry.oid,
 	                                             source_entry.oid, owned,
-	                                             transaction_manager.GetStartTimestampCounter());
+	                                             transaction_manager.GetStartTimestampCounter(),
+	                                             Git4DataTableIdentity(storage_entry));
 	// the copy is the branch's line from here on, so a delta beside it would be a second one that nothing
 	// reads - the branch reads its own table the moment it has one. A delta recorded before keys carried a
 	// schema is held under the name it was written with, so it is cleared by that name.
@@ -924,17 +936,33 @@ static string PragmaGit4DataBindBranchTable(ClientContext &context, const Functi
 	result += StringUtil::Format("DELETE FROM %s.%s WHERE branch = '%s' AND source IN (%s);", GIT4DATA_REGISTRY_SCHEMA,
 	                             GIT4DATA_DELTAS_TABLE, escape(branch_name), stored);
 	context.client_data->git4data_added_records.push_back("storage\t" + branch_name + "\t" + record_name);
-	result += StringUtil::Format("INSERT INTO %s.%s VALUES ('%s', '%s', '%s', %s, %llu);", GIT4DATA_REGISTRY_SCHEMA,
-	                             GIT4DATA_STORAGE_TABLE, escape(branch_name), escape(record_name),
-	                             escape(storage_table), owned ? "true" : "false",
-	                             (unsigned long long)transaction_manager.GetStartTimestampCounter());
+	result += StringUtil::Format("INSERT INTO %s.%s VALUES ('%s', '%s', '%s', %s, %llu, %llu);",
+	                             GIT4DATA_REGISTRY_SCHEMA, GIT4DATA_STORAGE_TABLE, escape(branch_name),
+	                             escape(record_name), escape(storage_table), owned ? "true" : "false",
+	                             (unsigned long long)transaction_manager.GetStartTimestampCounter(),
+	                             (unsigned long long)Git4DataTableIdentity(Git4DataResolveTable(context, storage_table)));
 	// last, as in materialize: the row naming the new table is written before the old copy goes
 	return result + replaced;
 }
 
 //! The generated form: the SQL materialize returns binds the branch in memory and writes the row itself,
 //! because a pragma that returns a statement cannot be called from one.
+//! The memory half of a binding, run by `materialize`'s own generated statement *after* the CREATE TABLE it
+//! begins with - which is what makes it the one place that can put an identity on a copy the feature just made:
+//! at the time the pragma that generates that statement runs, the table does not exist yet. The identity the
+//! binder minted for the copy arrives as the fifth argument, so the table, the mapping's row and memory all
+//! carry the same value.
 static void PragmaGit4DataBindInternal(ClientContext &context, const FunctionParameters &parameters) {
+	// the identity first: the implementation below records the identity the table *has*, and the value this call
+	// carries is the one the row already holds - so the table has to be wearing it before the memory half runs
+	// (measured: the other order left memory recording the id the CREATE TABLE minted and the row holding the
+	// one the binder chose, and every read of that mapping was refused as a swap)
+	if (parameters.values.size() >= 5) {
+		auto storage_table = parameters.values[2].ToString();
+		auto identity = parameters.values[4].ToString();
+		auto &storage = Git4DataResolveTable(context, storage_table);
+		storage.GetStorage().GetDataTableInfo()->SetPersistedTableId(std::stoull(identity));
+	}
 	Git4DataBindBranchTableImpl(context, parameters);
 }
 
@@ -1039,9 +1067,12 @@ static string PragmaGit4DataBindBranchDelta(ClientContext &context, const Functi
 		                            "rather than a delta. A delta is for a branch that has no copy.",
 		                            branch_name, source_table);
 	}
+	Git4DataMintTableIdentity(added);
+	Git4DataMintTableIdentity(removed);
 	transaction_manager.branches.SetDeltaTable(branch_name, record_name, added_table, removed_table, added.oid,
 	                                           removed.oid, source.oid,
-	                                           transaction_manager.GetStartTimestampCounter());
+	                                           transaction_manager.GetStartTimestampCounter(),
+	                                           Git4DataTableIdentity(added), Git4DataTableIdentity(removed));
 	// the delta is a row too, and it replaces whatever that branch had for this source: one line, one source,
 	// under every name a record for that table could have been written with
 	auto stored = Git4DataEscapedList(Git4DataStoredSourceNames(context, branch, source_key, source.oid, record_name));
@@ -1050,10 +1081,12 @@ static string PragmaGit4DataBindBranchDelta(ClientContext &context, const Functi
 	                             GIT4DATA_DELTAS_TABLE, StringUtil::Replace(branch_name, "'", "''"), stored);
 	context.client_data->git4data_added_records.push_back("delta\t" + branch_name + "\t" + record_name);
 	result += StringUtil::Format(
-	    "INSERT INTO %s.%s VALUES ('%s', '%s', '%s', '%s', %llu);", GIT4DATA_REGISTRY_SCHEMA, GIT4DATA_DELTAS_TABLE,
-	    StringUtil::Replace(branch_name, "'", "''"), StringUtil::Replace(record_name, "'", "''"),
-	    StringUtil::Replace(added_table, "'", "''"), StringUtil::Replace(removed_table, "'", "''"),
-	    (unsigned long long)transaction_manager.GetStartTimestampCounter());
+	    "INSERT INTO %s.%s VALUES ('%s', '%s', '%s', '%s', %llu, %llu, %llu);", GIT4DATA_REGISTRY_SCHEMA,
+	    GIT4DATA_DELTAS_TABLE, StringUtil::Replace(branch_name, "'", "''"),
+	    StringUtil::Replace(record_name, "'", "''"), StringUtil::Replace(added_table, "'", "''"),
+	    StringUtil::Replace(removed_table, "'", "''"),
+	    (unsigned long long)transaction_manager.GetStartTimestampCounter(),
+	    (unsigned long long)Git4DataTableIdentity(added), (unsigned long long)Git4DataTableIdentity(removed));
 	return result;
 }
 

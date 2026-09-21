@@ -883,7 +883,12 @@ void CheckpointReader::ReadTable(CatalogTransaction transaction, Deserializer &d
 	auto created = catalog.CreateTable(transaction, *bound_info);
 	if (created && created->type == CatalogType::TABLE_ENTRY) {
 		auto &table = created->Cast<TableCatalogEntry>();
-		table.GetStorage().GetDataTableInfo()->SetPersistedTableId(bound_info->persisted_table_id);
+		auto &table_info = *table.GetStorage().GetDataTableInfo();
+		table_info.SetPersistedTableId(bound_info->persisted_table_id);
+		// the identity came with the file, which is what lets the feature compare it at all - a value only a
+		// replayed statement's memory holds is not one it can be refused on (measured: a copy made and killed
+		// before any checkpoint came back with a fresh identity and every read of its mapping was refused)
+		table_info.SetPersistedTableIdFromDisk(bound_info->persisted_table_id != 0);
 	}
 }
 

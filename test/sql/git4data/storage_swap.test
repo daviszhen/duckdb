@@ -54,10 +54,12 @@ SELECT sum(v) FROM t AT (BRANCH => 'b')
 ----
 <REGEX>:.*the table carrying that name now is not it.*
 
-# After a reopen the ids are gone, and the listing says so: the mapping is known by name and shape only, and
-# the table standing under that name is what the branch reads - here the one the caller created above, whose
-# two rows hold 999 each. It is a boundary and not a defect: the tables are the caller's, and what the branch
-# reads is the table it was pointed at by name.
+# After a reopen the catalog's ids are gone - they are not written to the file - and this used to be the
+# boundary: the listing said `identified = false`, the mapping was known by name and shape only, and the branch
+# read whatever table stood under that name, which here is the caller's replacement holding 999 a row. **That is
+# what decision 2 of the three format decisions (2026-09-21) changed**: the table itself now carries an identity
+# that survives the reopen and is written with its metadata, so the replacement is caught here too, and the read
+# is refused rather than answered from a table the reference never saw.
 restart
 
 query II
@@ -65,10 +67,13 @@ SELECT identified, storage_missing FROM git4data_branches() WHERE branch_name = 
 ----
 false	false
 
-query I
+statement error
 SELECT sum(v) FROM t AT (BRANCH => 'b')
 ----
-1998
+<REGEX>:.*that is not the table it was given.*
+
+# (the way out the refusal names - git4data_unbind, or binding the branch to a table again - is what the file
+# below this one exercises; this test leaves the mapping in place, because what follows needs it)
 
 # The shape check is the half that does survive a reopen, and it is what catches a replacement of a different
 # shape rather than of the same one

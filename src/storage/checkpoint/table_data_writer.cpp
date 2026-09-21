@@ -228,12 +228,21 @@ void SingleFileTableDataWriter::FinalizeTable(const TableStatistics &global_stat
 	// **Only for a table a reference is bound to**: writing it for every table would make every file this
 	// build writes unreadable by an older build, whose table-metadata reader refuses an unknown field (measured,
 	// the compatibility table in the note), while the feature's pin-free files are readable there today.
-	const bool mapped = Git4DataTableIsMapped(GetAttached(), table.name.GetIdentifierName());
+	const bool mapped = Git4DataTableIsMapped(GetAttached(), table.ParentSchema().name, table.name);
 	if (mapped) {
-		if (info.GetPersistedTableId() == 0) {
-			info.SetPersistedTableId(uint64_t(UUIDv4::GenerateRandomUUID().lower));
+		// **The table's own identity is what is written, never the mapping's.** Taking the mapping's value here
+		// looks tempting - it is the durable record of which table a reference was bound to - and it is wrong:
+		// a replacement table carrying the same name is *also* "a table whose identity no process persisted",
+		// so adopting the row's value onto it would write the old table's identity onto the new one and every
+		// read of that mapping would then look correct. Measured, that is exactly what happened: the swap test
+		// read the replacement's rows again and said nothing.
+		auto identity = info.GetPersistedTableId();
+		if (identity == 0) {
+			identity = uint64_t(UUIDv4::GenerateRandomUUID().lower);
+			info.SetPersistedTableId(identity);
 		}
-		serializer.WriteProperty(106, "persisted_table_id", info.GetPersistedTableId());
+		serializer.WriteProperty(106, "persisted_table_id", identity);
+		info.SetPersistedTableIdFromDisk(true);
 	}
 	// ¬serializer.ShouldSerialize(StorageVersion::V2_0_0) ==> (next_row_id == total_rows)
 	D_ASSERT(serializer.ShouldSerialize(StorageVersion::V2_0_0) || (next_row_id == total_rows));

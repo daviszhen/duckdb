@@ -31,6 +31,7 @@
 #include "duckdb/storage/table/delete_state.hpp"
 #include "duckdb/storage/table/persistent_table_data.hpp"
 #include "duckdb/storage/table/row_group.hpp"
+#include "duckdb/common/types/uuid.hpp"
 #include "duckdb/storage/table/scan_state.hpp"
 #include "duckdb/storage/table/update_state.hpp"
 #include "duckdb/storage/table_storage_info.hpp"
@@ -47,6 +48,10 @@ DataTableInfo::DataTableInfo(AttachedDatabase &db, shared_ptr<TableIOManager> ta
     : db(db), table_io_manager(std::move(table_io_manager_p)), schema_path(std::move(schema_path)),
       table(std::move(table)) {
 	D_ASSERT(!this->schema_path.empty());
+	// The identity a reference compares a mapping against (decision of 2026-09-21, "decision 2"). It is minted
+	// here rather than at the first checkpoint that writes it, so that a mapping can *record* it the moment it
+	// is bound: the checkpoint only writes the value, and only for a table a reference is bound to.
+	persisted_table_id = uint64_t(UUIDv4::GenerateRandomUUID().lower);
 }
 
 void DataTableInfo::BindIndexes(ClientContext &context, const optional<string> &index_type) {

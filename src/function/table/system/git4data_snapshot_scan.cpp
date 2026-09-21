@@ -817,6 +817,43 @@ static bool Git4DataDiffColumnsArePrefix(const vector<string> &names, const vect
 //! records the commit it was set at (decision of 2026-09-21), and this is where that value is used: a mapping
 //! with no value (a file written before the column) is *unknown* and checks nothing, which is the behaviour
 //! before the column existed.
+//! Refuse a read through a mapping whose table is not the table it was made against.
+//!
+//! The `oid` a mapping also carries is the catalog's own counter and does not survive a reopen, so it catches a
+//! table dropped and recreated *within* a session and nothing else. The identity the table itself carries does
+//! survive - it is written with the table's metadata - and this is where it is compared (decision 2 of the three
+//! format decisions, 2026-09-21). A mapping with no value (a row from before the column, or one written by hand)
+//! is *unknown* and checks nothing.
+static void Git4DataCheckMappingTable(ClientContext &context, const string &branch_name, const string &table_name,
+                                      uint64_t mapping_table_id, const char *what) {
+	if (mapping_table_id == 0) {
+		return;
+	}
+	auto table = Git4DataResolveTableOrNull(context, table_name);
+	if (!table) {
+		// gone: the documented fallback to the branch's pinned image, not a swap
+		return;
+	}
+	if (!Git4DataTableIdentityIsFromDisk(*table)) {
+		// The table carries an identity nothing has persisted - it was created by a statement the log replayed,
+		// and the statement that assigns an identity is internal and is not logged - so there is no fact about
+		// the table to compare the mapping against and nothing is refused. The mapping's row *is* durable, so
+		// the table adopts its value: the two agree from here, the next checkpoint writes it, and until then no
+		// read is refused on a value this process invented.
+		table->GetStorage().GetDataTableInfo()->SetPersistedTableId(mapping_table_id);
+		return;
+	}
+	if (Git4DataTableIdentity(*table) == mapping_table_id) {
+		return;
+	}
+	throw InvalidInputException(
+	    "Branch \"%s\" reads table \"%s\" as its %s, and that is not the table it was given: the table carrying "
+	    "that name now is another one - dropped and recreated, or replaced while the database was closed - and "
+	    "reading it would answer from a table this reference never saw. Bind the branch again with "
+	    "git4data_%s.",
+	    branch_name, table_name, what, StringUtil::CIEquals(what, "delta") ? "bind_branch_delta" : "bind_branch_table");
+}
+
 static void Git4DataCheckMappingAge(const Git4DataBranch &branch, const string &mapping_name,
                                     transaction_t mapping_set_at, transaction_t check_pin, const char *what) {
 	if (check_pin == 0 || mapping_set_at == 0 || mapping_set_at <= check_pin) {
@@ -871,6 +908,7 @@ static Git4DataLineState ResolveGit4DataLineState(ClientContext &context, DuckTr
 		for (auto &mapping : branch.storage_tables) {
 			if (StringUtil::CIEquals(mapping.storage, storage)) {
 				Git4DataCheckMappingAge(branch, storage, mapping.set_at, check_pin, "table");
+				Git4DataCheckMappingTable(context, branch.name, storage, mapping.table_id, "table");
 			}
 		}
 		state.base_table = storage;
@@ -933,6 +971,10 @@ static Git4DataLineState ResolveGit4DataLineState(ClientContext &context, DuckTr
 				    "again with git4data_bind_branch_delta.",
 				    branch.name, delta.added, delta.removed, table_name);
 			}
+			// after the oid refusal above, which is the one that speaks for a swap *within* a session: the
+			// identity is what speaks across a reopen, where the oids are gone
+			Git4DataCheckMappingTable(context, branch.name, delta.added, delta.added_table_id, "delta");
+			Git4DataCheckMappingTable(context, branch.name, delta.removed, delta.removed_table_id, "delta");
 			auto &source = Git4DataResolveTable(context, table_name);
 			Git4DataCheckDeltaColumns(source, *added_table, *removed_table);
 			own.added = Git4DataTableName(*added_table);

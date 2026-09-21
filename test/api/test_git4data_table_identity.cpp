@@ -38,6 +38,7 @@ static uint64_t TableIdentity(Connection &con, const string &table_name) {
 TEST_CASE("git4data: a mapped table's identity survives a reopen, a recreated one differs", "[git4data][api]") {
 	auto path = TestCreatePath("git4data_table_identity.db");
 	uint64_t first = 0;
+	uint64_t unmapped = 0;
 	{
 		DuckDB db(path);
 		Connection con(db);
@@ -46,8 +47,10 @@ TEST_CASE("git4data: a mapped table's identity survives a reopen, a recreated on
 		REQUIRE_NO_FAIL(con.Query("CREATE TABLE t_b (k INTEGER PRIMARY KEY, v INTEGER)"));
 		REQUIRE_NO_FAIL(con.Query("PRAGMA git4data_create_branch('b', '')"));
 
-		// an unmapped table carries none: nothing has a mapping that could compare it
-		REQUIRE(TableIdentity(con, "t") == 0);
+		// the engine mints one for every table, but only a table a reference is bound to has it *written*: an
+		// unmapped table's identity is a value nothing persists, so a reopen mints another (asserted below)
+		unmapped = TableIdentity(con, "t");
+		REQUIRE(unmapped != 0);
 
 		// the branch's own table is what a read resolves through the mapping, so that one is mapped
 		REQUIRE_NO_FAIL(con.Query("PRAGMA git4data_bind_branch_table('t', 'b', 't_b')"));
@@ -58,8 +61,11 @@ TEST_CASE("git4data: a mapped table's identity survives a reopen, a recreated on
 	{
 		DuckDB db(path);
 		Connection con(db);
-		// the identity the file carries is the one the table is given back
+		// the identity the file carries is the one the mapped table is given back
 		REQUIRE(TableIdentity(con, "t_b") == first);
+		// and the one nothing wrote is not: the unmapped table comes back with a fresh identity, which is what
+		// "only a mapped table carries one across a reopen" means
+		REQUIRE(TableIdentity(con, "t") != unmapped);
 
 		// a table dropped and recreated under the same name and shape is a different table, and the file now
 		// holds its identity rather than the old one's
