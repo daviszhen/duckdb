@@ -264,6 +264,15 @@ CREATE VIEW git4data.v AS SELECT 1 AS a
 ----
 <REGEX>:.*is in the schema the reference registry is kept in.*
 
+# The other shape of that refusal: a target the feature's own statement was *given*, which is not one of the
+# registry's tables and never will be. Measured before this, `git4data_materialize('rt', 'rt_b',
+# 'git4data.forged')` answered that `forged` "is one of the tables the reference registry is kept in" - a table
+# that does not exist, and a wording that hid the rule which actually refused it, which is the schema's.
+statement error
+PRAGMA git4data_materialize('rt', 'rt_b', 'git4data.forged')
+----
+<REGEX>:.*forged" is in the schema the reference registry is kept in.*
+
 # MERGE INTO reaches the rows through none of INSERT, UPDATE or DELETE, and it was measured doing exactly
 # what they are refused for: `MERGE INTO git4data.snapshots ... WHEN NOT MATCHED THEN INSERT ...` put a
 # forged reference in the registry (the count below went from 1 to 2 before this was refused).

@@ -256,15 +256,30 @@ void Git4DataCheckRegistrySchema(const string &schema) {
 	    schema);
 }
 
-void Git4DataCheckRegistryCreate(const string &schema, const string &table) {
-	if (!StringUtil::CIEquals(schema, GIT4DATA_REGISTRY_SCHEMA)) {
-		return;
-	}
+//! Whether a name is one of the tables the registry is kept in. The entry-based check above reads it off the
+//! entry; a statement that was *given* a target name has only the name, and the difference decides which of the
+//! two refusals below is the true one.
+static bool Git4DataIsRegistryTableName(const string &name) {
+	return StringUtil::CIEquals(name, GIT4DATA_SNAPSHOTS_TABLE) || StringUtil::CIEquals(name, GIT4DATA_BRANCHES_TABLE) ||
+	       StringUtil::CIEquals(name, GIT4DATA_STORAGE_TABLE) || StringUtil::CIEquals(name, GIT4DATA_DELTAS_TABLE) ||
+	       StringUtil::CIEquals(name, GIT4DATA_STATE_TABLE);
+}
+
+//! The refusal for a name inside the registry's schema that is not one of its own tables: what a statement
+//! would put there is not a reference, and the schema is the feature's either way.
+static void ThrowGit4DataRegistrySchemaRefusal(const string &table) {
 	throw InvalidInputException(
 	    "\"%s\" is in the schema the reference registry is kept in, and that schema is the feature's own: its "
 	    "tables are how a reference's state is kept, so a statement cannot create one there. Use the git4data_* "
 	    "pragmas.",
 	    table);
+}
+
+void Git4DataCheckRegistryCreate(const string &schema, const string &table) {
+	if (!StringUtil::CIEquals(schema, GIT4DATA_REGISTRY_SCHEMA)) {
+		return;
+	}
+	ThrowGit4DataRegistrySchemaRefusal(table);
 }
 
 void Git4DataCheckRegistrySchemaCreate(const string &schema) {
@@ -287,6 +302,13 @@ void Git4DataCheckReferenceAtName(const string &name, bool branch, const string 
 void Git4DataCheckRegistryTarget(const string &schema, const string &table) {
 	if (!StringUtil::CIEquals(schema, GIT4DATA_REGISTRY_SCHEMA)) {
 		return;
+	}
+	// The name may be one of those tables or a name nothing has taken yet, and the two are not the same
+	// statement: measured, `git4data_materialize('t', 'b1', 'git4data.forged')` was refused by telling the
+	// caller that `forged` is one of the tables the registry is kept in - which sends a reader looking for a
+	// table that does not exist, and hides the rule that actually refuses it, the schema's own.
+	if (!Git4DataIsRegistryTableName(table)) {
+		ThrowGit4DataRegistrySchemaRefusal(table);
 	}
 	throw InvalidInputException(
 	    "\"%s\" is one of the tables the reference registry is kept in, and a reference's state cannot be "
