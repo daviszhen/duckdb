@@ -4,6 +4,8 @@
 #include "duckdb/catalog/catalog_entry/duck_table_entry.hpp"
 #include "duckdb/catalog/catalog_entry/table_catalog_entry.hpp"
 #include "duckdb/common/serializer/binary_deserializer.hpp"
+#include "duckdb/common/types/uuid.hpp"
+#include "duckdb/storage/git4data_registry.hpp"
 #include "duckdb/common/serializer/binary_serializer.hpp"
 #include "duckdb/main/client_context.hpp"
 #include "duckdb/main/database.hpp"
@@ -217,6 +219,21 @@ void SingleFileTableDataWriter::FinalizeTable(const TableStatistics &global_stat
 	    [&](Serializer::List &list, idx_t i) { list.WriteElement(index_storage_infos.ordered_infos[i].get()); });
 	if (serializer.ShouldSerialize(StorageVersion::V2_0_0)) {
 		serializer.WriteProperty(105, "next_row_id", next_row_id);
+	}
+	// The table's identity, minted at the first checkpoint that writes it. It is what lets a reference tell this
+	// table from another table that took its name while the database was closed: the catalog's `oid` is a
+	// per-process counter that is not persisted (measured, 3bs and 3ds), so a mapping read back from a file has
+	// nothing else to compare against. Written on both paths - a table whose metadata is reused keeps the value
+	// it already has - and read back by the checkpoint reader.
+	// **Only for a table a reference is bound to**: writing it for every table would make every file this
+	// build writes unreadable by an older build, whose table-metadata reader refuses an unknown field (measured,
+	// the compatibility table in the note), while the feature's pin-free files are readable there today.
+	const bool mapped = Git4DataTableIsMapped(GetAttached(), table.name.GetIdentifierName());
+	if (mapped) {
+		if (info.GetPersistedTableId() == 0) {
+			info.SetPersistedTableId(uint64_t(UUIDv4::GenerateRandomUUID().lower));
+		}
+		serializer.WriteProperty(106, "persisted_table_id", info.GetPersistedTableId());
 	}
 	// ¬serializer.ShouldSerialize(StorageVersion::V2_0_0) ==> (next_row_id == total_rows)
 	D_ASSERT(serializer.ShouldSerialize(StorageVersion::V2_0_0) || (next_row_id == total_rows));

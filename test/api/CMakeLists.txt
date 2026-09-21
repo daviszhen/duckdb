@@ -36,6 +36,7 @@ set(TEST_API_OBJECTS
     test_pending_query.cpp
     test_git4data_reader_drop.cpp
     test_git4data_registry_aim.cpp
+    test_git4data_table_identity.cpp
     test_plan_serialization.cpp
     test_relation_api.cpp
     test_stream_result_buffer.cpp

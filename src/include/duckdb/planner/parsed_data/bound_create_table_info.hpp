@@ -42,6 +42,8 @@ struct BoundCreateTableInfo {
 	unique_ptr<LogicalOperator> query;
 	//! Indexes created by this table
 	vector<IndexStorageInfo> indexes;
+	//! The identity the file carried for this table, when it carries one (see DataTableInfo)
+	uint64_t persisted_table_id = 0;
 
 	CreateTableInfo &Base() {
 		D_ASSERT(base);

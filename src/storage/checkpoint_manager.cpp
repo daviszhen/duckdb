@@ -879,8 +879,12 @@ void CheckpointReader::ReadTable(CatalogTransaction transaction, Deserializer &d
 	// now read the actual table data and place it into the CreateTableInfo
 	ReadTableData(transaction, deserializer, *bound_info);
 
-	// finally create the table in the catalog
-	catalog.CreateTable(transaction, *bound_info);
+	// finally create the table in the catalog, and give it back the identity the file carried for it
+	auto created = catalog.CreateTable(transaction, *bound_info);
+	if (created && created->type == CatalogType::TABLE_ENTRY) {
+		auto &table = created->Cast<TableCatalogEntry>();
+		table.GetStorage().GetDataTableInfo()->SetPersistedTableId(bound_info->persisted_table_id);
+	}
 }
 
 void CheckpointReader::ReadTableData(CatalogTransaction transaction, Deserializer &deserializer,
@@ -898,6 +902,9 @@ void CheckpointReader::ReadTableData(CatalogTransaction transaction, Deserialize
 	// row_id numbering, in which case next_row_id = total_rows.
 	auto next_row_id = deserializer.ReadPropertyWithExplicitDefault<idx_t>(105, "next_row_id", total_rows);
 	D_ASSERT(next_row_id >= total_rows);
+	// The table's identity, zero in a file written before it: unknown, which is the behaviour before it existed
+	bound_info.persisted_table_id =
+	    deserializer.ReadPropertyWithExplicitDefault<uint64_t>(106, "persisted_table_id", 0);
 
 	if (!index_storage_infos.empty()) {
 		bound_info.indexes = std::move(index_storage_infos);

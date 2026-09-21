@@ -35,6 +35,13 @@ public:
 	AttachedDatabase &GetDB() const {
 		return db;
 	}
+	//! The identity that survives a reopen (see `persisted_table_id` below)
+	uint64_t GetPersistedTableId() const {
+		return persisted_table_id;
+	}
+	void SetPersistedTableId(uint64_t id) {
+		persisted_table_id = id;
+	}
 
 	TableIOManager &GetIOManager() {
 		return *table_io_manager;
@@ -69,6 +76,15 @@ private:
 	vector<Identifier> schema_path;
 	//! The name of the table
 	Identifier table;
+	//! An identity for this table that survives a reopen, minted at the first checkpoint that writes it.
+	//!
+	//! The catalog's own `oid` is a per-process counter and is *not* written to the file - a table carries its
+	//! name, columns, constraints and storage, and nothing that names the entry (measured, 3bs and 3ds) - so
+	//! after a reopen nothing tells a table from another table that took its name, and a reference bound to the
+	//! first would silently read the second. This is that identity: minted once, written with the table's
+	//! metadata, read back at open, and compared by the feature (decision of 2026-09-21). A file written before
+	//! this property reads as zero, which means "unknown" - the behaviour before it existed.
+	uint64_t persisted_table_id = 0;
 	//! The physical list of indexes of this table
 	TableIndexList indexes;
 	//! Index storage information of the indexes created by this table

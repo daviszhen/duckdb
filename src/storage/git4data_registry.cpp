@@ -674,6 +674,23 @@ optional_ptr<const Git4DataBranchDelta> Git4DataFindDeltaTable(ClientContext &co
 	return nullptr;
 }
 
+bool Git4DataTableIsMapped(AttachedDatabase &db, const string &table_name) {
+	auto &transaction_manager = DuckTransactionManager::Get(db);
+	for (auto &branch : transaction_manager.branches.List()) {
+		for (auto &storage : branch.storage_tables) {
+			if (StringUtil::CIEquals(storage.storage, table_name)) {
+				return true;
+			}
+		}
+		for (auto &delta : branch.deltas) {
+			if (StringUtil::CIEquals(delta.added, table_name) || StringUtil::CIEquals(delta.removed, table_name)) {
+				return true;
+			}
+		}
+	}
+	return false;
+}
+
 bool Git4DataIsRegistrySchema(const string &schema) {
 	return StringUtil::CIEquals(schema, GIT4DATA_REGISTRY_SCHEMA);
 }

@@ -154,6 +154,12 @@ void Git4DataCheckSourceBoundTable(ClientContext &context, const Git4DataBranch 
 
 //! Whether a schema name is the one the registry keeps its references in
 bool Git4DataIsRegistrySchema(const string &schema);
+//! Whether any branch reads this table as its own line or as a delta table. The checkpoint writes a table's
+//! persisted identity only when this is true: the identity is what a reference compares a mapping against, so a
+//! table no reference names has no use for one - and writing it for every table would make *every* file this
+//! build writes unreadable by an older build, since that build's table metadata reader refuses an unknown field
+//! where the feature's pin-free files are readable today (measured, the compatibility table in the note).
+bool Git4DataTableIsMapped(AttachedDatabase &db, const string &table_name);
 //! Whether a table is one the registry keeps its references in
 bool Git4DataIsRegistryTable(const TableCatalogEntry &table);
 //! Throw when a statement writes or drops one of the registry's tables, or the schema that holds them.
