@@ -732,47 +732,27 @@ bool Git4DataTableIdentityIsFromDisk(TableCatalogEntry &table) {
 	return info && info->PersistedTableIdIsFromDisk();
 }
 
-//! The spellings a mapping may have used for this table: the bare name, and `schema.table` - which is the
-//! feature's own name for a table outside the default schema (Git4DataTableName). Measured: comparing the bare
-//! name only missed `s2.plus`, whose identity was then never written and whose mapping was refused as a swap.
-static vector<string> Git4DataQualifiedCandidates(const Identifier &schema, const Identifier &table) {
-	return {table.GetIdentifierName(), schema.GetIdentifierName() + "." + table.GetIdentifierName()};
-}
-
-static bool Git4DataCandidateMatches(const vector<string> &candidates, const string &name) {
-	for (auto &candidate : candidates) {
-		if (StringUtil::CIEquals(name, candidate)) {
-			return true;
-		}
+bool Git4DataMappingNameMatches(const Identifier &schema, const Identifier &table, const string &name) {
+	// the row may hold the table's own name, which is how a mapping in the default schema is written
+	if (StringUtil::CIEquals(name, table.GetIdentifierName())) {
+		return true;
 	}
-	return false;
-}
-
-uint64_t Git4DataMappedTableIdentity(AttachedDatabase &db, const Identifier &schema, const Identifier &table) {
-	auto candidates = Git4DataQualifiedCandidates(schema, table);
-	auto &transaction_manager = DuckTransactionManager::Get(db);
-	for (auto &branch : transaction_manager.branches.List()) {
-		for (auto &storage : branch.storage_tables) {
-			if (Git4DataCandidateMatches(candidates, storage.storage)) {
-				return storage.table_id;
-			}
-		}
-		for (auto &delta : branch.deltas) {
-			if (Git4DataCandidateMatches(candidates, delta.added)) {
-				return delta.added_table_id;
-			}
-			if (Git4DataCandidateMatches(candidates, delta.removed)) {
-				return delta.removed_table_id;
-			}
-		}
+	// or SQL as a caller wrote it, which is parsed into components before anything is compared
+	auto parsed = QualifiedName::Parse(name);
+	if (!StringUtil::CIEquals(parsed.Name().GetIdentifierName(), table.GetIdentifierName())) {
+		return false;
 	}
-	return 0;
+	auto recorded = parsed.Schema().GetIdentifierName();
+	if (recorded.empty() || StringUtil::CIEquals(recorded, DEFAULT_SCHEMA)) {
+		// an unqualified name is a name in the default schema, which is also the only schema a mapping leaves out
+		return StringUtil::CIEquals(schema.GetIdentifierName(), DEFAULT_SCHEMA);
+	}
+	return StringUtil::CIEquals(recorded, schema.GetIdentifierName());
 }
 
 bool Git4DataTableIsMapped(AttachedDatabase &db, const Identifier &schema, const Identifier &table) {
-	auto candidates = Git4DataQualifiedCandidates(schema, table);
 	auto matches = [&](const string &name) {
-		return Git4DataCandidateMatches(candidates, name);
+		return Git4DataMappingNameMatches(schema, table, name);
 	};
 	auto &transaction_manager = DuckTransactionManager::Get(db);
 	for (auto &branch : transaction_manager.branches.List()) {

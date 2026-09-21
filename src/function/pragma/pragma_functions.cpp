@@ -168,6 +168,13 @@ static DuckTransactionManager &GetGit4DataTransactionManager(ClientContext &cont
 	return transaction_manager;
 }
 
+//! A string as the body of a SQL literal: the quotes doubled, so what sits between them is one value and the
+//! string cannot end the literal early. Every name, reference and table spelling this file interpolates goes
+//! through here - it was eleven copies of the same lambda before, each one a place to get it wrong.
+static string Git4DataSQLLiteral(const string &value) {
+	return StringUtil::Replace(value, "'", "''");
+}
+
 //! The AT unit a reference has to be read through, throwing when neither registry has the name
 static const char *ResolveGit4DataReference(DuckTransactionManager &transaction_manager, const string &name) {
 	if (transaction_manager.snapshots.GetPin(name).IsValid()) {
@@ -184,7 +191,7 @@ static const char *ResolveGit4DataReference(DuckTransactionManager &transaction_
 //! the registry the name lives in, or the read is looked up in the wrong one.
 static string FormatGit4DataAtClause(const string &table_name, const string &reference, const char *unit) {
 	return StringUtil::Format("%s AT (%s => '%s')", Git4DataTableSQLName(table_name), unit,
-	                          StringUtil::Replace(reference, "'", "''"));
+	                          Git4DataSQLLiteral(reference));
 }
 
 //! The primary key's column names, empty when the table has none
@@ -231,9 +238,6 @@ static string BuildGit4DataRestore(ClientContext &context, const string &table_n
 	Git4DataCheckRegistryTarget(table.ParentSchema().name.GetIdentifierName(), table.name.GetIdentifierName());
 	auto quoted_table = Git4DataTableSQLName(table_name);
 	auto at_clause = FormatGit4DataAtClause(table_name, reference, unit);
-	auto escape = [](const string &value) {
-		return StringUtil::Replace(value, "'", "''");
-	};
 
 	// The two images differ as multisets, in either direction. It is read before the delete, and it is what
 	// keeps a restore of what the table already has from writing anything at all - neither the rows nor the
@@ -258,8 +262,8 @@ static string BuildGit4DataRestore(ClientContext &context, const string &table_n
 	}
 	// The live table is one side of this diff, which names it the way the rest of the surface does, and the
 	// reference is the other: what the table has and the reference does not, and the other way round.
-	auto diff = StringUtil::Format("git4data_diff('%s', '%s', '%s')", escape(table_name),
-	                               DuckTransactionManager::LIVE_REFERENCE, escape(reference));
+	auto diff = StringUtil::Format("git4data_diff('%s', '%s', '%s')", Git4DataSQLLiteral(table_name),
+	                               DuckTransactionManager::LIVE_REFERENCE, Git4DataSQLLiteral(reference));
 	string result;
 	// The condition is parenthesized: it is a disjunction, and `AND` binds tighter than `OR`, so without the
 	// brackets the key filter would attach to its second half alone - measured, a restore that generated
@@ -307,16 +311,13 @@ static string PragmaGit4DataPitr(ClientContext &context, const FunctionParameter
 	if (!transaction_manager.snapshots.Get(DuckTransactionManager::PITR_REFERENCE, held)) {
 		return result;
 	}
-	auto escape = [](const string &value) {
-		return StringUtil::Replace(value, "'", "''");
-	};
 	auto name = string(DuckTransactionManager::PITR_REFERENCE);
 	context.client_data->git4data_added_records.push_back("snapshot\t" + name);
 	result += StringUtil::Format("DELETE FROM %s.%s WHERE name = '%s';\n", GIT4DATA_REGISTRY_SCHEMA,
-	                             GIT4DATA_SNAPSHOTS_TABLE, escape(name));
+	                             GIT4DATA_SNAPSHOTS_TABLE, Git4DataSQLLiteral(name));
 	result += StringUtil::Format("INSERT INTO %s.%s VALUES ('%s', %llu, TIMESTAMP '%s', '%s');",
-	                             GIT4DATA_REGISTRY_SCHEMA, GIT4DATA_SNAPSHOTS_TABLE, escape(name), held.pin,
-	                             Timestamp::ToString(held.created), escape(held.line));
+	                             GIT4DATA_REGISTRY_SCHEMA, GIT4DATA_SNAPSHOTS_TABLE, Git4DataSQLLiteral(name), held.pin,
+	                             Timestamp::ToString(held.created), Git4DataSQLLiteral(held.line));
 	return result;
 }
 
@@ -326,11 +327,8 @@ static string PragmaGit4DataPitrOff(ClientContext &context, const FunctionParame
 	if (!Git4DataRegistryTablesThere(context)) {
 		return string();
 	}
-	auto escape = [](const string &value) {
-		return StringUtil::Replace(value, "'", "''");
-	};
 	return StringUtil::Format("DELETE FROM %s.%s WHERE name = '%s';", GIT4DATA_REGISTRY_SCHEMA,
-	                          GIT4DATA_SNAPSHOTS_TABLE, escape(string(DuckTransactionManager::PITR_REFERENCE)));
+	                          GIT4DATA_SNAPSHOTS_TABLE, Git4DataSQLLiteral(string(DuckTransactionManager::PITR_REFERENCE)));
 }
 
 static string PragmaGit4DataPitrState(ClientContext &context, const FunctionParameters &parameters) {
@@ -436,7 +434,7 @@ static string Git4DataEscapedList(const vector<string> &names) {
 		if (!result.empty()) {
 			result += ", ";
 		}
-		result += "'" + StringUtil::Replace(name, "'", "''") + "'";
+		result += "'" + Git4DataSQLLiteral(name) + "'";
 	}
 	return result;
 }
@@ -535,10 +533,7 @@ static string PragmaGit4DataPick(ClientContext &context, const FunctionParameter
 		key_list += KeywordHelper::WriteOptionallyQuoted(key_columns[i]);
 	}
 	auto quoted_table = Git4DataTableSQLName(table_name);
-	auto escape = [](const string &value) {
-		return StringUtil::Replace(value, "'", "''");
-	};
-	auto diff = StringUtil::Format("git4data_diff('%s', '%s', '%s')", escape(table_name), escape(base), escape(source));
+	auto diff = StringUtil::Format("git4data_diff('%s', '%s', '%s')", Git4DataSQLLiteral(table_name), Git4DataSQLLiteral(base), Git4DataSQLLiteral(source));
 
 	// The key is what the two sides are matched on, not a row id: a reference scan does not expose
 	// row ids, and the key is the identity the diff already pairs updates by.
@@ -682,11 +677,13 @@ static string PragmaGit4DataMaterialize(ClientContext &context, const FunctionPa
 		}
 	}
 	auto quoted_storage = Git4DataTableSQLName(storage_table);
-	auto escaped_source = StringUtil::Replace(record_name, "'", "''");
+	auto escaped_source = Git4DataSQLLiteral(record_name);
 	auto stored_source =
 	    Git4DataEscapedList(Git4DataStoredSourceNames(context, branch, source_key, table.oid, record_name));
-	auto escaped_branch = StringUtil::Replace(branch_name, "'", "''");
-	auto escaped_storage = StringUtil::Replace(storage_table, "'", "''");
+	auto escaped_branch = Git4DataSQLLiteral(branch_name);
+	// what the row records is the name as SQL, not the argument as typed: a caller who writes `"t"` means `t`,
+	// and a mapping is looked up again by what its name resolves to
+	auto escaped_storage = Git4DataSQLLiteral(quoted_storage);
 	// A second materialize of one source replaces the mapping, and the copy the first one made is then a
 	// table of the identical line with nothing pointing at it - measured: the branch read the new table
 	// while the first was still there, and dropping the branch took only the second, so the first
@@ -737,9 +734,6 @@ static string PragmaGit4DataUnbind(ClientContext &context, const FunctionParamet
 	    !transaction_manager.branches.Get(branch_name, branch)) {
 		throw InvalidInputException("Branch \"%s\" does not exist", branch_name);
 	}
-	auto escape = [](const string &value) {
-		return StringUtil::Replace(value, "'", "''");
-	};
 	// a source table can be renamed under the mapping, and a read follows it by oid; the mapping is taken
 	// back the same way, so the table's new name reaches what its old one recorded
 	auto named = Git4DataResolveTableOrNull(context, table_name);
@@ -754,7 +748,7 @@ static string PragmaGit4DataUnbind(ClientContext &context, const FunctionParamet
 			return string();
 		}
 		return StringUtil::Format("DELETE FROM %s.%s WHERE branch = '%s' AND source = '%s';", GIT4DATA_REGISTRY_SCHEMA,
-		                          table, escape(branch_name), escape(cleared));
+		                          table, Git4DataSQLLiteral(branch_name), Git4DataSQLLiteral(cleared));
 	};
 	auto storage = Git4DataFindStorageTable(context, branch, source_key, source_oid);
 	if (storage) {
@@ -770,7 +764,7 @@ static string PragmaGit4DataUnbind(ClientContext &context, const FunctionParamet
 		return drop_row(GIT4DATA_STORAGE_TABLE, storage->source) +
 		       StringUtil::Format("SELECT '%s'::VARCHAR AS branch, '%s'::VARCHAR AS table_name, 'storage' AS "
 		                          "unbound, '%s'::VARCHAR AS was",
-		                          escape(branch_name), escape(table_name), escape(storage->storage));
+		                          Git4DataSQLLiteral(branch_name), Git4DataSQLLiteral(table_name), Git4DataSQLLiteral(storage->storage));
 	}
 	auto delta = Git4DataFindDeltaTable(context, branch, source_key, source_oid);
 	if (delta) {
@@ -780,7 +774,7 @@ static string PragmaGit4DataUnbind(ClientContext &context, const FunctionParamet
 		return drop_row(GIT4DATA_DELTAS_TABLE, delta->source) +
 		       StringUtil::Format("SELECT '%s'::VARCHAR AS branch, '%s'::VARCHAR AS table_name, 'delta' AS "
 		                          "unbound, '%s'::VARCHAR AS was",
-		                          escape(branch_name), escape(table_name), escape(delta->added));
+		                          Git4DataSQLLiteral(branch_name), Git4DataSQLLiteral(table_name), Git4DataSQLLiteral(delta->added));
 	}
 	throw InvalidInputException("Branch \"%s\" has neither a table of its own nor a delta for \"%s\", so "
 	                            "there is nothing to unbind",
@@ -850,6 +844,9 @@ static void Git4DataBindBranchTableImpl(ClientContext &context, const FunctionPa
 	// engine assigned when it was created): the mapping records that value, and the checkpoint writes it with
 	// the table
 	Git4DataMintTableIdentity(Git4DataResolveTable(context, storage_table));
+	// the name the mapping records and every row about this mapping holds: the table's own name, so a caller
+	// who spelled it `"t"` or `main.t` leaves a mapping that is found by the name the catalog gives the table
+	auto stored_storage = Git4DataTableName(storage_entry);
 	// both oids go with the mapping: the storage table's so a read can tell it from another table that
 	// takes its name after it is dropped, and the source's so the mapping follows the source if it is
 	// renamed
@@ -859,7 +856,7 @@ static void Git4DataBindBranchTableImpl(ClientContext &context, const FunctionPa
 	// the table's own identity, which is what tells it from a table that takes its name while the database is
 	// closed - and the value the mapping's row carries (the row is written by the caller's form below, and for
 	// a copy `materialize` makes by the internal pragma that runs after the CREATE TABLE)
-	transaction_manager.branches.SetStorageTable(branch_name, record_name, storage_table, storage_entry.oid,
+	transaction_manager.branches.SetStorageTable(branch_name, record_name, stored_storage, storage_entry.oid,
 	                                             source_entry.oid, owned,
 	                                             transaction_manager.GetStartTimestampCounter(),
 	                                             Git4DataTableIdentity(storage_entry));
@@ -906,6 +903,8 @@ static string PragmaGit4DataBindBranchTable(ClientContext &context, const Functi
 	auto record_name = Git4DataTableName(bound_source);
 	auto stored =
 	    Git4DataEscapedList(Git4DataStoredSourceNames(context, before, source_key, bound_source.oid, record_name));
+	// the name the row records is the table's own, not the argument as typed, for the reason in the binding below
+	auto stored_storage = Git4DataTableName(Git4DataResolveTable(context, storage_table));
 	// **Rebinding replaces the mapping, so it leaves the same orphan a second materialize does.** A table the
 	// feature created for this branch is a table of the identical line once nothing points at it, and the
 	// measured case is the one `materialize` already handles: the caller binds a table of their own over a copy
@@ -928,17 +927,15 @@ static string PragmaGit4DataBindBranchTable(ClientContext &context, const Functi
 	}
 	Git4DataBindBranchTableImpl(context, parameters);
 	string result = Git4DataEnsureRegistryTables(context);
-	auto escape = [](const string &value) {
-		return StringUtil::Replace(value, "'", "''");
-	};
 	result += StringUtil::Format("DELETE FROM %s.%s WHERE branch = '%s' AND source IN (%s);", GIT4DATA_REGISTRY_SCHEMA,
-	                             GIT4DATA_STORAGE_TABLE, escape(branch_name), stored);
+	                             GIT4DATA_STORAGE_TABLE, Git4DataSQLLiteral(branch_name), stored);
 	result += StringUtil::Format("DELETE FROM %s.%s WHERE branch = '%s' AND source IN (%s);", GIT4DATA_REGISTRY_SCHEMA,
-	                             GIT4DATA_DELTAS_TABLE, escape(branch_name), stored);
+	                             GIT4DATA_DELTAS_TABLE, Git4DataSQLLiteral(branch_name), stored);
 	context.client_data->git4data_added_records.push_back("storage\t" + branch_name + "\t" + record_name);
 	result += StringUtil::Format("INSERT INTO %s.%s VALUES ('%s', '%s', '%s', %s, %llu, %llu);",
-	                             GIT4DATA_REGISTRY_SCHEMA, GIT4DATA_STORAGE_TABLE, escape(branch_name),
-	                             escape(record_name), escape(storage_table), owned ? "true" : "false",
+	                             GIT4DATA_REGISTRY_SCHEMA, GIT4DATA_STORAGE_TABLE, Git4DataSQLLiteral(branch_name),
+	                             Git4DataSQLLiteral(record_name), Git4DataSQLLiteral(stored_storage),
+	                             owned ? "true" : "false",
 	                             (unsigned long long)transaction_manager.GetStartTimestampCounter(),
 	                             (unsigned long long)Git4DataTableIdentity(Git4DataResolveTable(context, storage_table)));
 	// last, as in materialize: the row naming the new table is written before the old copy goes
@@ -1069,7 +1066,9 @@ static string PragmaGit4DataBindBranchDelta(ClientContext &context, const Functi
 	}
 	Git4DataMintTableIdentity(added);
 	Git4DataMintTableIdentity(removed);
-	transaction_manager.branches.SetDeltaTable(branch_name, record_name, added_table, removed_table, added.oid,
+	auto stored_added = Git4DataTableName(added);
+	auto stored_removed = Git4DataTableName(removed);
+	transaction_manager.branches.SetDeltaTable(branch_name, record_name, stored_added, stored_removed, added.oid,
 	                                           removed.oid, source.oid,
 	                                           transaction_manager.GetStartTimestampCounter(),
 	                                           Git4DataTableIdentity(added), Git4DataTableIdentity(removed));
@@ -1078,13 +1077,13 @@ static string PragmaGit4DataBindBranchDelta(ClientContext &context, const Functi
 	auto stored = Git4DataEscapedList(Git4DataStoredSourceNames(context, branch, source_key, source.oid, record_name));
 	string result = Git4DataEnsureRegistryTables(context);
 	result += StringUtil::Format("DELETE FROM %s.%s WHERE branch = '%s' AND source IN (%s);", GIT4DATA_REGISTRY_SCHEMA,
-	                             GIT4DATA_DELTAS_TABLE, StringUtil::Replace(branch_name, "'", "''"), stored);
+	                             GIT4DATA_DELTAS_TABLE, Git4DataSQLLiteral(branch_name), stored);
 	context.client_data->git4data_added_records.push_back("delta\t" + branch_name + "\t" + record_name);
 	result += StringUtil::Format(
 	    "INSERT INTO %s.%s VALUES ('%s', '%s', '%s', '%s', %llu, %llu, %llu);", GIT4DATA_REGISTRY_SCHEMA,
-	    GIT4DATA_DELTAS_TABLE, StringUtil::Replace(branch_name, "'", "''"),
-	    StringUtil::Replace(record_name, "'", "''"), StringUtil::Replace(added_table, "'", "''"),
-	    StringUtil::Replace(removed_table, "'", "''"),
+	    GIT4DATA_DELTAS_TABLE, Git4DataSQLLiteral(branch_name),
+	    Git4DataSQLLiteral(record_name), Git4DataSQLLiteral(stored_added),
+	    Git4DataSQLLiteral(stored_removed),
 	    (unsigned long long)transaction_manager.GetStartTimestampCounter(),
 	    (unsigned long long)Git4DataTableIdentity(added), (unsigned long long)Git4DataTableIdentity(removed));
 	return result;
@@ -1151,11 +1150,8 @@ static string PragmaGit4DataCloneDatabase(ClientContext &context, const Function
 		Git4DataCloneFile(wal, target + ".wal");
 		cloned_log = true;
 	}
-	auto escape = [](const string &value) {
-		return StringUtil::Replace(value, "'", "''");
-	};
 	return StringUtil::Format("SELECT '%s'::VARCHAR AS source, '%s'::VARCHAR AS clone, %s::BOOLEAN AS with_log",
-	                          escape(source), escape(target), cloned_log ? "true" : "false");
+	                          Git4DataSQLLiteral(source), Git4DataSQLLiteral(target), cloned_log ? "true" : "false");
 }
 
 //! Point every reference to the source table inside a parsed statement at the branch the statement is
@@ -1308,9 +1304,6 @@ static string PragmaGit4DataApply(ClientContext &context, const FunctionParamete
 		throw InvalidInputException("git4data_apply needs at least one statement to apply");
 	}
 
-	auto escape = [](const string &value) {
-		return StringUtil::Replace(value, "'", "''");
-	};
 	auto quoted_source = Git4DataTableSQLName(table_name);
 	auto quoted_added = Git4DataTableSQLName(added_table);
 	auto quoted_removed = Git4DataTableSQLName(removed_table);
@@ -1894,9 +1887,6 @@ static string PragmaGit4DataMerge(ClientContext &context, const FunctionParamete
 		                            "the same row",
 		                            table_name);
 	}
-	auto escape = [](const string &value) {
-		return StringUtil::Replace(value, "'", "''");
-	};
 	// The statement reads the source table, the table being merged into and the right side's image, so
 	// no alias may be a column of any of them - a column named g4d_b made this ambiguous, measured.
 	auto taken = Git4DataScopeColumnNames(context, transaction_manager, table_name, {right_name});
@@ -1931,10 +1921,10 @@ static string PragmaGit4DataMerge(ClientContext &context, const FunctionParamete
 	auto quoted_table = Git4DataTableSQLName(table_name);
 	auto quoted_into = Git4DataTableSQLName(merge_into);
 	auto read_target = merge_into.empty() ? FormatGit4DataAtClause(table_name, left_name, "BRANCH") : quoted_into;
-	auto diff_left = StringUtil::Format("git4data_diff('%s', '%s', '%s')", escape(table_name), escape(base_reference),
-	                                    escape(left_name));
-	auto diff_right = StringUtil::Format("git4data_diff('%s', '%s', '%s')", escape(table_name), escape(base_reference),
-	                                     escape(right_name));
+	auto diff_left = StringUtil::Format("git4data_diff('%s', '%s', '%s')", Git4DataSQLLiteral(table_name), Git4DataSQLLiteral(base_reference),
+	                                    Git4DataSQLLiteral(left_name));
+	auto diff_right = StringUtil::Format("git4data_diff('%s', '%s', '%s')", Git4DataSQLLiteral(table_name), Git4DataSQLLiteral(base_reference),
+	                                     Git4DataSQLLiteral(right_name));
 	auto right_image =
 	    FormatGit4DataAtClause(table_name, right_name, ResolveGit4DataReference(transaction_manager, right_name));
 
@@ -2170,13 +2160,10 @@ static string PragmaGit4DataCreateBranch(ClientContext &context, const FunctionP
 	    "branch", name, &MetaTransaction::Get(context),
 	    DuckTransaction::Get(context, transaction_manager.GetDB()).GetTransactionId());
 	// the branch is a row now, like a snapshot: it goes to the log with the statement this returns
-	auto escape = [](const string &value) {
-		return StringUtil::Replace(value, "'", "''");
-	};
 	context.client_data->git4data_added_records.push_back("branch\t" + name);
 	result += StringUtil::Format("INSERT INTO %s.%s VALUES ('%s', %llu, '%s', TIMESTAMP '%s', '%s');",
-	                             GIT4DATA_REGISTRY_SCHEMA, GIT4DATA_BRANCHES_TABLE, escape(name), pin, escape(parent),
-	                             Timestamp::ToString(created), escape(base_line));
+	                             GIT4DATA_REGISTRY_SCHEMA, GIT4DATA_BRANCHES_TABLE, Git4DataSQLLiteral(name), pin, Git4DataSQLLiteral(parent),
+	                             Timestamp::ToString(created), Git4DataSQLLiteral(base_line));
 	return result;
 }
 
@@ -2263,7 +2250,7 @@ static string PragmaGit4DataDropBranch(ClientContext &context, const FunctionPar
 	// and its rows, or the next open would read the branch back out of the tables: the branch, the table it
 	// was given and the delta it differs by all live in one of them
 	if (Git4DataRegistryTablesThere(context)) {
-		auto escaped = StringUtil::Replace(name, "'", "''");
+		auto escaped = Git4DataSQLLiteral(name);
 		result += StringUtil::Format("DELETE FROM %s.%s WHERE name = '%s';", GIT4DATA_REGISTRY_SCHEMA,
 		                             GIT4DATA_BRANCHES_TABLE, escaped);
 		result += StringUtil::Format("DELETE FROM %s.%s WHERE branch = '%s';", GIT4DATA_REGISTRY_SCHEMA,
@@ -2301,7 +2288,7 @@ static string PragmaGit4DataLCA(ClientContext &context, const FunctionParameters
 		// the two share no ancestor, which is what a broken lineage looks like
 		return "SELECT NULL::VARCHAR AS lca WHERE false";
 	}
-	lca = StringUtil::Replace(lca, "'", "''");
+	lca = Git4DataSQLLiteral(lca);
 	return StringUtil::Format("SELECT '%s'::VARCHAR AS lca", lca);
 }
 
@@ -2366,13 +2353,10 @@ static string PragmaGit4DataCreateSnapshot(ClientContext &context, const Functio
 	// The reference is a row in the registry tables from here on: it is written with ordinary DML, in the
 	// caller's transaction, so it reaches the log like any other change and the next open brings it back.
 	// A checkpoint is no longer what decides whether a reference survives.
-	auto escape = [](const string &value) {
-		return StringUtil::Replace(value, "'", "''");
-	};
 	context.client_data->git4data_added_records.push_back("snapshot\t" + name);
 	result +=
 	    StringUtil::Format("INSERT INTO %s.%s VALUES ('%s', %llu, TIMESTAMP '%s', '%s');", GIT4DATA_REGISTRY_SCHEMA,
-	                       GIT4DATA_SNAPSHOTS_TABLE, escape(name), pin, Timestamp::ToString(created), escape(line));
+	                       GIT4DATA_SNAPSHOTS_TABLE, Git4DataSQLLiteral(name), pin, Timestamp::ToString(created), Git4DataSQLLiteral(line));
 	return result;
 }
 
@@ -2402,7 +2386,7 @@ static string PragmaGit4DataDropSnapshot(ClientContext &context, const FunctionP
 	if (!Git4DataRegistryTablesThere(context)) {
 		return string();
 	}
-	auto escaped = StringUtil::Replace(name, "'", "''");
+	auto escaped = Git4DataSQLLiteral(name);
 	return StringUtil::Format("DELETE FROM %s.%s WHERE name = '%s';", GIT4DATA_REGISTRY_SCHEMA,
 	                          GIT4DATA_SNAPSHOTS_TABLE, escaped);
 }
@@ -2421,7 +2405,7 @@ static string PragmaGit4DataState(ClientContext &context, const FunctionParamete
 static string PragmaGit4DataProbe(ClientContext &context, const FunctionParameters &parameters) {
 	// the row comes from the table function, which is where its numbers can be selected
 	return StringUtil::Format("SELECT * FROM git4data_probe('%s')",
-	                          StringUtil::Replace(parameters.values[0].ToString(), "'", "''"));
+	                          Git4DataSQLLiteral(parameters.values[0].ToString()));
 }
 
 //! Every physical row including all deleted ones, to tell "the data is gone" apart from
@@ -2429,7 +2413,7 @@ static string PragmaGit4DataProbe(ClientContext &context, const FunctionParamete
 static string PragmaGit4DataProbeAll(ClientContext &context, const FunctionParameters &parameters) {
 	// the row comes from the table function, which is where its numbers can be selected
 	return StringUtil::Format("SELECT * FROM git4data_probe_all('%s')",
-	                          StringUtil::Replace(parameters.values[0].ToString(), "'", "''"));
+	                          Git4DataSQLLiteral(parameters.values[0].ToString()));
 }
 
 //! Base data with updates skipped, read at an explicitly given visibility bound. Sweeping
@@ -2437,7 +2421,7 @@ static string PragmaGit4DataProbeAll(ClientContext &context, const FunctionParam
 //! crosses an id, which is what tells the two runners apart.
 static string PragmaGit4DataProbeAt(ClientContext &context, const FunctionParameters &parameters) {
 	return StringUtil::Format("SELECT * FROM git4data_probe_at('%s', %lld)",
-	                          StringUtil::Replace(parameters.values[0].ToString(), "'", "''"),
+	                          Git4DataSQLLiteral(parameters.values[0].ToString()),
 	                          (long long)parameters.values[1].GetValue<int64_t>());
 }
 

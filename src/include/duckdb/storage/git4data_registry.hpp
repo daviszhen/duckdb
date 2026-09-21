@@ -116,6 +116,12 @@ optional_ptr<TableCatalogEntry> Git4DataResolveTableOrNull(ClientContext &contex
 //! that is the default one. Records name tables as strings and every lookup resolves that string again, so a
 //! bare name for a table outside the default schema would reach another table or none.
 string Git4DataTableName(const TableCatalogEntry &table);
+//! Whether a name a mapping recorded is this table's, whatever spelling it was written in. A row holds SQL as
+//! the caller wrote it - `t`, `main.t`, `"t"` - and the feature's own name for a table is written another way
+//! again, so the two are compared as the components they parse into rather than as text. Measured: a copy named
+//! `"t_b"` was stored with its quotes, matched nothing, and a read decision 2 refuses was answered from a
+//! replacement table's rows instead.
+bool Git4DataMappingNameMatches(const Identifier &schema, const Identifier &table, const string &name);
 //! A possibly-qualified name as SQL, with every component quoted as its own identifier
 string Git4DataTableSQLName(const string &name);
 //! The key a reference is held under for a table: its schema and its name, always qualified, because two
@@ -160,10 +166,6 @@ bool Git4DataIsRegistrySchema(const string &schema);
 //! build writes unreadable by an older build, since that build's table metadata reader refuses an unknown field
 //! where the feature's pin-free files are readable today (measured, the compatibility table in the note).
 bool Git4DataTableIsMapped(AttachedDatabase &db, const Identifier &schema, const Identifier &table);
-//! The identity a mapping recorded for this table, or zero when none has. The row is the *durable* record, so
-//! the checkpoint writes it in preference to an identity this process minted and never persisted - which is what
-//! a table the log recreated has, since the statement that assigns its identity is internal and is not logged.
-uint64_t Git4DataMappedTableIdentity(AttachedDatabase &db, const Identifier &schema, const Identifier &table);
 //! The identity the table carries (`DataTableInfo::persisted_table_id`): what a mapping records when it is bound,
 //! and what a read compares it against to tell that table from another one that took its name.
 uint64_t Git4DataTableIdentity(TableCatalogEntry &table);
