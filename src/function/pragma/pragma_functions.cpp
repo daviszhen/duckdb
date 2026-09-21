@@ -175,6 +175,19 @@ static string Git4DataSQLLiteral(const string &value) {
 	return StringUtil::Replace(value, "'", "''");
 }
 
+//! The branch a pragma was given, or the refusal each of them makes when it is not there: a branch another
+//! transaction added and has not committed is not there yet, which is the same rule the reads follow. One
+//! function rather than eleven copies, which is what this was - the copies had drifted only in the name of the
+//! variable they filled in, and a message is worth getting right once.
+static Git4DataBranch Git4DataRequiredBranch(ClientContext &context, DuckTransactionManager &transaction_manager,
+                                             const string &name) {
+	Git4DataBranch branch;
+	if (!Git4DataReferenceVisible(context, "branch", name) || !transaction_manager.branches.Get(name, branch)) {
+		throw InvalidInputException("Branch \"%s\" does not exist", name);
+	}
+	return branch;
+}
+
 //! The AT unit a reference has to be read through, throwing when neither registry has the name
 static const char *ResolveGit4DataReference(DuckTransactionManager &transaction_manager, const string &name) {
 	if (transaction_manager.snapshots.GetPin(name).IsValid()) {
@@ -636,11 +649,7 @@ static string PragmaGit4DataMaterialize(ClientContext &context, const FunctionPa
 	auto storage_table = parameters.values[2].ToString();
 	auto &transaction_manager = GetGit4DataTransactionManager(context);
 
-	Git4DataBranch branch;
-	if (!Git4DataReferenceVisible(context, "branch", branch_name) ||
-	    !transaction_manager.branches.Get(branch_name, branch)) {
-		throw InvalidInputException("Branch \"%s\" does not exist", branch_name);
-	}
+	auto branch = Git4DataRequiredBranch(context, transaction_manager, branch_name);
 	// the source has to be there, and the target must not be. The name may be written any way a table can be
 	// named, and what a mapping is recorded against is the *table*: the key carries its schema, so a branch's
 	// line for one of two same-named tables is never read for the other.
@@ -729,11 +738,7 @@ static string PragmaGit4DataUnbind(ClientContext &context, const FunctionParamet
 	auto table_name = parameters.values[0].ToString();
 	auto branch_name = parameters.values[1].ToString();
 	auto &transaction_manager = GetGit4DataTransactionManager(context);
-	Git4DataBranch branch;
-	if (!Git4DataReferenceVisible(context, "branch", branch_name) ||
-	    !transaction_manager.branches.Get(branch_name, branch)) {
-		throw InvalidInputException("Branch \"%s\" does not exist", branch_name);
-	}
+	auto branch = Git4DataRequiredBranch(context, transaction_manager, branch_name);
 	// a source table can be renamed under the mapping, and a read follows it by oid; the mapping is taken
 	// back the same way, so the table's new name reaches what its old one recorded
 	auto named = Git4DataResolveTableOrNull(context, table_name);
@@ -800,11 +805,7 @@ static void Git4DataBindBranchTableImpl(ClientContext &context, const FunctionPa
 		owned = flag == "true";
 	}
 	auto &transaction_manager = GetGit4DataTransactionManager(context);
-	Git4DataBranch branch;
-	if (!Git4DataReferenceVisible(context, "branch", branch_name) ||
-	    !transaction_manager.branches.Get(branch_name, branch)) {
-		throw InvalidInputException("Branch \"%s\" does not exist", branch_name);
-	}
+	auto branch = Git4DataRequiredBranch(context, transaction_manager, branch_name);
 	// both tables have to be there, or the mapping would be a promise the reads then have to break
 	auto &source_entry = Git4DataResolveTable(context, source_table);
 	// a mapping is recorded against the *table*: the key carries its schema, so a branch's line for one of two
@@ -974,11 +975,7 @@ static string PragmaGit4DataBindBranchDelta(ClientContext &context, const Functi
 	auto added_table = parameters.values[2].ToString();
 	auto removed_table = parameters.values[3].ToString();
 	auto &transaction_manager = GetGit4DataTransactionManager(context);
-	Git4DataBranch branch;
-	if (!Git4DataReferenceVisible(context, "branch", branch_name) ||
-	    !transaction_manager.branches.Get(branch_name, branch)) {
-		throw InvalidInputException("Branch \"%s\" does not exist", branch_name);
-	}
+	auto branch = Git4DataRequiredBranch(context, transaction_manager, branch_name);
 	auto &source = Git4DataResolveTable(context, source_table);
 	// a delta is recorded against the *table*, so its key carries the schema: two same-named tables in two
 	// schemas have two lines, and neither is read for the other
@@ -1264,11 +1261,7 @@ static string PragmaGit4DataApply(ClientContext &context, const FunctionParamete
 	auto dml = parameters.values[2].ToString();
 	auto &transaction_manager = GetGit4DataTransactionManager(context);
 
-	Git4DataBranch branch;
-	if (!Git4DataReferenceVisible(context, "branch", branch_name) ||
-	    !transaction_manager.branches.Get(branch_name, branch)) {
-		throw InvalidInputException("Branch \"%s\" does not exist", branch_name);
-	}
+	auto branch = Git4DataRequiredBranch(context, transaction_manager, branch_name);
 	// the source table can be renamed under the mapping, and the mapping follows the table it was bound to:
 	// the oid finds the delta a name no longer does, exactly as it does on a read
 	auto already = Git4DataResolveTableOrNull(context, table_name);
@@ -1644,15 +1637,8 @@ static string PragmaGit4DataMerge(ClientContext &context, const FunctionParamete
 	}
 	auto &transaction_manager = GetGit4DataTransactionManager(context);
 
-	Git4DataBranch left;
-	if (!Git4DataReferenceVisible(context, "branch", left_name) || !transaction_manager.branches.Get(left_name, left)) {
-		throw InvalidInputException("Branch \"%s\" does not exist", left_name);
-	}
-	Git4DataBranch right;
-	if (!Git4DataReferenceVisible(context, "branch", right_name) ||
-	    !transaction_manager.branches.Get(right_name, right)) {
-		throw InvalidInputException("Branch \"%s\" does not exist", right_name);
-	}
+	auto left = Git4DataRequiredBranch(context, transaction_manager, left_name);
+	auto right = Git4DataRequiredBranch(context, transaction_manager, right_name);
 	string merge_into;
 	auto &merge_source = Git4DataResolveTable(context, table_name);
 	auto merge_key = Git4DataSourceKey(merge_source);
@@ -2172,10 +2158,7 @@ static string PragmaGit4DataCreateBranch(ClientContext &context, const FunctionP
 static string PragmaGit4DataDropBranch(ClientContext &context, const FunctionParameters &parameters) {
 	auto name = parameters.values[0].ToString();
 	auto &transaction_manager = GetGit4DataTransactionManager(context);
-	Git4DataBranch existing;
-	if (!Git4DataReferenceVisible(context, "branch", name) || !transaction_manager.branches.Get(name, existing)) {
-		throw InvalidInputException("Branch \"%s\" does not exist", name);
-	}
+	auto existing = Git4DataRequiredBranch(context, transaction_manager, name);
 	if (transaction_manager.branches.HasChildren(name)) {
 		// a descendant still walks through this name to reach its ancestors
 		throw InvalidInputException("Branch \"%s\" still has branches descending from it. Drop those branches "
@@ -2276,13 +2259,8 @@ static string PragmaGit4DataLCA(ClientContext &context, const FunctionParameters
 	auto left = parameters.values[0].ToString();
 	auto right = parameters.values[1].ToString();
 	auto &transaction_manager = GetGit4DataTransactionManager(context);
-	Git4DataBranch existing;
-	if (!Git4DataReferenceVisible(context, "branch", left) || !transaction_manager.branches.Get(left, existing)) {
-		throw InvalidInputException("Branch \"%s\" does not exist", left);
-	}
-	if (!Git4DataReferenceVisible(context, "branch", right) || !transaction_manager.branches.Get(right, existing)) {
-		throw InvalidInputException("Branch \"%s\" does not exist", right);
-	}
+	auto existing = Git4DataRequiredBranch(context, transaction_manager, left);
+	existing = Git4DataRequiredBranch(context, transaction_manager, right);
 	string lca;
 	if (!transaction_manager.branches.FindLCA(left, right, lca)) {
 		// the two share no ancestor, which is what a broken lineage looks like
@@ -2319,10 +2297,7 @@ static string PragmaGit4DataCreateSnapshot(ClientContext &context, const Functio
 	string line;
 	if (parameters.values.size() > 1) {
 		line = parameters.values[1].ToString();
-		Git4DataBranch branch;
-		if (!Git4DataReferenceVisible(context, "branch", line) || !transaction_manager.branches.Get(line, branch)) {
-			throw InvalidInputException("Branch \"%s\" does not exist", line);
-		}
+		auto branch = Git4DataRequiredBranch(context, transaction_manager, line);
 		// **A branch that inherited a line reads it, and that is a line to capture too** (increment 3bv). The
 		// refusal is for a branch with no line at all - no mapping of its own and nothing inherited - which
 		// reads the source at its pin, so a snapshot of the table says the same thing and the second argument
