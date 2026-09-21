@@ -29,12 +29,23 @@ Git4DataBranch Git4DataRequiredBranch(ClientContext &context, DuckTransactionMan
 const char *ResolveGit4DataReference(DuckTransactionManager &transaction_manager, const string &name);
 string FormatGit4DataAtClause(const string &table_name, const string &reference, const char *unit);
 vector<string> Git4DataPrimaryKeyColumnNames(TableCatalogEntry &table);
-vector<string> Git4DataAddColumnNames(ClientContext &context, const string &table_name);
-string BuildGit4DataRowComparison(ClientContext &context, const Git4DataBranch &branch, const string &left,
-                                  const string &right, const vector<string> &key_columns, const char *alias);
+void Git4DataAddColumnNames(ClientContext &context, const string &table_name,
+                            case_insensitive_set_t &names);
+string Git4DataEscapedList(const vector<string> &names);
+string BuildGit4DataRowComparison(TableCatalogEntry &table, const string &left_alias,
+                                  const string &right_alias);
+vector<string> Git4DataStoredSourceNames(ClientContext &context, const Git4DataBranch &branch,
+                                           const string &key, idx_t source_oid, const string &record_name);
 string PragmaGit4DataPick(ClientContext &context, const FunctionParameters &parameters);
 string PragmaGit4DataApply(ClientContext &context, const FunctionParameters &parameters);
 string PragmaGit4DataMerge(ClientContext &context, const FunctionParameters &parameters);
+
+// The mapping pragmas, defined in git4data_pragma_mappings.cpp and registered here.
+string PragmaGit4DataMaterialize(ClientContext &context, const FunctionParameters &parameters);
+string PragmaGit4DataUnbind(ClientContext &context, const FunctionParameters &parameters);
+string PragmaGit4DataBindBranchTable(ClientContext &context, const FunctionParameters &parameters);
+void PragmaGit4DataBindInternal(ClientContext &context, const FunctionParameters &parameters);
+string PragmaGit4DataBindBranchDelta(ClientContext &context, const FunctionParameters &parameters);
 
 } // namespace duckdb
 
