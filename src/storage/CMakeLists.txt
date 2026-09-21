@@ -22,7 +22,7 @@ add_library_unity(
   block.cpp
   block_allocator.cpp
   database_handle.cpp
-  git4data_registry.cpp
+  git4data_registry.cpp git4data_registry_guards.cpp
   data_pointer.cpp
   data_table.cpp
   index_entry.cpp
