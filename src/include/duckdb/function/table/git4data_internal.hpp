@@ -318,6 +318,8 @@ void Git4DataHashForRemovals(const vector<Git4DataRemovedKeys *> &removals, vect
 bool Git4DataIntegerKeyBits(const Value &key, uint64_t &result);
 bool Git4DataIsIntegerKeyType(const LogicalType &type);
 void Git4DataDiffPrimaryKey(TableCatalogEntry &table, vector<StorageIndex> &columns, vector<LogicalType> &types, vector<Identifier> &names);
+//! The rows of a chunk that no overlay removed, as a selection the scan keeps.
+idx_t Git4DataKeepRows(ClientContext &context, const vector<Git4DataRemovedKeys *> &removals, vector<unique_ptr<DataChunk>> &hashes, idx_t from, DataChunk &chunk, const vector<idx_t> &key_positions, SelectionVector &kept);
 bool Git4DataRowWasRemoved(const Git4DataRemovedKeys &removed, DataChunk &chunk, const vector<idx_t> &key_positions, DataChunk &key_hashes, idx_t row);
 bool Git4DataTypedRowWasRemoved(const Git4DataKeyColumn &keys, const Git4DataRemovedKeys &removed, idx_t row);
 Git4DataReadPlan ResolveGit4DataReferencePlan(ClientContext &context, DuckTransactionManager &transaction_manager, const string &table_name, const string &name);
