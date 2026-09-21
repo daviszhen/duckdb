@@ -159,7 +159,52 @@ struct Git4DataDiffState : public GlobalTableFunctionState {
 
 //! The primary key of a table as physical column indexes plus their types, both empty when it has
 //! none. A key is what makes two physical rows recognisably the same row.
-static void Git4DataDiffPrimaryKey(TableCatalogEntry &table, vector<StorageIndex> &columns, vector<LogicalType> &types,
+
+//! The rows that differ between two references. A row is visible at a bound when its insert id is
+//! below that bound and its delete id is not, which is exactly what a scan at the bound computes -
+//! so the difference between two references is the difference between the row id sets the two
+//! bounds produce. Only row ids are compared here; aligning a removed row with the added row that
+//! replaced it is row identity work, which is a later module.
+//! The rows that differ between two references. A row is visible at a bound when its insert id is
+//! below that bound and its delete id is not, which is exactly what a scan at the bound computes -
+//! so the difference between two references is the difference between the row id sets the two
+//! bounds produce.
+//!
+//! An update is a delete plus an insert of a *different* physical row, so it arrives here as one
+//! removal and one addition. When the table has a primary key those two are the same row and are
+//! reported together as "changed"; without one there is nothing in the storage that links them, so
+//! they stay separate. That distinction is deliberate - guessing an identity would be worse than
+//! reporting the two halves.
+struct Git4DataDiffBindData : public TableFunctionData {
+	string table_name;
+	VisibilityBound left_bound;
+	VisibilityBound right_bound;
+	//! The tables the two sides are read from. They are the same table unless a side is a branch
+	//! that has been given a line of its own, which is then read as itself - and a diff that did not
+	//! follow that would compare the pinned image while a pick read the branch's table.
+	string left_table;
+	string right_table;
+	//! Whether each side is read from a branch's *own* copy rather than the source table. A copy is the
+	//! caller's table, so a diff of it has to see what that transaction has written to it.
+	bool left_own_storage = false;
+	bool right_own_storage = false;
+	//! The primary key's physical column indexes, empty when the table has no primary key
+	vector<StorageIndex> key_columns;
+	//! The types of those columns, in the same order
+	vector<LogicalType> key_types;
+	//! The names of those columns, in the same order
+	vector<Identifier> key_names;
+	//! Whether the two sides are two different tables, which is what a branch with a table of its own
+	//! makes them. Different tables do not share row ids - the branch's storage numbers its own rows
+	//! from zero again - so the comparison has to be made on the primary key instead.
+	bool compare_by_key = false;
+	//! A side that differs from its base through overlays is read through them here too: the rows they
+	//! added are part of that side, and the keys they removed are not
+	vector<Git4DataDeltaLayer> left_deltas;
+	vector<Git4DataDeltaLayer> right_deltas;
+};
+
+void Git4DataDiffPrimaryKey(TableCatalogEntry &table, vector<StorageIndex> &columns, vector<LogicalType> &types,
                                    vector<Identifier> &names) {
 	auto &table_columns = table.GetColumns();
 	for (auto &constraint : table.GetConstraints()) {
@@ -1077,22 +1122,6 @@ void Git4DataDiffFun::RegisterFunction(BuiltinFunctions &set) {
 	set.AddFunction(GetFunction());
 }
 
-TableFunction Git4DataSnapshotScanFun::GetFunction() {
-	TableFunction fun("git4data_snapshot_scan", {LogicalType::VARCHAR, LogicalType::VARCHAR},
-	                  Git4DataSnapshotScanFunction, Git4DataSnapshotScanBind, Git4DataSnapshotScanInit);
-	// always produce every column and let the projection happen above, so a LogicalGet built
-	// from this function by the binder does not have to translate column ids
-	fun.projection_pushdown = false;
-	// A plan that carries this function is not round-tripped by `debug_verify_serializer`, and claiming it can be
-	// is worse than useless: a table function's arguments are not part of the serialized plan, so the
-	// deserializer re-binds the function with an **empty** input list - measured under that mode,
-	// `INTERNAL Error: Attempted to access index 0 within vector of size 0` inside `Git4DataSnapshotScanBind`,
-	// reached from `LogicalGet::Deserialize`. The bind data is not serialized either, so the honest declaration is
-	// that this function does not claim serialization support (the flag exists for exactly this:
-	// `LogicalGet::SupportSerialization` consults it).
-	fun.verify_serialization = false;
-	return fun;
-}
 
 
 } // namespace duckdb
