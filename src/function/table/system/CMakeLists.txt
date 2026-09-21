@@ -4,6 +4,7 @@ add_library_unity(
   duckdb_connection_count.cpp
   git4data_snapshot_scan.cpp
   git4data_listings.cpp
+  git4data_diff.cpp
   duckdb_approx_database_count.cpp
   duckdb_columns.cpp
   duckdb_constraints.cpp
