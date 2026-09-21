@@ -110,10 +110,21 @@ string Git4DataEnsureRegistryTables(ClientContext &context) {
 	          "(name VARCHAR, pin UBIGINT, created TIMESTAMP, line VARCHAR);\n";
 	result += "CREATE TABLE IF NOT EXISTS " GIT4DATA_REGISTRY_SCHEMA "." GIT4DATA_BRANCHES_TABLE
 	          "(name VARCHAR, pin UBIGINT, parent VARCHAR, created TIMESTAMP, base_line VARCHAR);\n";
+	// `set_at` is the commit a mapping was set at, and it is what a read at an older pin is refused on: a
+	// capture names a branch and resolves its mapping at the time of the read, so a mapping set after the
+	// capture's pin would answer through a table that did not exist at that pin - measured as no rows at all,
+	// with every listing saying nothing was wrong (3dr, and the decision of 2026-09-21).
 	result += "CREATE TABLE IF NOT EXISTS " GIT4DATA_REGISTRY_SCHEMA "." GIT4DATA_STORAGE_TABLE
-	          "(branch VARCHAR, source VARCHAR, storage VARCHAR, owned BOOLEAN);\n";
+	          "(branch VARCHAR, source VARCHAR, storage VARCHAR, owned BOOLEAN, set_at UBIGINT);\n";
 	result += "CREATE TABLE IF NOT EXISTS " GIT4DATA_REGISTRY_SCHEMA "." GIT4DATA_DELTAS_TABLE
-	          "(branch VARCHAR, source VARCHAR, added VARCHAR, removed VARCHAR);\n";
+	          "(branch VARCHAR, source VARCHAR, added VARCHAR, removed VARCHAR, set_at UBIGINT);\n";
+	// A file written by an earlier build of this branch has those two tables without the column, and a table
+	// the caller cannot be asked to rebuild: the statement adds it, with no value in it, which reads as
+	// "unknown" and is the behaviour before this column existed.
+	result += "ALTER TABLE " GIT4DATA_REGISTRY_SCHEMA "." GIT4DATA_STORAGE_TABLE
+	          " ADD COLUMN IF NOT EXISTS set_at UBIGINT;\n";
+	result += "ALTER TABLE " GIT4DATA_REGISTRY_SCHEMA "." GIT4DATA_DELTAS_TABLE
+	          " ADD COLUMN IF NOT EXISTS set_at UBIGINT;\n";
 	// The quotas are settings rather than references, and they are rows for the same reason the references are:
 	// a row is transactional and reaches the log, where a property of the checkpoint's registry block was
 	// neither. `git4data_limit` writes them and the load below reads them back.
@@ -450,26 +461,43 @@ void Git4DataLoadRegistry(AttachedDatabase &db) {
 		                          });
 	}
 	if (storage) {
-		Git4DataScanRegistryTable(
-		    db, *storage, {LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::BOOLEAN},
-		    [&](DataChunk &chunk, idx_t row) {
-			    auto branch = chunk.GetValue(0, row).GetValue<string>();
-			    auto source = chunk.GetValue(1, row).GetValue<string>();
-			    auto storage = chunk.GetValue(2, row).GetValue<string>();
-			    auto owned = chunk.GetValue(3, row).GetValue<bool>();
-			    transaction_manager.branches.SetStorageTable(branch, source, storage, 0, 0, owned);
-		    });
+		// `set_at` is the fifth column, and a file written before it has four: the scan is told which shape to
+		// read, and a missing value is zero, which reads as "unknown" - no check, the behaviour before the
+		// column existed.
+		const bool has_set_at = storage->GetColumns().LogicalColumnCount() > 4;
+		vector<LogicalType> storage_types {LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR,
+		                                   LogicalType::BOOLEAN};
+		if (has_set_at) {
+			storage_types.push_back(LogicalType::UBIGINT);
+		}
+		Git4DataScanRegistryTable(db, *storage, storage_types, [&](DataChunk &chunk, idx_t row) {
+			auto branch = chunk.GetValue(0, row).GetValue<string>();
+			auto source = chunk.GetValue(1, row).GetValue<string>();
+			auto storage = chunk.GetValue(2, row).GetValue<string>();
+			auto owned = chunk.GetValue(3, row).GetValue<bool>();
+			// a row written by hand, as an older build's binding wrote one, carries no value here: unknown
+			// means "no check", so a NULL is read as zero rather than refused
+			auto set_at = has_set_at && !chunk.GetValue(4, row).IsNull() ? chunk.GetValue(4, row).GetValue<uint64_t>()
+			                                                             : 0;
+			transaction_manager.branches.SetStorageTable(branch, source, storage, 0, 0, owned, set_at);
+		});
 	}
 	if (deltas) {
-		Git4DataScanRegistryTable(
-		    db, *deltas, {LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR},
-		    [&](DataChunk &chunk, idx_t row) {
-			    auto branch = chunk.GetValue(0, row).GetValue<string>();
-			    auto source = chunk.GetValue(1, row).GetValue<string>();
-			    auto added = chunk.GetValue(2, row).GetValue<string>();
-			    auto removed = chunk.GetValue(3, row).GetValue<string>();
-			    transaction_manager.branches.SetDeltaTable(branch, source, added, removed);
-		    });
+		const bool has_set_at = deltas->GetColumns().LogicalColumnCount() > 4;
+		vector<LogicalType> delta_types {LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR,
+		                                 LogicalType::VARCHAR};
+		if (has_set_at) {
+			delta_types.push_back(LogicalType::UBIGINT);
+		}
+		Git4DataScanRegistryTable(db, *deltas, delta_types, [&](DataChunk &chunk, idx_t row) {
+			auto branch = chunk.GetValue(0, row).GetValue<string>();
+			auto source = chunk.GetValue(1, row).GetValue<string>();
+			auto added = chunk.GetValue(2, row).GetValue<string>();
+			auto removed = chunk.GetValue(3, row).GetValue<string>();
+			auto set_at = has_set_at && !chunk.GetValue(4, row).IsNull() ? chunk.GetValue(4, row).GetValue<uint64_t>()
+			                                                             : 0;
+			transaction_manager.branches.SetDeltaTable(branch, source, added, removed, 0, 0, 0, set_at);
+		});
 	}
 	// put the oids the records had back: the tables do not carry them, and they are what follows a renamed
 	// table or refuses one that took a name
@@ -483,7 +511,7 @@ void Git4DataLoadRegistry(AttachedDatabase &db) {
 				if (StringUtil::CIEquals(storage.source, old_storage.source)) {
 					transaction_manager.branches.SetStorageTable(old_branch.name, storage.source, storage.storage,
 					                                             old_storage.oid, old_storage.source_oid,
-					                                             storage.owned);
+					                                             storage.owned, storage.set_at);
 				}
 			}
 		}
@@ -492,7 +520,8 @@ void Git4DataLoadRegistry(AttachedDatabase &db) {
 				if (StringUtil::CIEquals(delta.source, old_delta.source)) {
 					transaction_manager.branches.SetDeltaTable(old_branch.name, delta.source, delta.added,
 					                                           delta.removed, old_delta.added_oid,
-					                                           old_delta.removed_oid, old_delta.source_oid);
+					                                           old_delta.removed_oid, old_delta.source_oid,
+					                                           delta.set_at);
 				}
 			}
 		}

@@ -38,7 +38,8 @@ TEST_CASE("git4data: a mapping aimed at a registry table cannot drop it with the
 
 		// the row an older build's binding would have written, run the way that binding's own statement ran
 		auto statements =
-		    con.ExtractStatements("INSERT INTO git4data.storage VALUES ('b', 's', 'git4data.snapshots', true)");
+		    con.ExtractStatements("INSERT INTO git4data.storage (branch, source, storage, owned) "
+		                          "VALUES ('b', 's', 'git4data.snapshots', true)");
 		REQUIRE(statements.size() == 1);
 		statements[0]->internal = true;
 		auto written = con.Query(std::move(statements[0]));

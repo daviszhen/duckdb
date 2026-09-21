@@ -356,23 +356,35 @@ SELECT (SELECT count(*) FROM t AT (BRANCH => 'grandchild')),
 # storage. The copy the line was reading is taken by that materialize, and the new copy did not exist at the
 # capture's pin, which is why the answer is empty rather than wrong-but-plausible.
 #
-# The assertions below are the **measured behaviour, kept so a change is noticed in either direction**, the same
-# way `registry_isolation.test` keeps the uncommitted-reference limitation. **What a fix would have to be is
-# recorded in the design note's open list**: refusing the mapping change is not it - a chain of branches is built
-# by capturing a line and forking from it, and `combinations.test` re-materializes a captured middle link as part
-# of that pattern - so the choice is between reading the mapping as of the pin and reporting the change, and both
-# need the mapping's age recorded next to it, which is the same format decision the note already carries open.
+# **The assertions here used to be that measured behaviour** - the capture and the fork both reading `0` rows -
+# kept in the style `registry_isolation.test` uses so that a change is noticed in either direction. The change is
+# increment 3ej (decision of 2026-09-21): a mapping records the commit it was set at, and a read at a pin *older*
+# than that mapping is now **refused** with the reason rather than answered through a table that did not exist at
+# the pin. What the old pin measured, for the record: the capture and the fork read `0` rows, the branch itself
+# read `100`, and every listing column still said nothing was wrong.
 statement ok
 PRAGMA git4data_materialize('t', 'inherited_only', 't_inh2')
 
-query III
-SELECT (SELECT count(*) FROM t AT (SNAPSHOT => 'inherited_cap')),
-       (SELECT count(*) FROM t AT (BRANCH => 'grandchild')),
-       (SELECT count(*) FROM t AT (BRANCH => 'inherited_only'))
+# the capture, at a pin older than the mapping that replaced the line it captured
+statement error
+SELECT count(*) FROM t AT (SNAPSHOT => 'inherited_cap')
 ----
-0	0	100
+<REGEX>:.*predates the.*that would answer it.*
 
-# and nothing in the listings says so, which is the part that makes it silent
+# and the fork of it, whose base is that same line at the pin it forked at
+statement error
+SELECT count(*) FROM t AT (BRANCH => 'grandchild')
+----
+<REGEX>:.*predates the.*that would answer it.*
+
+# the branch reads its own line as it stands now, which was never in question
+query I
+SELECT count(*) FROM t AT (BRANCH => 'inherited_only')
+----
+100
+
+# The listings keep their own three columns, and none of them is what refused the reads above: it is the age of
+# the mapping that says the line moved, and those columns say whether a table is missing
 query III
 SELECT (SELECT line_missing FROM git4data_snapshots() WHERE snapshot_name = 'inherited_cap'),
        (SELECT storage_missing FROM git4data_branches() WHERE branch_name = 'inherited_only'),

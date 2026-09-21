@@ -808,9 +808,30 @@ static bool Git4DataDiffColumnsArePrefix(const vector<string> &names, const vect
 	return true;
 }
 
+//! Refuse a read at a pin when the mapping it would answer through was set *after* that pin.
+//!
+//! A capture names a branch, and this read resolves that branch's mapping at the time of the read while bounding
+//! it by the capture's own pin - so a mapping set after the pin makes the read answer through a table that did
+//! not exist at the pin. Measured before this check (3dr): the capture and the forks of it read **no rows at
+//! all**, while the branch itself still read 100 and every listing column said nothing was wrong. The mapping
+//! records the commit it was set at (decision of 2026-09-21), and this is where that value is used: a mapping
+//! with no value (a file written before the column) is *unknown* and checks nothing, which is the behaviour
+//! before the column existed.
+static void Git4DataCheckMappingAge(const Git4DataBranch &branch, const string &mapping_name,
+                                    transaction_t mapping_set_at, transaction_t check_pin, const char *what) {
+	if (check_pin == 0 || mapping_set_at == 0 || mapping_set_at <= check_pin) {
+		return;
+	}
+	throw InvalidInputException(
+	    "Branch \"%s\" was given %s \"%s\" at commit %llu, and this read is at commit %llu: the line asked for "
+	    "predates the %s that would answer it, so the read would come back through a table that did not exist "
+	    "then. Read the branch as it stands now, or capture the line again.",
+	    branch.name, what, mapping_name, (unsigned long long)mapping_set_at, (unsigned long long)check_pin, what);
+}
+
 static Git4DataLineState ResolveGit4DataLineState(ClientContext &context, DuckTransactionManager &transaction_manager,
                                                   const string &table_name, const Git4DataBranch &branch,
-                                                  VisibilityBound at) {
+                                                  VisibilityBound at, transaction_t check_pin = 0) {
 	Git4DataLineState state;
 	state.base_bound = at;
 	auto storage = Git4DataBranchStorageTable(context, branch, table_name);
@@ -846,6 +867,12 @@ static Git4DataLineState ResolveGit4DataLineState(ClientContext &context, DuckTr
 				    branch.name, storage, table_name);
 			}
 		}
+		// the mapping this read is about to use, and when it was set
+		for (auto &mapping : branch.storage_tables) {
+			if (StringUtil::CIEquals(mapping.storage, storage)) {
+				Git4DataCheckMappingAge(branch, storage, mapping.set_at, check_pin, "table");
+			}
+		}
 		state.base_table = storage;
 		state.own_storage = true;
 	} else if (!branch.base_line.empty()) {
@@ -854,7 +881,7 @@ static Git4DataLineState ResolveGit4DataLineState(ClientContext &context, DuckTr
 		Git4DataBranch line_branch;
 		if (transaction_manager.branches.Get(branch.base_line, line_branch)) {
 			auto inherited = ResolveGit4DataLineState(context, transaction_manager, table_name, line_branch,
-			                                          VisibilityBound::Through(branch.pin));
+			                                          VisibilityBound::Through(branch.pin), branch.pin);
 			state.base_table = inherited.base_table;
 			state.own_storage = inherited.own_storage;
 			state.base_bound = inherited.base_bound;
@@ -872,6 +899,7 @@ static Git4DataLineState ResolveGit4DataLineState(ClientContext &context, DuckTr
 	Git4DataDeltaLayer own;
 	own.bound = at;
 	for (auto &delta : branch.deltas) {
+		Git4DataCheckMappingAge(branch, delta.added, delta.set_at, check_pin, "delta");
 		// the source's name can change under the mapping, and its oid is what survives that
 		auto &requested = Git4DataResolveTable(context, table_name);
 		if (!Git4DataSourceKeyMatches(context, delta.source, table_name)) {
@@ -944,7 +972,7 @@ static void ResolveGit4DataRead(ClientContext &context, DuckTransactionManager &
 			Git4DataBranch line_branch;
 			if (transaction_manager.branches.Get(snapshot.line, line_branch)) {
 				auto state = ResolveGit4DataLineState(context, transaction_manager, table_name, line_branch,
-				                                      VisibilityBound::Through(snapshot.pin));
+				                                      VisibilityBound::Through(snapshot.pin), snapshot.pin);
 				plan.table_name = state.base_table;
 				plan.own_storage = state.own_storage;
 				plan.bound = state.base_bound;

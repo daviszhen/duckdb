@@ -131,6 +131,13 @@ struct Git4DataStorageTable {
 	//! the earlier copy with it is what keeps that from costing the caller a table nothing points at.
 	//! A table bound by hand is left alone.
 	bool owned = false;
+	//! The commit at which this mapping was set. A capture names a *branch*, and a read of it resolves that
+	//! branch's mapping at the time of the read while bounding it by the capture's own pin - so a mapping set
+	//! after that pin makes the read answer through a table that did not exist at the pin, which measured as
+	//! *no rows at all* while every listing said nothing was wrong (3dr). With this column the read can tell,
+	//! and it refuses instead (decision of 2026-09-21). Zero means unknown - the value a mapping read from a
+	//! file written before this column has - and unknown reads as "no check", which is today's behaviour.
+	transaction_t set_at = 0;
 };
 
 //! What a branch changes about one source table when it holds no copy of it. Both tables are the
@@ -150,6 +157,9 @@ struct Git4DataBranchDelta {
 	//! The source table's own oid when the delta was bound, so the delta follows a source that is renamed
 	//! rather than silently ceasing to apply
 	idx_t source_oid = 0;
+	//! The commit at which this delta was bound, for the same reason and with the same meaning as the storage
+	//! mapping's `set_at`
+	transaction_t set_at = 0;
 };
 
 struct Git4DataBranch {
@@ -227,7 +237,7 @@ public:
 	//! oid is the table's, and is checked again on every read. `owned` says the feature created that
 	//! table rather than a caller handing one over.
 	void SetStorageTable(const string &branch, const string &source_table, const string &storage_table,
-	                     idx_t storage_oid = 0, idx_t source_oid = 0, bool owned = false);
+	                     idx_t storage_oid = 0, idx_t source_oid = 0, bool owned = false, transaction_t set_at = 0);
 	//! The table a branch reads for a source table instead of its pinned image, and whether the feature
 	//! created it. Returns false when the branch has none, which is also what a branch reading its base
 	//! through a delta has. A source table can be renamed under the mapping, so an oid that matches is a
@@ -240,7 +250,7 @@ public:
 	//! Record that a branch differs from its base by a delta rather than by a copy of it. A branch with a
 	//! table of its own for this source keeps that instead: one line, one source of truth.
 	void SetDeltaTable(const string &branch, const string &source_table, const string &added, const string &removed,
-	                   idx_t added_oid = 0, idx_t removed_oid = 0, idx_t source_oid = 0);
+	                   idx_t added_oid = 0, idx_t removed_oid = 0, idx_t source_oid = 0, transaction_t set_at = 0);
 	//! Forget a branch's delta for a source table, which is what giving it a table of its own does - the
 	//! copy is the line from then on, and a delta beside it would be read by nothing. Returns false when
 	//! it had no delta for that source, so a caller cannot report having cleared one it did not.
