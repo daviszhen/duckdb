@@ -3,6 +3,7 @@ add_library_unity(
   OBJECT
   duckdb_connection_count.cpp
   git4data_snapshot_scan.cpp
+  git4data_read_plan.cpp
   git4data_keys.cpp
   git4data_listings.cpp
   git4data_diff.cpp

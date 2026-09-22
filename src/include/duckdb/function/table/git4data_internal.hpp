@@ -323,6 +323,9 @@ idx_t Git4DataKeepRows(ClientContext &context, const vector<Git4DataRemovedKeys 
 bool Git4DataRowWasRemoved(const Git4DataRemovedKeys &removed, DataChunk &chunk, const vector<idx_t> &key_positions, DataChunk &key_hashes, idx_t row);
 bool Git4DataTypedRowWasRemoved(const Git4DataKeyColumn &keys, const Git4DataRemovedKeys &removed, idx_t row);
 Git4DataReadPlan ResolveGit4DataReferencePlan(ClientContext &context, DuckTransactionManager &transaction_manager, const string &table_name, const string &name);
+//! The same resolution for a caller that already knows which kind of reference it holds: the binder decides that
+//! from the clause a statement used, and re-deriving it from the name here would answer `__live__` differently.
+void ResolveGit4DataRead(ClientContext &context, DuckTransactionManager &transaction_manager, const string &table_name, const string &name, Git4DataRefKind kind, Git4DataReadPlan &plan);
 constexpr idx_t Git4DataHashKeysLimit();
 //! A row that has no counterpart on the other side of a diff: the sentinel the comparison walks with.
 constexpr row_t NO_COUNTERPART = -1;
