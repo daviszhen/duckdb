@@ -258,50 +258,19 @@ static bool Git4DataAncestorCopyUnwritten(ClientContext &context, const string &
 	return true;
 }
 
-string PragmaGit4DataMerge(ClientContext &context, const FunctionParameters &parameters) {
-	auto table_name = parameters.values[0].ToString();
-	auto left_name = parameters.values[1].ToString();
-	auto right_name = parameters.values[2].ToString();
-	auto policy = StringUtil::Lower(parameters.values[3].ToString());
-	if (policy != "fail" && policy != "skip" && policy != "accept") {
-		throw InvalidInputException("Merge policy has to be fail, skip or accept, not \"%s\"", policy);
-	}
-	auto &transaction_manager = GetGit4DataTransactionManager(context);
+//! The state a three-way merge reads as its base: which reference names it, and whether the merge made that
+//! reference itself. A base the merge made exists only for the two diffs below it, so the generated body takes it
+//! back - which is what `created` carries to the caller.
+struct Git4DataMergeBase {
+	string reference;
+	bool created = false;
+};
 
-	auto left = Git4DataRequiredBranch(context, transaction_manager, left_name);
-	auto right = Git4DataRequiredBranch(context, transaction_manager, right_name);
-	string merge_into;
-	auto &merge_source = Git4DataResolveTable(context, table_name);
-	auto merge_key = Git4DataSourceKey(merge_source);
-	for (auto &entry : left.storage_tables) {
-		if (Git4DataSourceKeyMatches(context, entry.source, merge_key) ||
-		    (entry.source_oid != 0 && entry.source_oid == merge_source.oid)) {
-			// the table the branch was given can have been renamed, and the merge writes into it
-			merge_into = Git4DataResolveTableName(context, entry.storage, entry.oid);
-		}
-	}
-	// A branch does not have to have a table of its own to be merged into: one that differs by a delta has
-	// somewhere to record the change too - the same two tables git4data_apply records in - so the landing
-	// statements below are written as delta rows instead of as changes to a table, and the "live" side of the
-	// conflict rule is read as the branch's own view rather than as a table.
-	optional_ptr<const Git4DataBranchDelta> merge_delta;
-	if (merge_into.empty()) {
-		merge_delta = Git4DataFindDeltaTable(context, left, merge_key, merge_source.oid);
-		if (merge_delta) {
-			// The merge lands in this mapping, so it has to be the one the target was given. This is load-bearing
-			// and not covered by the read path: measured, with it removed the refusal comes from the merge's own
-			// ancestor lookup instead ("Branches ... share no ancestor to merge against"), which is a different
-			// sentence about a different problem - the read of the target never happens.
-			Git4DataCheckSourceBoundTable(context, left, merge_delta->source, merge_delta->source_oid,
-			                              merge_source.oid);
-		}
-		if (!merge_delta) {
-			throw InvalidInputException("Branch \"%s\" has neither a table of its own nor a delta for table "
-			                            "\"%s\", so a merge has nowhere to land - materialize it, or give it a "
-			                            "delta with git4data_bind_branch_delta",
-			                            left_name, table_name);
-		}
-	}
+//! The two sides' common ancestor, and the state they parted at, named as a reference the diffs can read.
+static Git4DataMergeBase Git4DataMergeBaseOf(ClientContext &context, DuckTransactionManager &transaction_manager,
+                                             const string &left_name, const string &right_name,
+                                             const string &table_name, const string &merge_key,
+                                             TableCatalogEntry &merge_source) {
 	string ancestor;
 	if (!transaction_manager.branches.FindLCA(left_name, right_name, ancestor)) {
 		// A child forked from a captured line has no *branch* ancestor, so what it parted from is the snapshot
@@ -417,6 +386,55 @@ string PragmaGit4DataMerge(ClientContext &context, const FunctionParameters &par
 			}
 		}
 	}
+	return Git4DataMergeBase {base_reference, drop_merge_base};
+}
+
+string PragmaGit4DataMerge(ClientContext &context, const FunctionParameters &parameters) {
+	auto table_name = parameters.values[0].ToString();
+	auto left_name = parameters.values[1].ToString();
+	auto right_name = parameters.values[2].ToString();
+	auto policy = StringUtil::Lower(parameters.values[3].ToString());
+	if (policy != "fail" && policy != "skip" && policy != "accept") {
+		throw InvalidInputException("Merge policy has to be fail, skip or accept, not \"%s\"", policy);
+	}
+	auto &transaction_manager = GetGit4DataTransactionManager(context);
+
+	auto left = Git4DataRequiredBranch(context, transaction_manager, left_name);
+	auto right = Git4DataRequiredBranch(context, transaction_manager, right_name);
+	string merge_into;
+	auto &merge_source = Git4DataResolveTable(context, table_name);
+	auto merge_key = Git4DataSourceKey(merge_source);
+	for (auto &entry : left.storage_tables) {
+		if (Git4DataSourceKeyMatches(context, entry.source, merge_key) ||
+		    (entry.source_oid != 0 && entry.source_oid == merge_source.oid)) {
+			// the table the branch was given can have been renamed, and the merge writes into it
+			merge_into = Git4DataResolveTableName(context, entry.storage, entry.oid);
+		}
+	}
+	// A branch does not have to have a table of its own to be merged into: one that differs by a delta has
+	// somewhere to record the change too - the same two tables git4data_apply records in - so the landing
+	// statements below are written as delta rows instead of as changes to a table, and the "live" side of the
+	// conflict rule is read as the branch's own view rather than as a table.
+	optional_ptr<const Git4DataBranchDelta> merge_delta;
+	if (merge_into.empty()) {
+		merge_delta = Git4DataFindDeltaTable(context, left, merge_key, merge_source.oid);
+		if (merge_delta) {
+			// The merge lands in this mapping, so it has to be the one the target was given. This is load-bearing
+			// and not covered by the read path: measured, with it removed the refusal comes from the merge's own
+			// ancestor lookup instead ("Branches ... share no ancestor to merge against"), which is a different
+			// sentence about a different problem - the read of the target never happens.
+			Git4DataCheckSourceBoundTable(context, left, merge_delta->source, merge_delta->source_oid,
+			                              merge_source.oid);
+		}
+		if (!merge_delta) {
+			throw InvalidInputException("Branch \"%s\" has neither a table of its own nor a delta for table "
+			                            "\"%s\", so a merge has nowhere to land - materialize it, or give it a "
+			                            "delta with git4data_bind_branch_delta",
+			                            left_name, table_name);
+		}
+	}
+	auto base = Git4DataMergeBaseOf(context, transaction_manager, left_name, right_name, table_name, merge_key,
+	                                merge_source);
 
 	auto &table = Git4DataResolveTable(context, table_name);
 	auto key_columns = Git4DataPrimaryKeyColumnNames(table);
@@ -459,9 +477,9 @@ string PragmaGit4DataMerge(ClientContext &context, const FunctionParameters &par
 	auto quoted_table = Git4DataTableSQLName(table_name);
 	auto quoted_into = Git4DataTableSQLName(merge_into);
 	auto read_target = merge_into.empty() ? FormatGit4DataAtClause(table_name, left_name, "BRANCH") : quoted_into;
-	auto diff_left = StringUtil::Format("git4data_diff('%s', '%s', '%s')", Git4DataSQLLiteral(table_name), Git4DataSQLLiteral(base_reference),
+	auto diff_left = StringUtil::Format("git4data_diff('%s', '%s', '%s')", Git4DataSQLLiteral(table_name), Git4DataSQLLiteral(base.reference),
 	                                    Git4DataSQLLiteral(left_name));
-	auto diff_right = StringUtil::Format("git4data_diff('%s', '%s', '%s')", Git4DataSQLLiteral(table_name), Git4DataSQLLiteral(base_reference),
+	auto diff_right = StringUtil::Format("git4data_diff('%s', '%s', '%s')", Git4DataSQLLiteral(table_name), Git4DataSQLLiteral(base.reference),
 	                                     Git4DataSQLLiteral(right_name));
 	auto right_image =
 	    FormatGit4DataAtClause(table_name, right_name, ResolveGit4DataReference(transaction_manager, right_name));
@@ -530,7 +548,7 @@ string PragmaGit4DataMerge(ClientContext &context, const FunctionParameters &par
 	}
 	result += StringUtil::Format("DROP TABLE %s;", conflict_name);
 
-	if (drop_merge_base) {
+	if (base.created) {
 		// The reference was only there for the two diffs above, which have run by now, so it goes. Its row
 		// goes with plain DML and the in-memory entry with the pragma below rather than through
 		// git4data_drop_snapshot: that one *returns* the row's DELETE now, and SQL a pragma returns is
