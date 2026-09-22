@@ -226,12 +226,25 @@ string PragmaGit4DataPitr(ClientContext &context, const FunctionParameters &para
 		throw InvalidInputException("A point-in-time recovery window cannot be negative");
 	}
 	constexpr int64_t MICROS_PER_DAY = 24LL * 60 * 60 * 1000000;
+	// A window is kept in microseconds, and a day count whose product does not fit in one is not a length this
+	// can hold: measured before this guard, `git4data_pitr(106751992)` reported `window_days = -106751990`,
+	// `git4data_pitr(9223372036854775807)` reported `-1`, and `git4data_pitr(2251799813685248)` reported `0` -
+	// a window that keeps nothing, asked for by a number that asks for far more than any database can hold. A
+	// negative window is not merely misreported: `AdvancePitr` compares against it, so the reference moves at
+	// every checkpoint and the history the window promised is released as it is written.
+	int64_t window_micros;
+	if (!TryMultiplyOperator::Operation<int64_t, int64_t, int64_t>(days, MICROS_PER_DAY, window_micros)) {
+		throw InvalidInputException(
+		    "A point-in-time recovery window of %lld days does not fit in the microseconds a window is kept in. "
+		    "The longest one this can hold is %lld days.",
+		    (long long)days, (long long)(NumericLimits<int64_t>::Maximum() / MICROS_PER_DAY));
+	}
 	// the tables first, because the statement this returns is what creates them and the window's own row is
 	// inserted after them in the same statement
 	auto result = Git4DataEnsureRegistryTables(context);
 	auto &transaction_manager = GetGit4DataTransactionManager(context);
 	auto created = Timestamp::GetCurrentTimestamp();
-	auto window = timestamp_t(days * MICROS_PER_DAY);
+	auto window = timestamp_t(window_micros);
 	// the reference carries the length of the window it belongs to: it is the one thing about the window that
 	// a crash before the next checkpoint leaves behind, and a restored window that has forgotten its length
 	// would keep nothing at all

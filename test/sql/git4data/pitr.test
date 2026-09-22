@@ -200,3 +200,42 @@ SELECT (SELECT pitr_enabled FROM git4data_pitr_state()),
        (SELECT count(*) FROM git4data_snapshots() WHERE starts_with(snapshot_name, '__'))
 ----
 false	false	0	0
+
+# The window is kept in microseconds, so a day count whose product does not fit in one is refused rather than
+# wrapped. Measured before this guard: `git4data_pitr(106751992)` reported `window_days = -106751990`,
+# `git4data_pitr(9223372036854775807)` reported `-1`, and `git4data_pitr(2251799813685248)` reported `0` - a
+# window that keeps nothing, asked for by a number that asks for far more than any database can hold. A
+# negative window is not only misreported: `AdvancePitr` compares against it, so the reference moves at every
+# checkpoint and the history the window promised is released as it is written.
+statement error
+PRAGMA git4data_pitr(106751992)
+----
+<REGEX>:.*does not fit in the microseconds a window is kept in.*
+
+statement error
+PRAGMA git4data_pitr(9223372036854775807)
+----
+<REGEX>:.*does not fit in the microseconds a window is kept in.*
+
+# The refusals left the window as they found it - off, which is the state the file was left in above.
+query III
+PRAGMA git4data_pitr_state
+----
+false	0	false
+
+# The longest window that does fit still opens, and reports the length it was given.
+statement ok
+PRAGMA git4data_pitr(106751991)
+
+query III
+PRAGMA git4data_pitr_state
+----
+true	106751991	true
+
+statement ok
+PRAGMA git4data_pitr_off
+
+query III
+PRAGMA git4data_pitr_state
+----
+false	0	false
