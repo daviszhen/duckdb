@@ -1,18 +1,9 @@
 //===----------------------------------------------------------------------===//
-// Git4Data -- the pragmas that make, move and drop references
+// Git4Data -- the lifecycle of a reference: create, drop, list, and the limits
 //===----------------------------------------------------------------------===//
-// A snapshot, a branch, the limit on how many of each a database keeps, and the least common ancestor two lines
-// share. They are the reference lifecycle, they share the two checks that guard a reference's name and count, and
-// increment 3fn moved them out of git4data_pragmas.cpp, which keeps the shared helpers, the recovery pragmas
-// (pitr, restore, clone), the introspection pragmas and the registration.
-//===----------------------------------------------------------------------===//
-
-//===----------------------------------------------------------------------===//
-// Git4Data -- the feature's pragmas
-//===----------------------------------------------------------------------===//
-// Moved out of pragma_functions.cpp by increment 3er without changing a line of any of them, apart from taking
-// the feature's `set.AddFunction` lines out of that file's registration and into RegisterGit4DataPragmas below.
-// What they share with the rest of the feature is in git4data_registry.hpp and the read path's own header.
+// The pragmas that make, take back and report snapshots and branches, the reserved-name and limit checks they
+// share, and the wrappers that turn the listings into pragmas. Increment 3fn moved them out of
+// git4data_pragmas.cpp, which keeps the settings a database has.
 //===----------------------------------------------------------------------===//
 
 #include "duckdb/function/pragma/pragma_functions.hpp"

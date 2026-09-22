@@ -1,28 +1,10 @@
 //===----------------------------------------------------------------------===//
-// Git4Data -- the pragma that writes a branch through ordinary SQL
+// Git4Data -- `git4data_apply`: ordinary SQL written against a delta branch
 //===----------------------------------------------------------------------===//
-// `git4data_apply` runs one statement of the caller's own SQL against a branch that differs by a
-// delta, and records what it changed. It carries the checks that the statement names the branch's
-// table directly, and the helpers that point a query at a reference. Increment 3fo moved them out
-// of git4data_pragma_lines.cpp, which keeps the merge.
-//===----------------------------------------------------------------------===//
-
-//===----------------------------------------------------------------------===//
-// Git4Data -- the pragmas that reason about two lines
-//===----------------------------------------------------------------------===//
-// pick, apply and merge compare one reference's line against another's, and the helpers they need for that: the
-// scope a statement is pointed at, the comparison a pick builds, the internal reference a merge names its base
-// with, and the shared ancestor a captured line forks from. They lived in git4data_pragmas.cpp with the rest of
-// the feature's pragmas; increment 3et moved them here without changing a line of them, apart from the `static`
-// that a header declaration cannot keep. What they share with that file is in git4data_pragmas.hpp.
-//===----------------------------------------------------------------------===//
-
-//===----------------------------------------------------------------------===//
-// Git4Data -- the feature's pragmas
-//===----------------------------------------------------------------------===//
-// Moved out of pragma_functions.cpp by increment 3er without changing a line of any of them, apart from taking
-// the feature's `set.AddFunction` lines out of that file's registration and into RegisterGit4DataPragmas below.
-// What they share with the rest of the feature is in git4data_registry.hpp and the read path's own header.
+// `PragmaGit4DataApply` translates INSERT, UPDATE and DELETE into edits of the two tables that hold a delta
+// branch's line, and the helpers it needs are here with it: the checks that the statement names the branch's
+// table directly, and the walkers that point a parsed query at a reference. Increment 3fo moved it out of
+// git4data_pragma_lines.cpp, which keeps the merge.
 //===----------------------------------------------------------------------===//
 
 #include "duckdb/function/pragma/pragma_functions.hpp"
@@ -197,6 +179,206 @@ static void Git4DataCheckApplyTarget(ClientContext &context, TableRef &ref, Tabl
 //!            a delta's terms - the pairing a read needs, kept by the feature rather than by the caller
 //!   INSERT   the rows go into `added`. A key the branch was hiding stays hidden: the branch does not
 //!            show that row, so inserting it adds one, and the base row stays where the delta put it
+//! What every translated statement of `git4data_apply` is written against: the delta's two tables, the branch's
+//! own image of the source, and the temporary names a translation may use. Built once per call, so the three
+//! statement shapes below read it rather than rebuilding it.
+struct Git4DataApplyTranslation {
+	TableCatalogEntry &table;
+	string at_clause;
+	string key_list;
+	vector<string> key_columns;
+	string quoted_added;
+	string quoted_removed;
+	string rows_name;
+	string keys_name;
+	string alias_rows;
+	string alias_keys;
+	string alias_added;
+	string alias_removed;
+	string alias_branch;
+	string branch_image;
+
+	//! The condition that says two aliases name the same row
+	string Match(const string &left_alias, const string &right_alias) const {
+		string result;
+		for (auto &key : key_columns) {
+			if (!result.empty()) {
+				result += " AND ";
+			}
+			auto quoted = KeywordHelper::WriteOptionallyQuoted(key);
+			result += StringUtil::Format("%s.%s = %s.%s", left_alias, quoted, right_alias, quoted);
+		}
+		return result;
+	}
+
+	//! The statement that records the rows - or the keys - `from_name` holds as removed
+	string AddRemovals(const string &from_name, const string &from_alias) const {
+		return StringUtil::Format("INSERT INTO %s (%s) SELECT %s FROM %s %s WHERE NOT EXISTS (SELECT 1 FROM %s %s "
+		                          "WHERE %s);\n",
+		                          quoted_removed, key_list, key_list, from_name, from_alias, quoted_removed,
+		                          alias_removed, Match(alias_removed, from_alias));
+	}
+};
+
+//! The rows a DELETE takes out of the branch: their keys are what the delta hides.
+static string Git4DataApplyDelete(ClientContext &context, Git4DataApplyTranslation &t, SQLStatement &statement) {
+			auto &node = statement.Cast<DeleteStatement>().node;
+			if (!node->using_clauses.empty()) {
+				throw InvalidInputException("git4data_apply does not take DELETE ... USING: the rows to remove have to "
+				                            "be the branch's own, which a second table is not");
+			}
+			if (!node->returning_list.empty()) {
+				throw InvalidInputException("git4data_apply does not take RETURNING: nothing is written where the rows "
+				                            "would come from");
+			}
+			Git4DataCheckApplyTarget(context, *node->table, t.table);
+			auto condition = node->condition ? node->condition->ToString() : string();
+			string result =
+			    StringUtil::Format("CREATE OR REPLACE TEMP TABLE %s AS SELECT %s FROM %s%s;\n", t.rows_name, t.key_list,
+			                       t.at_clause, condition.empty() ? string() : " WHERE " + condition);
+			result +=
+			    StringUtil::Format("DELETE FROM %s %s WHERE EXISTS (SELECT 1 FROM %s %s WHERE %s);\n", t.quoted_added,
+			                       t.alias_added, t.rows_name, t.alias_rows, t.Match(t.alias_added, t.alias_rows));
+			result += t.AddRemovals(t.rows_name, t.alias_rows);
+			result += StringUtil::Format("DROP TABLE %s;", t.rows_name);
+			return result;
+}
+
+//! An UPDATE is a removal and an addition in a delta's terms: the keys the statement rewrote go into
+//! `removed`, and the branch's own rows for them, with the assignments applied, go into `added`.
+static string Git4DataApplyUpdate(ClientContext &context, Git4DataApplyTranslation &t, SQLStatement &statement) {
+			auto &node = statement.Cast<UpdateStatement>().node;
+			if (node->from_table) {
+				throw InvalidInputException("git4data_apply does not take UPDATE ... FROM: the rows to change have to "
+				                            "be the branch's own, which a joined table is not");
+			}
+			if (!node->returning_list.empty()) {
+				throw InvalidInputException("git4data_apply does not take RETURNING: nothing is written where the rows "
+				                            "would come from");
+			}
+			Git4DataCheckApplyTarget(context, *node->table, t.table);
+			auto &set_info = *node->set_info;
+			auto condition = set_info.condition ? set_info.condition->ToString() : string();
+			// the new rows: the branch's own columns, with the assigned ones replaced by what they are
+			// assigned. A row's other columns are the row's own, which is what a SET list means.
+			vector<pair<string, string>> assignments;
+			for (idx_t i = 0; i < set_info.columns.size(); i++) {
+				assignments.emplace_back(set_info.columns[i].GetIdentifierName(), set_info.expressions[i]->ToString());
+			}
+			string new_columns;
+			for (auto &column : t.table.GetColumns().Logical()) {
+				auto name = column.Name().GetIdentifierName();
+				if (!new_columns.empty()) {
+					new_columns += ", ";
+				}
+				string value;
+				for (auto &assignment : assignments) {
+					if (assignment.first == name) {
+						value = assignment.second;
+						break;
+					}
+				}
+				// every column is named: a SET expression that is a literal or an expression takes its
+				// name from the expression otherwise, and the rows table is joined on its keys -
+				// measured, `SET k = 5` produced a column called "5" and the join could not find the key
+				new_columns += value.empty() ? KeywordHelper::WriteOptionallyQuoted(name)
+				                             : (value + " AS " + KeywordHelper::WriteOptionallyQuoted(name));
+			}
+			string result =
+			    StringUtil::Format("CREATE OR REPLACE TEMP TABLE %s AS SELECT %s FROM %s%s;\n", t.keys_name, t.key_list,
+			                       t.at_clause, condition.empty() ? string() : " WHERE " + condition);
+			result += StringUtil::Format("CREATE OR REPLACE TEMP TABLE %s AS SELECT %s FROM %s%s;\n", t.rows_name,
+			                             new_columns, t.at_clause, condition.empty() ? string() : " WHERE " + condition);
+			result +=
+			    StringUtil::Format("DELETE FROM %s %s WHERE EXISTS (SELECT 1 FROM %s %s WHERE %s);\n", t.quoted_added,
+			                       t.alias_added, t.keys_name, t.alias_keys, t.Match(t.alias_added, t.alias_keys));
+			result += t.AddRemovals(t.keys_name, t.alias_keys);
+			// A key the statement rewrites onto a key the branch already shows is the collision the same
+			// statement against the table itself raises, and here it was a silent wrong answer: measured,
+			// `UPDATE t SET k = 5 WHERE k = 3` with both keys present left the branch showing *two* rows
+			// for k = 5, where the table itself refuses with a duplicate key. Keys the statement is
+			// replacing are not collisions - a row keeping its key, or two rows swapping theirs, is an
+			// ordinary update - so the check asks whether a new key is one the branch shows and the
+			// statement is not rewriting.
+			result += StringUtil::Format(
+			    "INSERT INTO %s SELECT * FROM %s %s WHERE (SELECT CASE WHEN EXISTS (SELECT 1 FROM %s JOIN %s %s ON "
+			    "(%s) WHERE NOT EXISTS (SELECT 1 FROM %s %s WHERE %s)) THEN error('update collides with a row the "
+			    "branch already shows: two rows would carry the same key, which the table itself refuses. Delete "
+			    "the row that key belongs to, or rewrite it to a key the branch does not have') ELSE 1 END) = 1;\n",
+			    t.quoted_added, t.rows_name, t.alias_rows, t.branch_image, t.rows_name, t.alias_rows,
+			    t.Match(t.alias_branch, t.alias_rows), t.keys_name, t.alias_keys, t.Match(t.alias_keys, t.alias_branch));
+			result += StringUtil::Format("DROP TABLE %s;\nDROP TABLE %s;", t.keys_name, t.rows_name);
+			return result;
+}
+
+//! The rows an INSERT adds, landed in the branch's own `added` table. A key the branch was hiding stays
+//! hidden, because the branch does not show that row.
+static string Git4DataApplyInsert(ClientContext &context, Git4DataApplyTranslation &t, SQLStatement &statement) {
+			auto &node = statement.Cast<InsertStatement>().node;
+			if (node->on_conflict_info) {
+				throw InvalidInputException("git4data_apply does not take ON CONFLICT: a branch that keeps its own "
+				                            "changes has no conflict for the base to resolve");
+			}
+			if (!node->returning_list.empty()) {
+				throw InvalidInputException("git4data_apply does not take RETURNING: nothing is written where the rows "
+				                            "would come from");
+			}
+			if (node->default_values) {
+				throw InvalidInputException("git4data_apply does not take DEFAULT VALUES: the defaults are the source "
+				                            "table's, and the table this branch adds rows to is not it");
+			}
+			if (node->column_order != InsertColumnOrder::INSERT_BY_POSITION) {
+				throw InvalidInputException("git4data_apply does not take INSERT ... BY NAME");
+			}
+			if (!node->select_statement) {
+				throw InvalidInputException("git4data_apply needs rows to insert");
+			}
+			// the rows are *for* the table the delta is for, and the statement is translated rather than
+			// executed, so the name it writes is never read again. The target is a qualified name here; the
+			// insert's table reference is not always there.
+			Git4DataCheckApplyTargetTable(context, node->qualified_name, t.table);
+			// the column list the insert names, or the table's own columns in order when it names none
+			vector<string> insert_columns;
+			for (auto &column : node->columns) {
+				insert_columns.push_back(column.GetIdentifierName());
+			}
+			if (insert_columns.empty()) {
+				for (auto &column : t.table.GetColumns().Logical()) {
+					insert_columns.push_back(column.Name().GetIdentifierName());
+				}
+			}
+			string insert_list;
+			for (idx_t i = 0; i < insert_columns.size(); i++) {
+				if (i > 0) {
+					insert_list += ", ";
+				}
+				insert_list += KeywordHelper::WriteOptionallyQuoted(insert_columns[i]);
+			}
+			// The rows are landed in a table whose columns are the ones the insert names, in that order, so
+			// the rows can be checked and then added by position. Naming them here rather than aliasing the
+			// select avoids depending on what the parser calls the columns of a VALUES list - it calls them
+			// `valueslist`, measured.
+			string declared;
+			for (auto &name : insert_columns) {
+				auto &column = t.table.GetColumns().GetColumn(Identifier(name));
+				if (!declared.empty()) {
+					declared += ", ";
+				}
+				declared += KeywordHelper::WriteOptionallyQuoted(name) + " " + column.Type().ToString();
+			}
+			string result = StringUtil::Format("CREATE OR REPLACE TEMP TABLE %s (%s);\n", t.rows_name, declared);
+			result += StringUtil::Format("INSERT INTO %s (%s) %s;\n", t.rows_name, insert_list,
+			                             node->select_statement->ToString());
+			result += StringUtil::Format(
+			    "INSERT INTO %s (%s) SELECT * FROM %s WHERE (SELECT CASE WHEN EXISTS (SELECT 1 FROM %s JOIN %s %s ON "
+			    "(%s)) THEN error('insert collides with a row the branch already shows: use an update, which a delta "
+			    "can record, or delete the row first') ELSE 1 END) = 1;\n",
+			    t.quoted_added, insert_list, t.rows_name, t.branch_image, t.rows_name, t.alias_rows,
+			    t.Match(t.alias_branch, t.alias_rows));
+			result += StringUtil::Format("DROP TABLE %s;", t.rows_name);
+			return result;
+}
+
 string PragmaGit4DataApply(ClientContext &context, const FunctionParameters &parameters) {
 	auto table_name = parameters.values[0].ToString();
 	auto branch_name = parameters.values[1].ToString();
@@ -239,7 +421,6 @@ string PragmaGit4DataApply(ClientContext &context, const FunctionParameters &par
 		throw InvalidInputException("git4data_apply needs at least one statement to apply");
 	}
 
-	auto quoted_source = Git4DataTableSQLName(table_name);
 	auto quoted_added = Git4DataTableSQLName(added_table);
 	auto quoted_removed = Git4DataTableSQLName(removed_table);
 	auto at_clause = FormatGit4DataAtClause(table_name, branch_name, "BRANCH");
@@ -248,48 +429,22 @@ string PragmaGit4DataApply(ClientContext &context, const FunctionParameters &par
 	auto taken = Git4DataScopeColumnNames(context, transaction_manager, table_name, {branch_name});
 	Git4DataAddColumnNames(context, added_table, taken);
 	Git4DataAddColumnNames(context, removed_table, taken);
-	auto rows_name = Git4DataFreeHelperName(context, "g4d_apply_rows", taken);
-	auto keys_name = Git4DataFreeHelperName(context, "g4d_apply_keys", taken);
-	auto alias_rows = Git4DataFreeName("g4d_ar", taken);
-	auto alias_keys = Git4DataFreeName("g4d_ak", taken);
-	auto alias_added = Git4DataFreeName("g4d_aa", taken);
-	auto alias_removed = Git4DataFreeName("g4d_arr", taken);
-	auto alias_branch = Git4DataFreeName("g4d_ab", taken);
-
 	string key_list;
-	string column_list;
 	for (idx_t i = 0; i < key_columns.size(); i++) {
 		if (i > 0) {
 			key_list += ", ";
 		}
 		key_list += KeywordHelper::WriteOptionallyQuoted(key_columns[i]);
 	}
-	for (auto &column : table.GetColumns().Logical()) {
-		if (!column_list.empty()) {
-			column_list += ", ";
-		}
-		column_list += KeywordHelper::WriteOptionallyQuoted(column.Name().GetIdentifierName());
-	}
-	auto match = [&](const string &left_alias, const string &right_alias) {
-		string result;
-		for (auto &key : key_columns) {
-			if (!result.empty()) {
-				result += " AND ";
-			}
-			auto quoted = KeywordHelper::WriteOptionallyQuoted(key);
-			result += StringUtil::Format("%s.%s = %s.%s", left_alias, quoted, right_alias, quoted);
-		}
-		return result;
-	};
-	auto branch_image = StringUtil::Format("(SELECT * FROM %s) %s", at_clause, alias_branch);
-	// a hidden base row stays hidden, and an editing statement never names a key twice in the table that
-	// hides rows: the table is the caller's and may well carry the primary key
-	auto add_removals = [&](const string &from_name, const string &from_alias) {
-		return StringUtil::Format("INSERT INTO %s (%s) SELECT %s FROM %s %s WHERE NOT EXISTS (SELECT 1 FROM %s %s "
-		                          "WHERE %s);\n",
-		                          quoted_removed, key_list, key_list, from_name, from_alias, quoted_removed,
-		                          alias_removed, match(alias_removed, from_alias));
-	};
+	// the names are handed to the translation in the order they were taken: a helper name is registered as
+	// taken when it is asked for, so the order is what keeps them distinct
+	Git4DataApplyTranslation t {table, at_clause, key_list, key_columns, quoted_added, quoted_removed,
+	                            Git4DataFreeHelperName(context, "g4d_apply_rows", taken),
+	                            Git4DataFreeHelperName(context, "g4d_apply_keys", taken),
+	                            Git4DataFreeName("g4d_ar", taken), Git4DataFreeName("g4d_ak", taken),
+	                            Git4DataFreeName("g4d_aa", taken), Git4DataFreeName("g4d_arr", taken),
+	                            Git4DataFreeName("g4d_ab", taken), string()};
+	t.branch_image = StringUtil::Format("(SELECT * FROM %s) %s", t.at_clause, t.alias_branch);
 
 	// the statements read the branch, so their own references to the table are pointed at it before
 	// anything is rendered
@@ -308,163 +463,17 @@ string PragmaGit4DataApply(ClientContext &context, const FunctionParameters &par
 			break;
 		}
 	}
-
 	// Every statement is translated against the same delta, and the whole group is handed back as one
 	// string so the caller's statements land in one transaction: either all of them are recorded or
 	// none is, which is what makes a group a unit of work rather than a sequence of writes.
 	auto translate = [&](SQLStatement &statement) {
 		switch (statement.type) {
-		case StatementType::DELETE_STATEMENT: {
-			auto &node = statement.Cast<DeleteStatement>().node;
-			if (!node->using_clauses.empty()) {
-				throw InvalidInputException("git4data_apply does not take DELETE ... USING: the rows to remove have to "
-				                            "be the branch's own, which a second table is not");
-			}
-			if (!node->returning_list.empty()) {
-				throw InvalidInputException("git4data_apply does not take RETURNING: nothing is written where the rows "
-				                            "would come from");
-			}
-			Git4DataCheckApplyTarget(context, *node->table, table);
-			auto condition = node->condition ? node->condition->ToString() : string();
-			string result =
-			    StringUtil::Format("CREATE OR REPLACE TEMP TABLE %s AS SELECT %s FROM %s%s;\n", rows_name, key_list,
-			                       at_clause, condition.empty() ? string() : " WHERE " + condition);
-			result +=
-			    StringUtil::Format("DELETE FROM %s %s WHERE EXISTS (SELECT 1 FROM %s %s WHERE %s);\n", quoted_added,
-			                       alias_added, rows_name, alias_rows, match(alias_added, alias_rows));
-			result += add_removals(rows_name, alias_rows);
-			result += StringUtil::Format("DROP TABLE %s;", rows_name);
-			return result;
-		}
-		case StatementType::UPDATE_STATEMENT: {
-			auto &node = statement.Cast<UpdateStatement>().node;
-			if (node->from_table) {
-				throw InvalidInputException("git4data_apply does not take UPDATE ... FROM: the rows to change have to "
-				                            "be the branch's own, which a joined table is not");
-			}
-			if (!node->returning_list.empty()) {
-				throw InvalidInputException("git4data_apply does not take RETURNING: nothing is written where the rows "
-				                            "would come from");
-			}
-			Git4DataCheckApplyTarget(context, *node->table, table);
-			auto &set_info = *node->set_info;
-			auto condition = set_info.condition ? set_info.condition->ToString() : string();
-			// the new rows: the branch's own columns, with the assigned ones replaced by what they are
-			// assigned. A row's other columns are the row's own, which is what a SET list means.
-			vector<pair<string, string>> assignments;
-			for (idx_t i = 0; i < set_info.columns.size(); i++) {
-				assignments.emplace_back(set_info.columns[i].GetIdentifierName(), set_info.expressions[i]->ToString());
-			}
-			string new_columns;
-			for (auto &column : table.GetColumns().Logical()) {
-				auto name = column.Name().GetIdentifierName();
-				if (!new_columns.empty()) {
-					new_columns += ", ";
-				}
-				string value;
-				for (auto &assignment : assignments) {
-					if (assignment.first == name) {
-						value = assignment.second;
-						break;
-					}
-				}
-				// every column is named: a SET expression that is a literal or an expression takes its
-				// name from the expression otherwise, and the rows table is joined on its keys -
-				// measured, `SET k = 5` produced a column called "5" and the join could not find the key
-				new_columns += value.empty() ? KeywordHelper::WriteOptionallyQuoted(name)
-				                             : (value + " AS " + KeywordHelper::WriteOptionallyQuoted(name));
-			}
-			string result =
-			    StringUtil::Format("CREATE OR REPLACE TEMP TABLE %s AS SELECT %s FROM %s%s;\n", keys_name, key_list,
-			                       at_clause, condition.empty() ? string() : " WHERE " + condition);
-			result += StringUtil::Format("CREATE OR REPLACE TEMP TABLE %s AS SELECT %s FROM %s%s;\n", rows_name,
-			                             new_columns, at_clause, condition.empty() ? string() : " WHERE " + condition);
-			result +=
-			    StringUtil::Format("DELETE FROM %s %s WHERE EXISTS (SELECT 1 FROM %s %s WHERE %s);\n", quoted_added,
-			                       alias_added, keys_name, alias_keys, match(alias_added, alias_keys));
-			result += add_removals(keys_name, alias_keys);
-			// A key the statement rewrites onto a key the branch already shows is the collision the same
-			// statement against the table itself raises, and here it was a silent wrong answer: measured,
-			// `UPDATE t SET k = 5 WHERE k = 3` with both keys present left the branch showing *two* rows
-			// for k = 5, where the table itself refuses with a duplicate key. Keys the statement is
-			// replacing are not collisions - a row keeping its key, or two rows swapping theirs, is an
-			// ordinary update - so the check asks whether a new key is one the branch shows and the
-			// statement is not rewriting.
-			result += StringUtil::Format(
-			    "INSERT INTO %s SELECT * FROM %s %s WHERE (SELECT CASE WHEN EXISTS (SELECT 1 FROM %s JOIN %s %s ON "
-			    "(%s) WHERE NOT EXISTS (SELECT 1 FROM %s %s WHERE %s)) THEN error('update collides with a row the "
-			    "branch already shows: two rows would carry the same key, which the table itself refuses. Delete "
-			    "the row that key belongs to, or rewrite it to a key the branch does not have') ELSE 1 END) = 1;\n",
-			    quoted_added, rows_name, alias_rows, branch_image, rows_name, alias_rows,
-			    match(alias_branch, alias_rows), keys_name, alias_keys, match(alias_keys, alias_branch));
-			result += StringUtil::Format("DROP TABLE %s;\nDROP TABLE %s;", keys_name, rows_name);
-			return result;
-		}
-		case StatementType::INSERT_STATEMENT: {
-			auto &node = statement.Cast<InsertStatement>().node;
-			if (node->on_conflict_info) {
-				throw InvalidInputException("git4data_apply does not take ON CONFLICT: a branch that keeps its own "
-				                            "changes has no conflict for the base to resolve");
-			}
-			if (!node->returning_list.empty()) {
-				throw InvalidInputException("git4data_apply does not take RETURNING: nothing is written where the rows "
-				                            "would come from");
-			}
-			if (node->default_values) {
-				throw InvalidInputException("git4data_apply does not take DEFAULT VALUES: the defaults are the source "
-				                            "table's, and the table this branch adds rows to is not it");
-			}
-			if (node->column_order != InsertColumnOrder::INSERT_BY_POSITION) {
-				throw InvalidInputException("git4data_apply does not take INSERT ... BY NAME");
-			}
-			if (!node->select_statement) {
-				throw InvalidInputException("git4data_apply needs rows to insert");
-			}
-			// the rows are *for* the table the delta is for, and the statement is translated rather than
-			// executed, so the name it writes is never read again. The target is a qualified name here; the
-			// insert's table reference is not always there.
-			Git4DataCheckApplyTargetTable(context, node->qualified_name, table);
-			// the column list the insert names, or the table's own columns in order when it names none
-			vector<string> insert_columns;
-			for (auto &column : node->columns) {
-				insert_columns.push_back(column.GetIdentifierName());
-			}
-			if (insert_columns.empty()) {
-				for (auto &column : table.GetColumns().Logical()) {
-					insert_columns.push_back(column.Name().GetIdentifierName());
-				}
-			}
-			string insert_list;
-			for (idx_t i = 0; i < insert_columns.size(); i++) {
-				if (i > 0) {
-					insert_list += ", ";
-				}
-				insert_list += KeywordHelper::WriteOptionallyQuoted(insert_columns[i]);
-			}
-			// The rows are landed in a table whose columns are the ones the insert names, in that order, so
-			// the rows can be checked and then added by position. Naming them here rather than aliasing the
-			// select avoids depending on what the parser calls the columns of a VALUES list - it calls them
-			// `valueslist`, measured.
-			string declared;
-			for (auto &name : insert_columns) {
-				auto &column = table.GetColumns().GetColumn(Identifier(name));
-				if (!declared.empty()) {
-					declared += ", ";
-				}
-				declared += KeywordHelper::WriteOptionallyQuoted(name) + " " + column.Type().ToString();
-			}
-			string result = StringUtil::Format("CREATE OR REPLACE TEMP TABLE %s (%s);\n", rows_name, declared);
-			result += StringUtil::Format("INSERT INTO %s (%s) %s;\n", rows_name, insert_list,
-			                             node->select_statement->ToString());
-			result += StringUtil::Format(
-			    "INSERT INTO %s (%s) SELECT * FROM %s WHERE (SELECT CASE WHEN EXISTS (SELECT 1 FROM %s JOIN %s %s ON "
-			    "(%s)) THEN error('insert collides with a row the branch already shows: use an update, which a delta "
-			    "can record, or delete the row first') ELSE 1 END) = 1;\n",
-			    quoted_added, insert_list, rows_name, branch_image, rows_name, alias_rows,
-			    match(alias_branch, alias_rows));
-			result += StringUtil::Format("DROP TABLE %s;", rows_name);
-			return result;
-		}
+		case StatementType::DELETE_STATEMENT:
+			return Git4DataApplyDelete(context, t, statement);
+		case StatementType::UPDATE_STATEMENT:
+			return Git4DataApplyUpdate(context, t, statement);
+		case StatementType::INSERT_STATEMENT:
+			return Git4DataApplyInsert(context, t, statement);
 		default:
 			throw InvalidInputException("git4data_apply takes INSERT, UPDATE and DELETE statements, and this one is "
 			                            "not one of them");
@@ -477,5 +486,4 @@ string PragmaGit4DataApply(ClientContext &context, const FunctionParameters &par
 	}
 	return result;
 }
-
 } // namespace duckdb

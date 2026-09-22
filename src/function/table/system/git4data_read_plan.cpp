@@ -1,3 +1,11 @@
+//===----------------------------------------------------------------------===//
+// Git4Data -- what a reference means: the read plan
+//===----------------------------------------------------------------------===//
+// Resolving a name to the table and the bound a read scans at, the checks a read makes on the way (the source a
+// mapping was made against, the age of a mapping, the columns a delta needs), and the line a branch inherits.
+// Increment 3fu moved it out of git4data_snapshot_scan.cpp, which keeps the scan operator.
+//===----------------------------------------------------------------------===//
+
 #include "duckdb/function/table/git4data_internal.hpp"
 #include "duckdb/storage/git4data_registry.hpp"
 

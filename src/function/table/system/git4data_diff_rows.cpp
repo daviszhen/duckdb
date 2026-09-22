@@ -1,17 +1,8 @@
 //===----------------------------------------------------------------------===//
-// Git4Data -- the diff's keyed rows
+// Git4Data -- the diff's row helpers
 //===----------------------------------------------------------------------===//
-// The machinery a diff pairs two sides with: a row's key as bits, as a hash and as stored values, the blocks
-// those values live in, and the walk that pairs a left row with a right one. Increment 3fm moved it out of
-// git4data_diff.cpp, which keeps the operator; the state type both halves work on is in git4data_internal.hpp.
-//===----------------------------------------------------------------------===//
-
-//===----------------------------------------------------------------------===//
-// Git4Data -- the diff of two references
-//===----------------------------------------------------------------------===//
-// Which rows one reference has that another does not: the diff's bind and its state, the walk that compares the
-// two, and the function that emits the rows. It lived in git4data_snapshot_scan.cpp; increment 3eq moved it here
-// without changing a line of it. What it shares with the read path is declared in git4data_internal.hpp.
+// The primary-key collection, the row comparison and the hash containers the diff walks with. Increment 3fm
+// moved them out of git4data_diff.cpp so that file holds the operator.
 //===----------------------------------------------------------------------===//
 
 #include "duckdb/function/table/system_functions.hpp"

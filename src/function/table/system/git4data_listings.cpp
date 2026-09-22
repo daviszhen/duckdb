@@ -1,11 +1,9 @@
 //===----------------------------------------------------------------------===//
 // Git4Data -- the surfaces that report what the registries hold
 //===----------------------------------------------------------------------===//
-// The listings, the probes and the state row are reads of the same registries the scan reads, but none of them
-// resolves a reference or scans a table's row groups: they answer with rows *about* references, and their binds
-// are independent of the read path. They lived in git4data_snapshot_scan.cpp, where a reader looking for how a
-// branch is read had to walk past them; increment 3en moved them here rather than changing a line of them. Every
-// file under this directory is compiled as one unit, so nothing had to be exposed to make the move.
+// The reference listings and the state row, as table functions a statement can select from - which is what
+// makes their values assertable rather than only printable. Increment 3en moved them out of
+// git4data_snapshot_scan.cpp, and 3fx moved the measurement hooks into git4data_probe_rows.cpp.
 //===----------------------------------------------------------------------===//
 
 #include "duckdb/function/table/system_functions.hpp"

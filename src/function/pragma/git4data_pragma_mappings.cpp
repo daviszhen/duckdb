@@ -1,19 +1,9 @@
 //===----------------------------------------------------------------------===//
-// Git4Data -- the pragmas that make and record a mapping
+// Git4Data -- the pragmas that give a branch a line: materialize, bind, unbind
 //===----------------------------------------------------------------------===//
-// A mapping is what gives a branch a line of its own: a copy the feature made, a table the caller bound, or the
-// two tables a delta records. `materialize`, `unbind` and the three `bind_*` forms are here together because they
-// write the same rows and check the same things; increment 3ff moved them out of git4data_pragmas.cpp without
-// changing a line of them. The registration still lives in that file, which is why these functions are declared
-// in git4data_pragmas.hpp rather than being file-local.
-//===----------------------------------------------------------------------===//
-
-//===----------------------------------------------------------------------===//
-// Git4Data -- the feature's pragmas
-//===----------------------------------------------------------------------===//
-// Moved out of pragma_functions.cpp by increment 3er without changing a line of any of them, apart from taking
-// the feature's `set.AddFunction` lines out of that file's registration and into RegisterGit4DataPragmas below.
-// What they share with the rest of the feature is in git4data_registry.hpp and the read path's own header.
+// `git4data_materialize` copies what a branch reads into a table of its own; `git4data_bind_branch_table` and
+// `git4data_bind_branch_delta` point a branch at a table, or at the two tables a delta lives in;
+// `git4data_unbind` takes that back. The mappings themselves are rows in the registry.
 //===----------------------------------------------------------------------===//
 
 #include "duckdb/function/pragma/pragma_functions.hpp"

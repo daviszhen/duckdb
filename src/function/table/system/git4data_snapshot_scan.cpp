@@ -1,3 +1,10 @@
+//===----------------------------------------------------------------------===//
+// Git4Data -- the scan operator behind a reference read
+//===----------------------------------------------------------------------===//
+// The bind data and the global state of a read, the overlays it applies in order, and the physical scan
+// itself. The resolution it runs on lives in git4data_read_plan.cpp.
+//===----------------------------------------------------------------------===//
+
 #include "duckdb/function/table/system_functions.hpp"
 #include "duckdb/function/table/git4data_internal.hpp"
 #include "duckdb/storage/git4data_registry.hpp"

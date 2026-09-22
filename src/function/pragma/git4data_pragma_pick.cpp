@@ -1,28 +1,9 @@
 //===----------------------------------------------------------------------===//
-// Git4Data -- the pragma that takes one side's change onto a line
+// Git4Data -- `git4data_pick`: one side's change landed in another line
 //===----------------------------------------------------------------------===//
-// `git4data_pick` reads the difference between two references and lands the rows one side has in
-// the other's line, which is why it carries the helpers that point a statement at a scope and keep
-// generated names free. Increment 3fo moved them out of git4data_pragma_lines.cpp, which keeps the
-// merge; the declarations the registration and the merge need are in git4data_pragmas.hpp.
-//===----------------------------------------------------------------------===//
-
-//===----------------------------------------------------------------------===//
-// Git4Data -- the pragmas that reason about two lines
-//===----------------------------------------------------------------------===//
-// pick, apply and merge compare one reference's line against another's, and the helpers they need for that: the
-// scope a statement is pointed at, the comparison a pick builds, the internal reference a merge names its base
-// with, and the shared ancestor a captured line forks from. They lived in git4data_pragmas.cpp with the rest of
-// the feature's pragmas; increment 3et moved them here without changing a line of them, apart from the `static`
-// that a header declaration cannot keep. What they share with that file is in git4data_pragmas.hpp.
-//===----------------------------------------------------------------------===//
-
-//===----------------------------------------------------------------------===//
-// Git4Data -- the feature's pragmas
-//===----------------------------------------------------------------------===//
-// Moved out of pragma_functions.cpp by increment 3er without changing a line of any of them, apart from taking
-// the feature's `set.AddFunction` lines out of that file's registration and into RegisterGit4DataPragmas below.
-// What they share with the rest of the feature is in git4data_registry.hpp and the read path's own header.
+// `PragmaGit4DataPick` and the two helpers every generated statement of the feature is built from:
+// `Git4DataScopeColumnNames`, which is what says no generated alias may collide with a column, and the two
+// name-keepers. Increment 3fo moved them out of git4data_pragma_lines.cpp, which keeps the merge.
 //===----------------------------------------------------------------------===//
 
 #include "duckdb/function/pragma/pragma_functions.hpp"

@@ -1,10 +1,8 @@
 //===----------------------------------------------------------------------===//
 // Git4Data -- the measurement hooks, as rows a statement can select
 //===----------------------------------------------------------------------===//
-// The probes read a table's physical row groups rather than any reference. They answer questions about what a
-// checkpoint kept, which is what the retention instrument asks them, and they share nothing with the reference
-// listings except the plumbing that turns rows into a table function. Increment 3fx moved them out of
-// `git4data_listings.cpp`, which was 755 lines doing three jobs; not a line of them changed.
+// The probes read a table's physical row groups rather than any reference: what a checkpoint kept, which is
+// what the retention instrument asks them. Increment 3fx moved them out of git4data_listings.cpp.
 //===----------------------------------------------------------------------===//
 
 #include "duckdb/function/table/system_functions.hpp"

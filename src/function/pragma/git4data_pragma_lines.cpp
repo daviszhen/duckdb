@@ -1,19 +1,9 @@
 //===----------------------------------------------------------------------===//
-// Git4Data -- the pragmas that reason about two lines
+// Git4Data -- `git4data_merge`: the three-way merge and the base it reads
 //===----------------------------------------------------------------------===//
-// pick, apply and merge compare one reference's line against another's, and the helpers they need for that: the
-// scope a statement is pointed at, the comparison a pick builds, the internal reference a merge names its base
-// with, and the shared ancestor a captured line forks from. They lived in git4data_pragmas.cpp with the rest of
-// the feature's pragmas; increment 3et moved them here without changing a line of them, apart from the `static`
-// that a header declaration cannot keep. What they share with that file is in git4data_pragmas.hpp.
-//===----------------------------------------------------------------------===//
-
-//===----------------------------------------------------------------------===//
-// Git4Data -- the feature's pragmas
-//===----------------------------------------------------------------------===//
-// Moved out of pragma_functions.cpp by increment 3er without changing a line of any of them, apart from taking
-// the feature's `set.AddFunction` lines out of that file's registration and into RegisterGit4DataPragmas below.
-// What they share with the rest of the feature is in git4data_registry.hpp and the read path's own header.
+// The pragma, the comparison it builds rows with, and the helpers that decide which state the two sides parted
+// at - `Git4DataCreateMergeBase`, `Git4DataMergeForkCommit`, `Git4DataSharedSnapshotAncestor`, and the
+// predicate that asks whether an ancestor's copy is still the copy it was given.
 //===----------------------------------------------------------------------===//
 
 #include "duckdb/function/pragma/pragma_functions.hpp"
