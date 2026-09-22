@@ -326,6 +326,21 @@ Git4DataReadPlan ResolveGit4DataReferencePlan(ClientContext &context, DuckTransa
 //! The same resolution for a caller that already knows which kind of reference it holds: the binder decides that
 //! from the clause a statement used, and re-deriving it from the name here would answer `__live__` differently.
 void ResolveGit4DataRead(ClientContext &context, DuckTransactionManager &transaction_manager, const string &table_name, const string &name, Git4DataRefKind kind, Git4DataReadPlan &plan);
+
+// The plumbing every listing is built on: the rows a bind collected, and the cursor that walks them out. Moved
+// here by increment 3fx so that the measurement hooks (`git4data_probe*`) can be a file of their own, the way
+// 3fm moved the diff's state for its helper half. The definitions stay in `git4data_listings.cpp`, which is
+// where the reference listings are.
+struct Git4DataListingBindData : public TableFunctionData {
+	vector<vector<Value>> rows;
+};
+
+struct Git4DataListingState : public GlobalTableFunctionState {
+	idx_t cursor = 0;
+};
+
+unique_ptr<GlobalTableFunctionState> Git4DataListingInit(ClientContext &context, TableFunctionInitInput &input);
+void Git4DataListingScan(ClientContext &context, TableFunctionInput &data_p, DataChunk &output);
 constexpr idx_t Git4DataHashKeysLimit();
 //! A row that has no counterpart on the other side of a diff: the sentinel the comparison walks with.
 constexpr row_t NO_COUNTERPART = -1;

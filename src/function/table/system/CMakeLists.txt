@@ -6,6 +6,7 @@ add_library_unity(
   git4data_read_plan.cpp
   git4data_keys.cpp
   git4data_listings.cpp
+  git4data_probe_rows.cpp
   git4data_diff.cpp
   git4data_diff_rows.cpp
   duckdb_approx_database_count.cpp
