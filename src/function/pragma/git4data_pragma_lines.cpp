@@ -214,6 +214,60 @@ static transaction_t Git4DataMergeForkCommit(DuckTransactionManager &transaction
 	return fork;
 }
 
+//! Whether the ancestor's copy of the source is still the copy it was given. A copy is written by one
+//! `INSERT .. SELECT`, so "untouched" is a shape the storage itself can be asked about: every row group carries
+//! one unchanged insertion, and none of them was made by a later statement.
+static bool Git4DataAncestorCopyUnwritten(ClientContext &context, const string &table_name,
+                                          TableCatalogEntry &storage_table, transaction_t ancestor_pin) {
+	auto &storage_groups = *storage_table.GetStorage().GetRowGroupCollection();
+	// The rows the caller has appended to this copy and not committed are in its local storage, and a copy with
+	// any of them has been written to. Measured: an uncommitted insert into an ancestor's copy left the walk
+	// below saying it was still the copy it was given, so the merge took the ancestor's current line as its base
+	// and both sides looked changed.
+	auto &ancestor_transaction = DuckTransaction::Get(context, storage_table.GetStorage().GetAttached());
+	if (LocalStorage::Get(ancestor_transaction).Find(storage_table.GetStorage())) {
+		return false;
+	}
+	transaction_t copy_commit = 0;
+	for (idx_t i = 0; i < storage_groups.GetRowGroupCount(); i++) {
+		auto row_group = storage_groups.GetRowGroup(NumericCast<int64_t>(i));
+		if (!row_group) {
+			continue;
+		}
+		transaction_t insertion = 0;
+		if (!row_group->OneUnchangedInsertion(insertion)) {
+			return false;
+		}
+		if (i == 0) {
+			copy_commit = insertion;
+		} else if (insertion != copy_commit) {
+			// written in more than one statement, so it is not the copy it was given
+			return false;
+		}
+	}
+	// One unchanged insertion cannot tell an empty copy from one that has had rows inserted since, so ask the
+	// source instead: a branch's table is made from the branch's pinned image, so if the source table held no
+	// rows at that commit then the copy held none either - and a table that holds rows now has been written to.
+	if (storage_groups.GetTotalRows() > 0 || storage_groups.GetRowGroupCount() > 0) {
+		auto &source_table = Git4DataResolveTable(context, table_name);
+		auto &source_groups = *source_table.GetStorage().GetRowGroupCollection();
+		ScanOptions pinned(TransactionData(MAX_TRANSACTION_ID, VisibilityBound::Through(ancestor_pin)));
+		pinned.insert_type = InsertedScanType::ALL_ROWS;
+		pinned.delete_type = DeletedScanType::OMIT_COMMITTED_DELETES;
+		idx_t rows_at_copy = 0;
+		for (idx_t i = 0; i < source_groups.GetRowGroupCount(); i++) {
+			auto row_group = source_groups.GetRowGroup(NumericCast<int64_t>(i));
+			if (row_group) {
+				rows_at_copy += row_group->GetRowCountFor(pinned);
+			}
+		}
+		if (rows_at_copy == 0) {
+			return false;
+		}
+	}
+	return true;
+}
+
 string PragmaGit4DataMerge(ClientContext &context, const FunctionParameters &parameters) {
 	auto table_name = parameters.values[0].ToString();
 	auto left_name = parameters.values[1].ToString();
@@ -360,60 +414,7 @@ string PragmaGit4DataMerge(ClientContext &context, const FunctionParameters &par
 				continue;
 			}
 			auto &storage_table = Git4DataResolveTable(context, storage_entry.storage);
-			auto &storage_groups = *storage_table.GetStorage().GetRowGroupCollection();
-			transaction_t copy_commit = 0;
-			bool unwritten = true;
-			// The rows the caller has appended to this copy and not committed are in its local storage,
-			// and a copy with any of them has been written to. Measured: an uncommitted insert into an
-			// ancestor's copy left the walk below saying it was still the copy it was given, so the merge
-			// took the ancestor's current line as its base and both sides looked changed.
-			auto &ancestor_transaction = DuckTransaction::Get(context, storage_table.GetStorage().GetAttached());
-			if (LocalStorage::Get(ancestor_transaction).Find(storage_table.GetStorage())) {
-				unwritten = false;
-			}
-			for (idx_t i = 0; i < storage_groups.GetRowGroupCount(); i++) {
-				auto row_group = storage_groups.GetRowGroup(NumericCast<int64_t>(i));
-				if (!row_group) {
-					continue;
-				}
-				transaction_t insertion = 0;
-				if (!row_group->OneUnchangedInsertion(insertion)) {
-					unwritten = false;
-					break;
-				}
-				if (i == 0) {
-					copy_commit = insertion;
-				} else if (insertion != copy_commit) {
-					// written in more than one statement, so it is not the copy it was given
-					unwritten = false;
-					break;
-				}
-			}
-			if (unwritten) {
-				// One unchanged insertion cannot tell an empty copy from one that has had rows inserted
-				// since, so ask the source instead: a branch's table is made from the branch's pinned
-				// image, so if the source table held no rows at that commit then the copy held none
-				// either - and a table that holds rows now has been written to.
-				idx_t rows_at_copy = 0;
-				if (storage_groups.GetTotalRows() > 0 || storage_groups.GetRowGroupCount() > 0) {
-					auto &source_table = Git4DataResolveTable(context, table_name);
-					auto &source_groups = *source_table.GetStorage().GetRowGroupCollection();
-					ScanOptions pinned(
-					    TransactionData(MAX_TRANSACTION_ID, VisibilityBound::Through(ancestor_branch.pin)));
-					pinned.insert_type = InsertedScanType::ALL_ROWS;
-					pinned.delete_type = DeletedScanType::OMIT_COMMITTED_DELETES;
-					for (idx_t i = 0; i < source_groups.GetRowGroupCount(); i++) {
-						auto row_group = source_groups.GetRowGroup(NumericCast<int64_t>(i));
-						if (row_group) {
-							rows_at_copy += row_group->GetRowCountFor(pinned);
-						}
-					}
-					if (rows_at_copy == 0) {
-						unwritten = false;
-					}
-				}
-			}
-			if (!unwritten) {
+			if (!Git4DataAncestorCopyUnwritten(context, table_name, storage_table, ancestor_branch.pin)) {
 				// Written to since: what the table holds now is the line this branch started from plus its own
 				// changes, and reading *it* as the base would apply those changes backwards. Where the two
 				// sides parted depends on when they forked: a side forked *after* the ancestor had a line of
