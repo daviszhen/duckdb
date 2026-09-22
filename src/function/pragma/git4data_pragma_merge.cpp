@@ -1,9 +1,12 @@
 //===----------------------------------------------------------------------===//
 // Git4Data -- `git4data_merge`: the three-way merge and the base it reads
 //===----------------------------------------------------------------------===//
-// The pragma, the comparison it builds rows with, and the helpers that decide which state the two sides parted
-// at - `Git4DataCreateMergeBase`, `Git4DataMergeForkCommit`, `Git4DataSharedSnapshotAncestor`, and the
-// predicate that asks whether an ancestor's copy is still the copy it was given.
+// The pragma and the helpers that are its own: the state the two sides parted at
+// (`Git4DataMergeBaseOf`, `Git4DataSharedSnapshotAncestor`, `Git4DataMergeForkCommit`,
+// `Git4DataCreateMergeBase`, and the predicate that asks whether an ancestor's copy is still the copy it was
+// given). The row comparison the conflict test uses is shared with `git4data_pick` and lives in
+// git4data_pragma_pick.cpp. The file was called git4data_pragma_lines.cpp until 3gb, a name from when it held
+// pick, apply and merge together.
 //===----------------------------------------------------------------------===//
 
 #include "duckdb/function/pragma/pragma_functions.hpp"
@@ -76,21 +79,6 @@
 namespace duckdb {
 
 
-
-//! The columns of one image compared against the other's, for telling a real merge conflict from two
-//! branches that made the same change.
-string BuildGit4DataRowComparison(TableCatalogEntry &table, const string &left_alias,
-                                         const string &right_alias) {
-	string result;
-	for (auto &column : table.GetColumns().Logical()) {
-		if (!result.empty()) {
-			result += " AND ";
-		}
-		auto name = KeywordHelper::WriteOptionallyQuoted(column.Name().GetIdentifierName());
-		result += StringUtil::Format("%s.%s IS NOT DISTINCT FROM %s.%s", left_alias, name, right_alias, name);
-	}
-	return result;
-}
 
 //! The snapshot a merge between these two lines should use as its base, when one of them was forked from a
 //! *captured line*. Such a branch's parent is a snapshot rather than a branch, so the branch-ancestor walk

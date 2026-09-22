@@ -3,8 +3,8 @@
 //===----------------------------------------------------------------------===//
 // `PragmaGit4DataApply` translates INSERT, UPDATE and DELETE into edits of the two tables that hold a delta
 // branch's line, and the helpers it needs are here with it: the checks that the statement names the branch's
-// table directly, and the walkers that point a parsed query at a reference. Increment 3fo moved it out of
-// git4data_pragma_lines.cpp, which keeps the merge.
+// table directly, and the walkers that point a parsed query at a reference. Increment 3fo moved it out of the
+// file that keeps the merge, which 3gb renamed to `git4data_pragma_merge.cpp` for what it holds.
 //===----------------------------------------------------------------------===//
 
 #include "duckdb/function/pragma/pragma_functions.hpp"

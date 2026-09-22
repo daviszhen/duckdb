@@ -1,9 +1,11 @@
 //===----------------------------------------------------------------------===//
 // Git4Data -- `git4data_pick`: one side's change landed in another line
 //===----------------------------------------------------------------------===//
-// `PragmaGit4DataPick` and the two helpers every generated statement of the feature is built from:
-// `Git4DataScopeColumnNames`, which is what says no generated alias may collide with a column, and the two
-// name-keepers. Increment 3fo moved them out of git4data_pragma_lines.cpp, which keeps the merge.
+// `PragmaGit4DataPick` and the helpers every generated statement of the feature is built from:
+// `Git4DataScopeColumnNames`, which is what says no generated alias may collide with a column, the two
+// name-keepers, and the comparison that tells a real conflict from two sides that changed the same way.
+// Increment 3fo moved them out of the file that keeps the merge, which 3gb renamed to
+// `git4data_pragma_merge.cpp` for what it holds.
 //===----------------------------------------------------------------------===//
 
 #include "duckdb/function/pragma/pragma_functions.hpp"
@@ -128,6 +130,21 @@ string Git4DataFreeHelperName(ClientContext &context, const string &base, const 
 		name += "_";
 	}
 	return name;
+}
+
+//! The columns of one image compared against the other's, for telling a real merge conflict from two
+//! branches that made the same change.
+string BuildGit4DataRowComparison(TableCatalogEntry &table, const string &left_alias,
+                                         const string &right_alias) {
+	string result;
+	for (auto &column : table.GetColumns().Logical()) {
+		if (!result.empty()) {
+			result += " AND ";
+		}
+		auto name = KeywordHelper::WriteOptionallyQuoted(column.Name().GetIdentifierName());
+		result += StringUtil::Format("%s.%s IS NOT DISTINCT FROM %s.%s", left_alias, name, right_alias, name);
+	}
+	return result;
 }
 
 string PragmaGit4DataPick(ClientContext &context, const FunctionParameters &parameters) {
