@@ -530,12 +530,63 @@ bool HoldsSubquery(Expression &expr) {
 	return found;
 }
 
+//! Whether anything in this sub-tree's expressions holds a sub-query. The rewrite moves whole
+//! sub-trees into E and re-binds the columns around them, and a sub-query's own binder does not
+//! follow that, so any of them makes the shape unsafe to take.
+bool PlanHoldsSubquery(LogicalOperator &op) {
+	for (auto &expr : op.expressions) {
+		if (HoldsSubquery(*expr)) {
+			return true;
+		}
+	}
+	if (op.type == LogicalOperatorType::LOGICAL_FILTER || op.type == LogicalOperatorType::LOGICAL_PROJECTION) {
+		for (auto &expr : op.expressions) {
+			if (HoldsSubquery(*expr)) {
+				return true;
+			}
+		}
+	}
+	if (op.type == LogicalOperatorType::LOGICAL_COMPARISON_JOIN ||
+	    op.type == LogicalOperatorType::LOGICAL_DELIM_JOIN ||
+	    op.type == LogicalOperatorType::LOGICAL_ASOF_JOIN) {
+		auto &join = op.Cast<LogicalComparisonJoin>();
+		for (auto &condition : join.conditions) {
+			if (condition.IsComparison()) {
+				if (HoldsSubquery(condition.GetLHS()) || HoldsSubquery(condition.GetRHS())) {
+					return true;
+				}
+			} else if (HoldsSubquery(condition.GetJoinExpression())) {
+				return true;
+			}
+		}
+	}
+	if (op.type == LogicalOperatorType::LOGICAL_AGGREGATE_AND_GROUP_BY) {
+		auto &aggregate = op.Cast<LogicalAggregate>();
+		for (auto &group : aggregate.groups) {
+			if (HoldsSubquery(*group)) {
+				return true;
+			}
+		}
+	}
+	for (auto &child : op.children) {
+		if (PlanHoldsSubquery(*child)) {
+			return true;
+		}
+	}
+	return false;
+}
+
 bool ConditionsHoldSubquery(LogicalComparisonJoin &join) {
 	for (auto &condition : join.conditions) {
-		if (!condition.IsComparison()) {
+		if (condition.IsComparison()) {
+			if (HoldsSubquery(condition.GetLHS()) || HoldsSubquery(condition.GetRHS())) {
+				return true;
+			}
 			continue;
 		}
-		if (HoldsSubquery(condition.GetLHS()) || HoldsSubquery(condition.GetRHS())) {
+		// A sub-query arrives as a single-expression condition (`<`, with the sub-query on one
+		// side), which is exactly the case the comparison accessors refuse to look at.
+		if (HoldsSubquery(condition.GetJoinExpression())) {
 			return true;
 		}
 	}
@@ -653,8 +704,9 @@ bool FindSegmentShape(LogicalComparisonJoin &join, SegmentShape &shape) {
 				Declined("the two sides have different filters");
 				continue;
 			}
-			if (ConditionsHoldSubquery(join)) {
-				Declined("a condition holds a sub-query, which the rewrite cannot re-bind");
+			if (ConditionsHoldSubquery(join) || PlanHoldsSubquery(*join.children[relation_index]) ||
+			    PlanHoldsSubquery(*join.children[aggregate_index])) {
+				Declined("a sub-query would have to be re-bound by the rewrite");
 				continue;
 			}
 			// An aggregate side that is itself a join is only handled by the pushed-down
