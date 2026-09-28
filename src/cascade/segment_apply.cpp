@@ -805,6 +805,7 @@ unique_ptr<LogicalOperator> BuildSegmentApply(LogicalComparisonJoin &join, const
 	// run: this fork plans a join whose output feeds another join's build, and re-running that
 	// per segment is not something the driver can order.
 	unique_ptr<LogicalOperator> pushed_side;
+	bool pushed = false;
 	vector<JoinCondition> pushed_conditions;
 	if (aggregate_side->type == LogicalOperatorType::LOGICAL_COMPARISON_JOIN) {
 		auto &inner = aggregate_side->Cast<LogicalComparisonJoin>();
@@ -814,6 +815,7 @@ unique_ptr<LogicalOperator> BuildSegmentApply(LogicalComparisonJoin &join, const
 			if (first_holds_aggregate != second_holds_aggregate) {
 				idx_t kept = first_holds_aggregate ? 0 : 1;
 				pushed_side = std::move(inner.children[1 - kept]);
+				pushed = true;
 				auto kept_side = std::move(inner.children[kept]);
 				for (auto &condition : inner.conditions) {
 					pushed_conditions.push_back(condition.Copy());
@@ -935,7 +937,7 @@ unique_ptr<LogicalOperator> BuildSegmentApply(LogicalComparisonJoin &join, const
 	for (idx_t i = 0; i < relation_bindings.size(); i++) {
 		relation_map.emplace_back(relation_bindings[i], segment_bindings[i]);
 	}
-	if (pushed_side) {
+	if (pushed) {
 		// ... and the pushed side's columns are read from the segment as well.
 		auto pushed_bindings = segmented->children[1]->GetColumnBindings();
 		idx_t first_width = segmented->children[0]->GetColumnBindings().size();
@@ -962,8 +964,20 @@ unique_ptr<LogicalOperator> BuildSegmentApply(LogicalComparisonJoin &join, const
 		}
 		auto left = condition.GetLHS().Copy();
 		auto right = condition.GetRHS().Copy();
+		if (SegmentDebug()) {
+			fprintf(stderr, "[segment apply] pushed condition LHS=%s RHS=%s\n", left->ToString().c_str(),
+			        right->ToString().c_str());
+		}
 		SegmentRewriteExpressionBindings(left, relation_map);
 		SegmentRewriteExpressionBindings(right, relation_map);
+		if (SegmentDebug()) {
+			ExpressionIterator::VisitExpression<BoundColumnRefExpression>(
+			    *right, [&](const BoundColumnRefExpression &colref) {
+				    fprintf(stderr, "[segment apply]   pushed RHS after [%llu.%llu]\n",
+				            (unsigned long long)colref.Binding().table_index.index,
+				            (unsigned long long)colref.Binding().column_index.GetIndexUnsafe());
+			    });
+		}
 		remaining.push_back(
 		    BoundComparisonExpression::Create(condition.GetComparisonType(), std::move(left), std::move(right)));
 	}
@@ -972,7 +986,7 @@ unique_ptr<LogicalOperator> BuildSegmentApply(LogicalComparisonJoin &join, const
 		remaining.push_back(std::move(filter));
 	}
 	for (idx_t i = 0; i < join.conditions.size(); i++) {
-		if (i == shape.key_condition || pushed_side) {
+		if (i == shape.key_condition || pushed) {
 			// With a pushed side, this join's own conditions are the pushed join's conditions.
 			continue;
 		}
@@ -984,6 +998,14 @@ unique_ptr<LogicalOperator> BuildSegmentApply(LogicalComparisonJoin &join, const
 		auto right = condition.GetRHS().Copy();
 		SegmentRewriteExpressionBindings(left, relation_map);
 		SegmentRewriteExpressionBindings(right, relation_map);
+		if (SegmentDebug()) {
+			ExpressionIterator::VisitExpression<BoundColumnRefExpression>(
+			    *left, [&](const BoundColumnRefExpression &colref) {
+				    fprintf(stderr, "[segment apply]   after  [%llu.%llu]\n",
+				            (unsigned long long)colref.Binding().table_index.index,
+				            (unsigned long long)colref.Binding().column_index.GetIndexUnsafe());
+			    });
+		}
 		remaining.push_back(
 		    BoundComparisonExpression::Create(condition.GetComparisonType(), std::move(left), std::move(right)));
 	}
