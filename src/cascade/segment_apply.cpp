@@ -10,6 +10,7 @@
 #include "duckdb/common/printer.hpp"
 #include "duckdb/planner/binder.hpp"
 #include "duckdb/planner/expression/bound_columnref_expression.hpp"
+#include "duckdb/planner/expression/bound_subquery_expression.hpp"
 #include "duckdb/planner/expression/bound_comparison_expression.hpp"
 #include "duckdb/planner/operator/logical_aggregate.hpp"
 #include "duckdb/planner/operator/logical_any_join.hpp"
@@ -519,6 +520,33 @@ bool MapAggregateColumns(LogicalOperator &relation, LogicalAggregate &aggregate,
 }
 
 //! The shape section 3.4.1 looks for, resolved to the two sides of the join.
+//! Whether an expression holds a sub-query. Those carry their own binder and are planned
+//! later, so moving them around a rewrite that re-binds the columns they were correlated
+//! with is not something this rule can do - it declines instead.
+bool HoldsSubquery(Expression &expr) {
+	bool found = false;
+	ExpressionIterator::VisitExpression<BoundSubqueryExpression>(
+	    expr, [&](const BoundSubqueryExpression &) { found = true; });
+	return found;
+}
+
+bool ConditionsHoldSubquery(LogicalComparisonJoin &join) {
+	for (auto &condition : join.conditions) {
+		if (!condition.IsComparison()) {
+			continue;
+		}
+		if (HoldsSubquery(condition.GetLHS()) || HoldsSubquery(condition.GetRHS())) {
+			return true;
+		}
+	}
+	// A relation in between may hold sub-queries of its own, and those become E's filter.
+	if (join.children.size() == 2 && join.children[1] &&
+	    join.children[1]->type == LogicalOperatorType::LOGICAL_COMPARISON_JOIN) {
+		return ConditionsHoldSubquery(join.children[1]->Cast<LogicalComparisonJoin>());
+	}
+	return false;
+}
+
 //! Whether BuildSegmentApply will push a relation below the SegmentApply for this aggregate
 //! side: the aggregate sits in one child of an inner join and the other child is the relation
 //! in between (TPC-H Q17's part).
@@ -623,6 +651,10 @@ bool FindSegmentShape(LogicalComparisonJoin &join, SegmentShape &shape) {
 			}
 			if (!SameFilterSet(relation_filters, aggregate_filters)) {
 				Declined("the two sides have different filters");
+				continue;
+			}
+			if (ConditionsHoldSubquery(join)) {
+				Declined("a condition holds a sub-query, which the rewrite cannot re-bind");
 				continue;
 			}
 			// An aggregate side that is itself a join is only handled by the pushed-down
