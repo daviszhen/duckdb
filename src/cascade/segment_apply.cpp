@@ -728,12 +728,47 @@ bool SegmentPassesBindingsThrough(const LogicalOperator &op) {
 }
 
 //! Build the SegmentApply for a shape that FindSegmentShape accepted.
+bool InBindings(const vector<ColumnBinding> &bindings, const ColumnBinding &binding);
+
+//! The bindings a parameter leaf of the given width exposes.
+vector<ColumnBinding> ParameterBindings(TableIndex table_index, idx_t column_count) {
+	vector<ColumnBinding> result;
+	for (idx_t i = 0; i < column_count; i++) {
+		result.emplace_back(table_index, ProjectionIndex(i));
+	}
+	return result;
+}
+
 unique_ptr<LogicalOperator> BuildSegmentApply(LogicalComparisonJoin &join, const SegmentShape &shape, Binder &binder,
                                              BindingExport &exports) {
 	auto relation = std::move(join.children[shape.relation_child]);
 	auto aggregate_side = std::move(join.children[shape.aggregate_child]);
 	auto aggregate = FindAggregate(*aggregate_side);
 	D_ASSERT(aggregate);
+
+	// Figure 7 of the paper: when the two instances are equated only *through* another relation
+	// (TPC-H Q17's part), that relation is pushed below the SegmentApply - E then reads only the
+	// rows the join kept. It also leaves E with a single join, which is the shape the driver can
+	// run: this fork plans a join whose output feeds another join's build, and re-running that
+	// per segment is not something the driver can order.
+	unique_ptr<LogicalOperator> pushed_side;
+	vector<JoinCondition> pushed_conditions;
+	if (aggregate_side->type == LogicalOperatorType::LOGICAL_COMPARISON_JOIN) {
+		auto &inner = aggregate_side->Cast<LogicalComparisonJoin>();
+		if (inner.join_type == JoinType::INNER && inner.children.size() == 2) {
+			auto first_holds_aggregate = FindAggregate(*inner.children[0]) != nullptr;
+			auto second_holds_aggregate = FindAggregate(*inner.children[1]) != nullptr;
+			if (first_holds_aggregate != second_holds_aggregate) {
+				idx_t kept = first_holds_aggregate ? 0 : 1;
+				pushed_side = std::move(inner.children[1 - kept]);
+				auto kept_side = std::move(inner.children[kept]);
+				for (auto &condition : inner.conditions) {
+					pushed_conditions.push_back(condition.Copy());
+				}
+				aggregate_side = std::move(kept_side);
+			}
+		}
+	}
 
 	// The segmented side may have to be widened first: the binder narrows its scan to what the
 	// query references above, and E reads the segment through that same column list.
@@ -742,24 +777,93 @@ unique_ptr<LogicalOperator> BuildSegmentApply(LogicalComparisonJoin &join, const
 	}
 	relation->ResolveOperatorTypes();
 	auto relation_bindings = relation->GetColumnBindings();
+	auto relation_ptr = relation.get();
 
-	// The parameter is a table-valued one - a *set* of rows - and E reads it twice: once as
-	// the aggregate's input and once as the segment whose rows are joined with that
-	// aggregate's result, exactly as Figure 7 of the paper shows LINEITEM in both places.
-	// Each use is its own scan of the same materialized segment, so each gets its own
-	// bindings; the driver binds the segment to all of them before E runs.
+	// The parameter is a table-valued one - a *set* of rows - and E reads it twice: once as the
+	// aggregate's input and once as the segment whose rows are joined with that aggregate's
+	// result, exactly as Figure 7 of the paper shows LINEITEM in both places. Each use is its
+	// own scan of the same materialized segment, so each gets its own bindings; the driver binds
+	// the segment to all of them before E runs.
 	auto aggregate_index = binder.GenerateTableIndex();
-	auto aggregate_parameter = make_uniq<LogicalSegmentParameterGet>(aggregate_index, relation->types);
-	auto aggregate_parameter_bindings = aggregate_parameter->GetColumnBindings();
-
 	auto segment_index = binder.GenerateTableIndex();
-	auto segment = make_uniq<LogicalSegmentParameterGet>(segment_index, relation->types);
-	auto segment_bindings = segment->GetColumnBindings();
 
-	// Repoint the aggregate at the segment. Everything it reads has to be a column of R,
-	// which MapAggregateColumns established before we got here.
+	// Push the intermediate relation below, if the shape came with one: the segmented relation
+	// becomes R joined with it, and the segmenting columns grow by its key - one row of R can
+	// match several rows of that relation, and each of those copies needs a segment of its own.
+	unique_ptr<LogicalOperator> segmented = std::move(relation);
+	vector<idx_t> pushed_key_positions;
+	vector<LogicalType> pushed_key_types;
+	vector<unique_ptr<Expression>> pushed_filters;
+	if (pushed_side) {
+		pushed_side->ResolveOperatorTypes();
+		auto pushed_join = make_uniq<LogicalComparisonJoin>(JoinType::INNER);
+		pushed_join->children.push_back(std::move(segmented));
+		pushed_join->children.push_back(std::move(pushed_side));
+		pushed_join->ResolveOperatorTypes();
+		idx_t first_width = pushed_join->children[0]->GetColumnBindings().size();
+		auto other_bindings = pushed_join->children[1]->GetColumnBindings();
+		auto other_key = CascadeSideKey(*pushed_join->children[1]);
+		if (other_key.empty()) {
+			throw InternalException("cascade: the relation pushed below a SegmentApply has no key");
+		}
+		for (auto &key_binding : other_key) {
+			for (idx_t i = 0; i < other_bindings.size(); i++) {
+				if (other_bindings[i] == key_binding) {
+					pushed_key_positions.push_back(first_width + i);
+					pushed_key_types.push_back(pushed_join->children[1]->types[i]);
+					break;
+				}
+			}
+		}
+		// The conditions of the join being replaced that only mention R and the pushed side are
+		// enforced by this new join; the one that ties R to the aggregate is implied by the
+		// segment's key join below, and anything else moves into E.
+		for (idx_t i = 0; i < join.conditions.size(); i++) {
+			if (i == shape.key_condition) {
+				continue;
+			}
+			auto &condition = join.conditions[i];
+			if (!condition.IsComparison()) {
+				throw InternalException("cascade: SegmentApply on a non-comparison join condition");
+			}
+			auto left = condition.GetLHS().Copy();
+			auto right = condition.GetRHS().Copy();
+			vector<ColumnBinding> allowed = relation_bindings;
+			for (auto &binding : other_bindings) {
+				allowed.push_back(binding);
+			}
+			bool local = true;
+			auto check = [&](const Expression &expr) {
+				ExpressionIterator::VisitExpression<BoundColumnRefExpression>(
+				    expr, [&](const BoundColumnRefExpression &colref) {
+					    if (!InBindings(allowed, colref.Binding())) {
+						    local = false;
+					    }
+				    });
+			};
+			check(*left);
+			check(*right);
+			if (local) {
+				pushed_join->conditions.push_back(
+				    JoinCondition(std::move(left), std::move(right), condition.GetComparisonType()));
+			} else {
+				pushed_filters.push_back(
+				    BoundComparisonExpression::Create(condition.GetComparisonType(), std::move(left), std::move(right)));
+			}
+		}
+		pushed_join->ResolveOperatorTypes();
+		segmented = std::move(pushed_join);
+	}
+	segmented->ResolveOperatorTypes();
+	auto parameter_types = segmented->types;
+	auto aggregate_parameter_bindings = ParameterBindings(aggregate_index, parameter_types.size());
+	auto segment_bindings = ParameterBindings(segment_index, parameter_types.size());
+
+	// Repoint the aggregate at the segment. Everything it reads has to be a column of R, which
+	// MapAggregateColumns checks; the segment may be R joined with the pushed side, and R's
+	// columns keep their positions, so nothing inside the aggregate changes.
 	BindingExport aggregate_input_map;
-	if (!MapAggregateColumns(*relation, *aggregate, aggregate_parameter_bindings, aggregate_input_map)) {
+	if (!MapAggregateColumns(*relation_ptr, *aggregate, aggregate_parameter_bindings, aggregate_input_map)) {
 		throw InternalException("cascade: SegmentApply lost the relation's columns");
 	}
 	for (auto &expr : aggregate->groups) {
@@ -768,6 +872,7 @@ unique_ptr<LogicalOperator> BuildSegmentApply(LogicalComparisonJoin &join, const
 	for (auto &expr : aggregate->expressions) {
 		SegmentRewriteExpressionBindings(expr, aggregate_input_map);
 	}
+	auto aggregate_parameter = make_uniq<LogicalSegmentParameterGet>(aggregate_index, parameter_types);
 	aggregate->children[0] = std::move(aggregate_parameter);
 
 	// E is `sigma_{q'}( S join_{A} AGG[S] )`: the key equality keeps NULL keys from matching
@@ -777,19 +882,45 @@ unique_ptr<LogicalOperator> BuildSegmentApply(LogicalComparisonJoin &join, const
 	for (idx_t i = 0; i < relation_bindings.size(); i++) {
 		relation_map.emplace_back(relation_bindings[i], segment_bindings[i]);
 	}
+	if (pushed_side) {
+		// ... and the pushed side's columns are read from the segment as well.
+		auto pushed_bindings = segmented->children[1]->GetColumnBindings();
+		idx_t first_width = segmented->children[0]->GetColumnBindings().size();
+		for (idx_t i = 0; i < pushed_bindings.size(); i++) {
+			relation_map.emplace_back(pushed_bindings[i], segment_bindings[first_width + i]);
+		}
+	}
 	auto key_join = make_uniq<LogicalComparisonJoin>(JoinType::INNER);
 	auto key_lhs = make_uniq<BoundColumnRefExpression>(shape.relation_key_type,
 	                                                  segment_bindings[shape.relation_key_position]);
 	auto key_rhs = make_uniq<BoundColumnRefExpression>(shape.aggregate_key_type, shape.aggregate_key);
 	key_join->conditions.emplace_back(std::move(key_lhs), std::move(key_rhs), ExpressionType::COMPARE_EQUAL);
-	key_join->children.push_back(std::move(segment));
+	key_join->children.push_back(make_uniq<LogicalSegmentParameterGet>(segment_index, parameter_types));
 	key_join->children.push_back(std::move(aggregate_side));
 	key_join->ResolveOperatorTypes();
 
 	unique_ptr<LogicalOperator> segment_body = std::move(key_join);
 	vector<unique_ptr<Expression>> remaining;
+	// The join that was pushed below keeps its own predicates: they compare the pushed side (now
+	// a column of the segment) with the aggregate.
+	for (auto &condition : pushed_conditions) {
+		if (!condition.IsComparison()) {
+			throw InternalException("cascade: SegmentApply on a non-comparison join condition");
+		}
+		auto left = condition.GetLHS().Copy();
+		auto right = condition.GetRHS().Copy();
+		SegmentRewriteExpressionBindings(left, relation_map);
+		SegmentRewriteExpressionBindings(right, relation_map);
+		remaining.push_back(
+		    BoundComparisonExpression::Create(condition.GetComparisonType(), std::move(left), std::move(right)));
+	}
+	for (auto &filter : pushed_filters) {
+		SegmentRewriteExpressionBindings(filter, relation_map);
+		remaining.push_back(std::move(filter));
+	}
 	for (idx_t i = 0; i < join.conditions.size(); i++) {
-		if (i == shape.key_condition) {
+		if (i == shape.key_condition || pushed_side) {
+			// With a pushed side, this join's own conditions are the pushed join's conditions.
 			continue;
 		}
 		auto &condition = join.conditions[i];
@@ -810,19 +941,31 @@ unique_ptr<LogicalOperator> BuildSegmentApply(LogicalComparisonJoin &join, const
 		segment_body = std::move(filter);
 	}
 
-	// The SegmentApply itself: R is segmented, E is evaluated once per segment, and the
-	// output leads with the segmenting columns.
+	// The SegmentApply itself: R (joined with the pushed side, if there was one) is segmented, E
+	// is evaluated once per segment, and the output leads with the segmenting columns.
 	vector<idx_t> segment_positions {shape.relation_key_position};
 	vector<LogicalType> segment_types {shape.relation_key_type};
+	for (idx_t i = 0; i < pushed_key_positions.size(); i++) {
+		segment_positions.push_back(pushed_key_positions[i]);
+		segment_types.push_back(pushed_key_types[i]);
+	}
 	auto segment_apply = make_uniq<LogicalSegmentApply>(std::move(segment_positions), std::move(segment_types));
-	segment_apply->children.push_back(std::move(relation));
+	segment_apply->children.push_back(std::move(segmented));
 	segment_apply->children.push_back(std::move(segment_body));
 	segment_apply->ResolveOperatorTypes();
 
-	// The columns of R now come from the segment E joins with, which is the copy that E
-	// exposes; the aggregate reads the other copy.
+	// The columns of R (and of the pushed side) now come from the segment E joins with, which is
+	// the copy that E exposes; the aggregate reads the other copy.
 	for (idx_t i = 0; i < relation_bindings.size(); i++) {
 		exports.emplace_back(relation_bindings[i], segment_bindings[i]);
+	}
+	if (segment_apply->children[0]->type == LogicalOperatorType::LOGICAL_COMPARISON_JOIN) {
+		auto &pushed_join = segment_apply->children[0]->Cast<LogicalComparisonJoin>();
+		auto pushed_bindings = pushed_join.children[1]->GetColumnBindings();
+		idx_t first_width = pushed_join.children[0]->GetColumnBindings().size();
+		for (idx_t i = 0; i < pushed_bindings.size(); i++) {
+			exports.emplace_back(pushed_bindings[i], segment_bindings[first_width + i]);
+		}
 	}
 	return std::move(segment_apply);
 }
