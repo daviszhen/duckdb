@@ -471,10 +471,6 @@ bool FindSegmentShape(LogicalComparisonJoin &join, SegmentShape &shape) {
 		Declined("not an inner join of two children");
 		return false;
 	}
-	if (!join.left_projection_map.empty() || !join.right_projection_map.empty()) {
-		Declined("projection map on one side");
-		return false;
-	}
 	for (idx_t condition_index = 0; condition_index < join.conditions.size(); condition_index++) {
 		auto &condition = join.conditions[condition_index];
 		if (!condition.IsComparison() || condition.GetComparisonType() != ExpressionType::COMPARE_EQUAL) {
@@ -886,8 +882,7 @@ void CollectParameters(LogicalOperator &op, vector<reference<LogicalSegmentParam
 
 unique_ptr<LogicalOperator> PushJoinBelowSegmentApply(LogicalComparisonJoin &join, idx_t segment_side, Binder &binder,
                                                       BindingExport &exports) {
-	if (join.join_type != JoinType::INNER || !join.left_projection_map.empty() ||
-	    !join.right_projection_map.empty()) {
+	if (join.join_type != JoinType::INNER) {
 		return nullptr;
 	}
 	auto &segment_apply = join.children[segment_side]->Cast<LogicalSegmentApply>();
