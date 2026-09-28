@@ -127,6 +127,10 @@ void LogicalOperatorDeepCopy::VisitOperator(LogicalOperator &op) {
 		ReplaceTableIndex<LogicalDelimGet>(op);
 		break;
 	}
+	case LogicalOperatorType::LOGICAL_SEGMENT_PARAMETER_GET: {
+		ReplaceTableIndex<LogicalSegmentParameterGet>(op);
+		break;
+	}
 	case LogicalOperatorType::LOGICAL_EXPRESSION_GET: {
 		ReplaceTableIndex<LogicalExpressionGet>(op);
 		break;

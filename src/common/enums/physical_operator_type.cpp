@@ -133,6 +133,12 @@ string PhysicalOperatorToString(PhysicalOperatorType type) {
 		return "CREATE_SECRET";
 	case PhysicalOperatorType::RECURSIVE_KEY_JOIN:
 		return "RECURSIVE_KEY_JOIN";
+	case PhysicalOperatorType::SEGMENT_APPLY:
+		return "SEGMENT_APPLY";
+	case PhysicalOperatorType::SEGMENT_PARAMETER_SCAN:
+		return "SEGMENT_PARAMETER_SCAN";
+	case PhysicalOperatorType::SEGMENT_COLLECTOR:
+		return "SEGMENT_COLLECTOR";
 	case PhysicalOperatorType::MERGE_ACTION_SOURCE:
 		return "MERGE_ACTION_SOURCE";
 	case PhysicalOperatorType::DROP:

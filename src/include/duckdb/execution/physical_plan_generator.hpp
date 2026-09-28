@@ -20,6 +20,9 @@
 #include "duckdb/common/unordered_set.hpp"
 
 namespace duckdb {
+
+class LogicalSegmentApply;
+class LogicalSegmentParameterGet;
 class ClientContext;
 class ColumnDataCollection;
 class PipelineBroadcastExchange;
@@ -188,6 +191,9 @@ protected:
 	PhysicalOperator &PlanAsOfJoin(LogicalComparisonJoin &op);
 	PhysicalOperator &PlanComparisonJoin(LogicalComparisonJoin &op);
 	PhysicalOperator &PlanDelimJoin(LogicalComparisonJoin &op);
+	//! Section 3.4 SegmentApply: partition R, then evaluate E once per segment.
+	PhysicalOperator &CreatePlan(LogicalSegmentApply &op);
+	PhysicalOperator &CreatePlan(LogicalSegmentParameterGet &op);
 	PhysicalOperator &ExtractAggregateExpressions(PhysicalOperator &child, vector<unique_ptr<Expression>> &expressions,
 	                                              vector<unique_ptr<Expression>> &groups,
 	                                              optional_ptr<vector<GroupingSet>> grouping_sets);

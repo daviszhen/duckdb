@@ -93,7 +93,15 @@ unique_ptr<LogicalOperator> CascadeOptimizer::Optimize(unique_ptr<LogicalOperato
 		plan = pusher.Push(std::move(plan));
 	}
 
-	// Section 3.4.1: report the SegmentApply alternatives the plan offers. They are the
+	// Section 3.4.1: introduce the SegmentApply alternatives. Rows whose value in the
+	// segmenting column differs can never match, so the relation can be partitioned and the
+	// parameterized side evaluated once per segment instead of once for everything.
+	if (CascadeConfig::BuildSegmentApply()) {
+		plan = BuildSegmentApplyAlternatives(std::move(plan), binder);
+	}
+
+	// ... and report the alternatives that are left, i.e. the shapes this rule did not take
+	// (it is off by default, so by default this is all of them). They are the
 	// shapes where correlation removal left two instances of the same expression joined
 	// on the same column of the same table, which is what a SegmentApply would partition
 	// on. This runs after the optimizer, because that is when an implicit join is a join

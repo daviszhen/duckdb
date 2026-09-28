@@ -53,6 +53,10 @@ enum class LogicalOperatorType : uint8_t {
 	LOGICAL_POSITIONAL_JOIN = 55,
 	LOGICAL_ASOF_JOIN = 56,
 	LOGICAL_DEPENDENT_JOIN = 57,
+	//! Section 3.4's SegmentApply: Apply whose parameter is a set of rows (a segment).
+	LOGICAL_SEGMENT_APPLY = 58,
+	//! The table-valued parameter a SegmentApply fills in for each segment.
+	LOGICAL_SEGMENT_PARAMETER_GET = 59,
 	// -----------------------------
 	// SetOps
 	// -----------------------------

@@ -25,6 +25,11 @@ bool CascadeConfig::KeepApply() {
 	return enabled;
 }
 
+bool CascadeConfig::BuildSegmentApply() {
+	static const bool enabled = EnvFlagSet("DUCKDB_CASCADE_SEGMENT");
+	return enabled;
+}
+
 bool CascadeConfig::RunDuckOptimizers() {
 	static const bool enabled = EnvFlagSet("DUCKDB_CASCADE_OPTIMIZE");
 	return enabled;

@@ -38,6 +38,8 @@
 #include "duckdb/planner/operator/logical_recursive_cte.hpp"
 #include "duckdb/planner/operator/logical_reset.hpp"
 #include "duckdb/planner/operator/logical_sample.hpp"
+#include "duckdb/planner/operator/logical_segment_apply.hpp"
+#include "duckdb/planner/operator/logical_segment_parameter_get.hpp"
 #include "duckdb/planner/operator/logical_secure_view.hpp"
 #include "duckdb/planner/operator/logical_set.hpp"
 #include "duckdb/planner/operator/logical_set_operation.hpp"

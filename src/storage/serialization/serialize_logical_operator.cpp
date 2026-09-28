@@ -176,6 +176,12 @@ unique_ptr<LogicalOperator> LogicalOperator::Deserialize(Deserializer &deseriali
 	case LogicalOperatorType::LOGICAL_SECURE_VIEW:
 		result = LogicalSecureView::Deserialize(deserializer);
 		break;
+	case LogicalOperatorType::LOGICAL_SEGMENT_APPLY:
+		result = LogicalSegmentApply::Deserialize(deserializer);
+		break;
+	case LogicalOperatorType::LOGICAL_SEGMENT_PARAMETER_GET:
+		result = LogicalSegmentParameterGet::Deserialize(deserializer);
+		break;
 	case LogicalOperatorType::LOGICAL_SET:
 		result = LogicalSet::Deserialize(deserializer);
 		break;
@@ -862,6 +868,32 @@ unique_ptr<LogicalOperator> LogicalSecureView::Deserialize(Deserializer &deseria
 	deserializer.ReadPropertyWithDefault<vector<ColumnBinding>>(208, "output_bindings", result->output_bindings);
 	deserializer.ReadPropertyWithDefault<vector<unique_ptr<Expression>>>(209, "output_expressions", result->output_expressions);
 	deserializer.ReadPropertyWithDefault<vector<unique_ptr<Expression>>>(210, "source_filters", result->source_filters);
+	return std::move(result);
+}
+
+void LogicalSegmentApply::Serialize(Serializer &serializer) const {
+	LogicalOperator::Serialize(serializer);
+	serializer.WritePropertyWithDefault<vector<idx_t>>(200, "segment_positions", segment_positions);
+	serializer.WritePropertyWithDefault<vector<LogicalType>>(201, "segment_types", segment_types);
+}
+
+unique_ptr<LogicalOperator> LogicalSegmentApply::Deserialize(Deserializer &deserializer) {
+	auto segment_positions = deserializer.ReadPropertyWithDefault<vector<idx_t>>(200, "segment_positions");
+	auto segment_types = deserializer.ReadPropertyWithDefault<vector<LogicalType>>(201, "segment_types");
+	auto result = duckdb::unique_ptr<LogicalSegmentApply>(new LogicalSegmentApply(std::move(segment_positions), std::move(segment_types)));
+	return std::move(result);
+}
+
+void LogicalSegmentParameterGet::Serialize(Serializer &serializer) const {
+	LogicalOperator::Serialize(serializer);
+	serializer.WritePropertyWithDefault<TableIndex>(200, "table_index", table_index);
+	serializer.WritePropertyWithDefault<vector<LogicalType>>(201, "chunk_types", chunk_types);
+}
+
+unique_ptr<LogicalOperator> LogicalSegmentParameterGet::Deserialize(Deserializer &deserializer) {
+	auto table_index = deserializer.ReadPropertyWithDefault<TableIndex>(200, "table_index");
+	auto chunk_types = deserializer.ReadPropertyWithDefault<vector<LogicalType>>(201, "chunk_types");
+	auto result = duckdb::unique_ptr<LogicalSegmentParameterGet>(new LogicalSegmentParameterGet(table_index, std::move(chunk_types)));
 	return std::move(result);
 }
 

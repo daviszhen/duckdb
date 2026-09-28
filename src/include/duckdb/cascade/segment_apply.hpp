@@ -28,10 +28,17 @@
 
 namespace duckdb {
 
+class Binder;
 class LogicalOperator;
 
 //! The segmenting columns of every SegmentApply alternative in a plan, as
 //! "table.column" strings, deduplicated and sorted.
 vector<string> DescribeSegmentApplyAlternatives(LogicalOperator &plan);
+
+//! Section 3.4.1: replace the shapes that offer a SegmentApply - two instances of the same
+//! expression joined on the same column of the same table, one of them aggregated - by a
+//! LogicalSegmentApply whose inner child is evaluated once per segment. Off by default
+//! (DUCKDB_CASCADE_SEGMENT=1).
+unique_ptr<LogicalOperator> BuildSegmentApplyAlternatives(unique_ptr<LogicalOperator> plan, Binder &binder);
 
 } // namespace duckdb

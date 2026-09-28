@@ -66,6 +66,14 @@ public:
 	//! decision and off by default.
 	static bool PushDownAggregates();
 
+	//! DUCKDB_CASCADE_SEGMENT=1 turns on section 3.4.1: the shapes that offer a SegmentApply
+	//! - two instances of the same expression joined on the same column of the same table,
+	//! one of them aggregated - are rewritten into a LogicalSegmentApply, whose physical
+	//! operator evaluates the parameterized child once per segment. It is a cost decision
+	//! (the alternative is only interesting when the right sub-tree can use the segment to
+	//! prune what it reads), so it is off by default.
+	static bool BuildSegmentApply();
+
 	//! DUCKDB_CASCADE_KEYS="part.p_partkey,orders.o_orderkey" makes these columns count as
 	//! keys even though the catalog declares no constraint. The TPC-H and TPC-DS generators
 	//! emit no primary keys at all (TPC-H has 61 NOT NULL constraints and no UNIQUE, TPC-DS
