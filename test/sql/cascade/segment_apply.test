@@ -137,3 +137,32 @@ SELECT count(*) FROM t r JOIN (SELECT k, avg(v) AS a FROM t GROUP BY k) g ON r.k
 ----
 0
 
+# The indirect shape reached through a correlated sub-query: the two instances of the key are
+# equated only *through* u, and the join that carries it moves below the SegmentApply. Its
+# predicate may name u's column first, so the pushed join has to re-orient the condition to its
+# new children - otherwise the plan carries a reference to u in the segmented side's scope and
+# the binding resolver rejects it before anything runs.
+# The optimizer has to run for the sub-query to become a join, and its narrowing CAST pass has
+# to be off for the segmenting column to stay a plain column.
+statement ok
+SET disabled_optimizers='compressed_materialization';
+
+statement ok
+CREATE TABLE t2(k INTEGER, v INTEGER);
+
+statement ok
+INSERT INTO t2 VALUES (1,10),(1,20),(2,30),(2,40),(3,50);
+
+statement ok
+CREATE TABLE u2(k INTEGER PRIMARY KEY, x INTEGER);
+
+statement ok
+INSERT INTO u2 VALUES (1,100),(2,200),(4,400);
+
+query I rowsort
+SELECT count(*) FROM t2 r JOIN u2 ON r.k = u2.k WHERE r.v < (SELECT avg(v) FROM t2 WHERE t2.k = r.k);
+----
+2
+
+statement ok
+SET disabled_optimizers='';
