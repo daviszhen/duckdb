@@ -870,13 +870,43 @@ unique_ptr<LogicalOperator> BuildSegmentApply(LogicalComparisonJoin &join, const
 				}
 			}
 		}
+		// The equality that the shape was found through may be one hop away: the segmented
+		// relation's key is equated with a column of the relation in between, and *that* column
+		// with the aggregate's grouping column. This join needs the first half - without it the
+		// two sides are simply crossed (which is what blew the memory up on TPC-H Q17).
+		auto key_binding = relation_bindings[shape.relation_key_position];
+		for (auto &condition : pushed_conditions) {
+			if (!condition.IsComparison()) {
+				continue;
+			}
+			auto &lhs = condition.GetLHS();
+			auto &rhs = condition.GetRHS();
+			if (lhs.GetExpressionClass() != ExpressionClass::BOUND_COLUMN_REF ||
+			    rhs.GetExpressionClass() != ExpressionClass::BOUND_COLUMN_REF) {
+				continue;
+			}
+			auto &left = lhs.Cast<BoundColumnRefExpression>();
+			auto &right = rhs.Cast<BoundColumnRefExpression>();
+			for (idx_t side = 0; side < 2; side++) {
+				auto &in_pushed = (side == 0 ? left : right);
+				if (!InBindings(other_bindings, in_pushed.Binding())) {
+					continue;
+				}
+				auto key_ref = make_uniq<BoundColumnRefExpression>(shape.relation_key_type, key_binding);
+				auto pushed_ref = make_uniq<BoundColumnRefExpression>(in_pushed.GetReturnType(), in_pushed.Binding());
+				pushed_join->conditions.emplace_back(std::move(key_ref), std::move(pushed_ref),
+				                                     ExpressionType::COMPARE_EQUAL);
+				break;
+			}
+		}
 		// The conditions of the join being replaced that only mention R and the pushed side are
 		// enforced by this new join; the one that ties R to the aggregate is implied by the
 		// segment's key join below, and anything else moves into E.
 		for (idx_t i = 0; i < join.conditions.size(); i++) {
-			if (i == shape.key_condition) {
-				continue;
-			}
+			// Every condition is classified, including the one that established the shape: with
+			// the relation in between pushed below, that condition is usually *the* predicate
+			// that joins R to it, and dropping it would turn the pushed join into a cross
+			// product (which is what blew the memory up on TPC-H Q17).
 			auto &condition = join.conditions[i];
 			if (!condition.IsComparison()) {
 				throw InternalException("cascade: SegmentApply on a non-comparison join condition");
