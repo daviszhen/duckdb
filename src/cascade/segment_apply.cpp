@@ -1389,6 +1389,35 @@ unique_ptr<LogicalOperator> PushJoinBelowSegmentApply(LogicalComparisonJoin &joi
 		}
 	}
 
+	// The conditions above are the ones of the join being replaced, and that join may have had the
+	// SegmentApply on its *right* - then each of them is oriented the other way round. The new join
+	// always has the segmented relation on the left, so re-orient its conditions to match: a
+	// condition left as T = R would make the resolver bind T's column in R's scope
+	// (`Failed to bind column reference`, the four-line repro of this rule).
+	vector<ColumnBinding> pushed_left(pushed_bindings.begin(), pushed_bindings.begin() + segmented_width);
+	vector<ColumnBinding> pushed_right(pushed_bindings.begin() + segmented_width, pushed_bindings.end());
+	auto reads_side = [](const Expression &expr, const vector<ColumnBinding> &side) {
+		bool found = false;
+		ExpressionIterator::VisitExpression<BoundColumnRefExpression>(
+		    expr, [&](const BoundColumnRefExpression &colref) {
+			    if (InBindings(side, colref.Binding())) {
+				    found = true;
+			    }
+		    });
+		return found;
+	};
+	for (auto &condition : pushed_join->conditions) {
+		if (!condition.IsComparison()) {
+			continue;
+		}
+		auto lhs_left = reads_side(condition.GetLHS(), pushed_left);
+		auto lhs_right = reads_side(condition.GetLHS(), pushed_right);
+		auto rhs_left = reads_side(condition.GetRHS(), pushed_left);
+		if (!lhs_left && lhs_right && rhs_left) {
+			condition.Swap();
+		}
+	}
+
 	// E reads the segment through its parameter scans; the segment is now the joined rows, so
 	// every one of them sees R's columns followed by T's. R's columns keep their positions,
 	// which is why E's own expressions do not have to change.
