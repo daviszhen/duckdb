@@ -5,6 +5,7 @@
 #include <cstdlib>
 
 #include "duckdb/cascade/cascade_config.hpp"
+#include "duckdb/cascade/cascade_keys.hpp"
 #include "duckdb/catalog/catalog_entry/table_catalog_entry.hpp"
 #include "duckdb/common/printer.hpp"
 #include "duckdb/planner/binder.hpp"
@@ -748,6 +749,287 @@ unique_ptr<LogicalOperator> BuildSegmentApply(LogicalComparisonJoin &join, const
 	return std::move(segment_apply);
 }
 
+//===----------------------------------------------------------------------===//
+// Section 3.4.2: pushing a join below the SegmentApply
+//
+//     (R SA_A E) join_p T = (R join_p T) SA_{A + columns(T)} E
+//                                        iff columns(p) subset of A + columns(T)
+//
+// "All or nothing": if the predicate can only look at the segmenting columns or at T, then
+// either every row of a segment matches a row of T or none does - so pushing the join below
+// cannot split a segment, which is what would change what E sees. Pushing it below is what
+// makes segmented execution pay off: E then only reads the rows that survived the join
+// (TPC-H Q17's part filter is the paper's example).
+//
+// One row of R can match several rows of T, and then the joined row appears several times.
+// The paper's fix is to add T's key to the segmenting columns: each of those copies is then
+// a segment of its own, so E still sees a row once per segment.
+//===----------------------------------------------------------------------===//
+
+//! Every column the join predicate reads, so that the "all or nothing" condition can be
+//! checked against the segmenting columns and T's columns.
+void CollectConditionBindings(LogicalComparisonJoin &join, vector<ColumnBinding> &result) {
+	auto add = [&](const Expression &expr) {
+		ExpressionIterator::VisitExpression<BoundColumnRefExpression>(
+		    expr, [&](const BoundColumnRefExpression &colref) {
+			    for (auto &existing : result) {
+				    if (existing == colref.Binding()) {
+					    return;
+				    }
+			    }
+			    result.push_back(colref.Binding());
+		    });
+	};
+	for (auto &condition : join.conditions) {
+		if (!condition.IsComparison()) {
+			continue;
+		}
+		add(condition.GetLHS());
+		add(condition.GetRHS());
+	}
+}
+
+bool InBindings(const vector<ColumnBinding> &bindings, const ColumnBinding &binding) {
+	for (auto &candidate : bindings) {
+		if (candidate == binding) {
+			return true;
+		}
+	}
+	return false;
+}
+
+//! The bindings a plan produces whose value is the same for every row of a segment. Seeded
+//! with the segmenting columns the parameter exposes, and propagated only through plain
+//! column references: an aggregate's grouping column that is the segmenting column is
+//! constant within a segment, a computed expression is not known to be.
+void CollectSegmentStableBindings(LogicalOperator &op, const vector<idx_t> &segment_positions,
+                                  vector<ColumnBinding> &stable, vector<idx_t> &source_positions) {
+	if (op.type == LogicalOperatorType::LOGICAL_SEGMENT_PARAMETER_GET) {
+		auto bindings = op.GetColumnBindings();
+		for (auto position : segment_positions) {
+			if (position < bindings.size() && !InBindings(stable, bindings[position])) {
+				stable.push_back(bindings[position]);
+				source_positions.push_back(position);
+			}
+		}
+		return;
+	}
+	if (op.type == LogicalOperatorType::LOGICAL_PROJECTION) {
+		auto &projection = op.Cast<LogicalProjection>();
+		CollectSegmentStableBindings(*op.children[0], segment_positions, stable, source_positions);
+		for (idx_t i = 0; i < projection.expressions.size(); i++) {
+			auto &expr = *projection.expressions[i];
+			if (expr.GetExpressionClass() != ExpressionClass::BOUND_COLUMN_REF) {
+				continue;
+			}
+			auto &input = expr.Cast<BoundColumnRefExpression>().Binding();
+			for (idx_t s = 0; s < stable.size(); s++) {
+				if (stable[s] == input && !InBindings(stable, ColumnBinding(projection.table_index, ProjectionIndex(i)))) {
+					stable.push_back(ColumnBinding(projection.table_index, ProjectionIndex(i)));
+					source_positions.push_back(source_positions[s]);
+					break;
+				}
+			}
+		}
+		return;
+	}
+	if (op.type == LogicalOperatorType::LOGICAL_AGGREGATE_AND_GROUP_BY) {
+		auto &aggregate = op.Cast<LogicalAggregate>();
+		CollectSegmentStableBindings(*op.children[0], segment_positions, stable, source_positions);
+		for (idx_t i = 0; i < aggregate.groups.size(); i++) {
+			auto &expr = *aggregate.groups[i];
+			if (expr.GetExpressionClass() != ExpressionClass::BOUND_COLUMN_REF) {
+				continue;
+			}
+			auto &input = expr.Cast<BoundColumnRefExpression>().Binding();
+			for (idx_t s = 0; s < stable.size(); s++) {
+				if (stable[s] == input && !InBindings(stable, ColumnBinding(aggregate.group_index, ProjectionIndex(i)))) {
+					stable.push_back(ColumnBinding(aggregate.group_index, ProjectionIndex(i)));
+					source_positions.push_back(source_positions[s]);
+					break;
+				}
+			}
+		}
+		return;
+	}
+	for (auto &child : op.children) {
+		CollectSegmentStableBindings(*child, segment_positions, stable, source_positions);
+	}
+}
+
+//! The parameter scan E joins the segment with (the aggregate reads another copy of it).
+optional_ptr<LogicalSegmentParameterGet> RowParameter(LogicalOperator &op) {
+	if (op.type == LogicalOperatorType::LOGICAL_COMPARISON_JOIN) {
+		for (auto &child : op.children) {
+			if (child->type == LogicalOperatorType::LOGICAL_SEGMENT_PARAMETER_GET) {
+				return child->Cast<LogicalSegmentParameterGet>();
+			}
+		}
+	}
+	for (auto &child : op.children) {
+		if (auto found = RowParameter(*child)) {
+			return found;
+		}
+	}
+	return nullptr;
+}
+
+//! Every parameter scan inside E, so that they can all be widened together.
+void CollectParameters(LogicalOperator &op, vector<reference<LogicalSegmentParameterGet>> &result) {
+	if (op.type == LogicalOperatorType::LOGICAL_SEGMENT_PARAMETER_GET) {
+		result.push_back(op.Cast<LogicalSegmentParameterGet>());
+	}
+	for (auto &child : op.children) {
+		CollectParameters(*child, result);
+	}
+}
+
+unique_ptr<LogicalOperator> PushJoinBelowSegmentApply(LogicalComparisonJoin &join, idx_t segment_side, Binder &binder,
+                                                      BindingExport &exports) {
+	if (join.join_type != JoinType::INNER || !join.left_projection_map.empty() ||
+	    !join.right_projection_map.empty()) {
+		return nullptr;
+	}
+	auto &segment_apply = join.children[segment_side]->Cast<LogicalSegmentApply>();
+	auto &other = *join.children[1 - segment_side];
+	// T needs a key, and every column of the predicate has to come from T or from the
+	// segmenting columns.
+	auto other_key = CascadeSideKey(other);
+	if (other_key.empty()) {
+		Declined("3.4.2: the other side of the join has no key to add to the segmenting columns");
+		return nullptr;
+	}
+	vector<ColumnBinding> predicate_bindings;
+	CollectConditionBindings(join, predicate_bindings);
+	auto segment_apply_bindings = segment_apply.GetColumnBindings();
+	vector<ColumnBinding> segment_columns;
+	for (idx_t i = 0; i < segment_apply.segment_positions.size() && i < segment_apply_bindings.size(); i++) {
+		segment_columns.push_back(segment_apply_bindings[i]);
+	}
+	auto other_bindings = other.GetColumnBindings();
+	// The predicate may read T's columns, the segmenting columns, and anything E produces that
+	// is constant within a segment (the aggregate's grouping column, for instance - which is
+	// how the paper's TPC-H example refers to the segment key).
+	vector<ColumnBinding> stable;
+	vector<idx_t> stable_positions;
+	CollectSegmentStableBindings(*segment_apply.children[1], segment_apply.segment_positions, stable,
+	                             stable_positions);
+	for (idx_t i = 0; i < segment_columns.size(); i++) {
+		if (!InBindings(stable, segment_columns[i])) {
+			stable.push_back(segment_columns[i]);
+			stable_positions.push_back(segment_apply.segment_positions[i]);
+		}
+	}
+	// A predicate that names one of those columns names the segmenting column itself: inside
+	// the pushed join it is replaced by the column of R + T it is equal to.
+	vector<std::pair<ColumnBinding, idx_t>> condition_positions;
+	for (auto &binding : predicate_bindings) {
+		if (InBindings(other_bindings, binding)) {
+			continue;
+		}
+		bool mapped = false;
+		for (idx_t i = 0; i < stable.size(); i++) {
+			if (stable[i] == binding) {
+				condition_positions.emplace_back(binding, stable_positions[i]);
+				mapped = true;
+				break;
+			}
+		}
+		if (!mapped) {
+			Declined("3.4.2: the predicate reads a column that is not fixed within a segment");
+			return nullptr;
+		}
+	}
+	auto row_parameter = RowParameter(*segment_apply.children[1]);
+	if (!row_parameter) {
+		Declined("3.4.2: E has no segment parameter to widen");
+		return nullptr;
+	}
+	// Everything checks out: build `(R join_p T) SA_{A + key(T)} E`.
+	auto segmented = std::move(segment_apply.children[0]);
+	auto segment_body = std::move(segment_apply.children[1]);
+	auto other_plan = std::move(join.children[1 - segment_side]);
+	other_plan->ResolveOperatorTypes();
+
+	auto pushed_join = make_uniq<LogicalComparisonJoin>(JoinType::INNER);
+	for (auto &condition : join.conditions) {
+		pushed_join->conditions.push_back(condition.Copy());
+	}
+	pushed_join->children.push_back(std::move(segmented));
+	pushed_join->children.push_back(std::move(other_plan));
+	pushed_join->ResolveOperatorTypes();
+	auto pushed_bindings = pushed_join->GetColumnBindings();
+	idx_t segmented_width = pushed_join->children[0]->GetColumnBindings().size();
+
+	// The predicate's references to columns that are fixed within a segment name the
+	// segmenting column itself, so inside the pushed join they become references to the
+	// column of R + T they are equal to.
+	if (!condition_positions.empty()) {
+		BindingExport condition_map;
+		for (auto &entry : condition_positions) {
+			if (entry.second < pushed_bindings.size()) {
+				condition_map.emplace_back(entry.first, pushed_bindings[entry.second]);
+			}
+		}
+		for (auto &condition : pushed_join->conditions) {
+			if (!condition.IsComparison()) {
+				continue;
+			}
+			SegmentRewriteExpressionBindings(condition.LeftReference(), condition_map);
+			SegmentRewriteExpressionBindings(condition.RightReference(), condition_map);
+		}
+	}
+
+	// E reads the segment through its parameter scans; the segment is now the joined rows, so
+	// every one of them sees R's columns followed by T's. R's columns keep their positions,
+	// which is why E's own expressions do not have to change.
+	vector<reference<LogicalSegmentParameterGet>> parameters;
+	CollectParameters(*segment_body, parameters);
+	auto joined_types = pushed_join->types;
+	for (auto &parameter : parameters) {
+		parameter.get().chunk_types = joined_types;
+		parameter.get().ResolveOperatorTypes();
+	}
+
+	// The segmenting columns are the old ones plus T's key.
+	vector<idx_t> positions = segment_apply.segment_positions;
+	vector<LogicalType> types = segment_apply.segment_types;
+	BindingExport parameter_map;
+	auto parameter_bindings = row_parameter->GetColumnBindings();
+	for (idx_t i = 0; i < other_key.size(); i++) {
+		idx_t position = DConstants::INVALID_INDEX;
+		for (idx_t candidate = 0; candidate < other_bindings.size(); candidate++) {
+			if (other_bindings[candidate] == other_key[i]) {
+				position = candidate;
+				break;
+			}
+		}
+		if (position == DConstants::INVALID_INDEX) {
+			throw InternalException("cascade: 3.4.2 lost a key column of the other side");
+		}
+		positions.push_back(segmented_width + position);
+		types.push_back(joined_types[segmented_width + position]);
+	}
+	// T now lives inside the segment, and the parent still refers to its columns: they are
+	// read from the parameter E joins the segment with.
+	for (idx_t i = 0; i < other_bindings.size(); i++) {
+		parameter_map.emplace_back(other_bindings[i], parameter_bindings[segmented_width + i]);
+	}
+
+	auto rewritten = make_uniq<LogicalSegmentApply>(std::move(positions), std::move(types));
+	rewritten->children.push_back(std::move(pushed_join));
+	rewritten->children.push_back(std::move(segment_body));
+	rewritten->ResolveOperatorTypes();
+	for (auto &entry : parameter_map) {
+		exports.push_back(entry);
+	}
+	if (CascadeConfig::PrintPlans()) {
+		Printer::Print("--- cascade: section 3.4.2 - join pushed below the SegmentApply, so E reads the rows "
+		               "the join kept (the other side's key joins the segmenting columns)");
+	}
+	return std::move(rewritten);
+}
+
 unique_ptr<LogicalOperator> RewriteNode(unique_ptr<LogicalOperator> op, Binder &binder, BindingExport &exports) {
 	for (auto &child : op->children) {
 		BindingExport child_exports;
@@ -763,11 +1045,22 @@ unique_ptr<LogicalOperator> RewriteNode(unique_ptr<LogicalOperator> op, Binder &
 		}
 	}
 	if (op->type == LogicalOperatorType::LOGICAL_COMPARISON_JOIN) {
+		auto &join = op->Cast<LogicalComparisonJoin>();
+		// Section 3.4.2 first: a join that consumes a SegmentApply and whose predicate cannot
+		// split a segment moves below it, so E only sees the rows the join kept.
+		for (idx_t side = 0; side < 2; side++) {
+			if (join.children[side]->type != LogicalOperatorType::LOGICAL_SEGMENT_APPLY) {
+				continue;
+			}
+			if (auto pushed = PushJoinBelowSegmentApply(join, side, binder, exports)) {
+				return pushed;
+			}
+		}
 		SegmentShape shape;
-		if (FindSegmentShape(op->Cast<LogicalComparisonJoin>(), shape)) {
-			auto result = BuildSegmentApply(op->Cast<LogicalComparisonJoin>(), shape, binder, exports);
+		if (FindSegmentShape(join, shape)) {
+			auto result = BuildSegmentApply(join, shape, binder, exports);
 			if (CascadeConfig::PrintPlans()) {
-				Printer::Print("--- cascade: section 3.4.1 - SegmentApply introduced; E is evaluated once per "
+				Printer::Print("--- cascade: section 3.4.1 - SegmentApply introduced; E is evaluated per "
 				               "segment of the joined relation");
 			}
 			return result;
