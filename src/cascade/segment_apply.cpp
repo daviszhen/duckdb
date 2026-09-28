@@ -1279,6 +1279,9 @@ unique_ptr<LogicalOperator> RewriteNode(unique_ptr<LogicalOperator> op, Binder &
 		SegmentShape shape;
 		if (FindSegmentShape(join, shape)) {
 			auto result = BuildSegmentApply(join, shape, binder, exports);
+			if (SegmentDebug()) {
+				fprintf(stderr, "[segment apply] rewritten plan:\n%s\n", result->ToString(&binder.context).c_str());
+			}
 			if (CascadeConfig::PrintPlans()) {
 				Printer::Print("--- cascade: section 3.4.1 - SegmentApply introduced; E is evaluated per "
 				               "segment of the joined relation");
