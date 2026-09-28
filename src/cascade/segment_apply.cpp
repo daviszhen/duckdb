@@ -193,6 +193,8 @@ static bool SegmentDebug() {
 	return enabled;
 }
 
+bool InBindings(const vector<ColumnBinding> &bindings, const ColumnBinding &binding);
+
 static void Declined(const string &reason) {
 	if (SegmentDebug()) {
 		fprintf(stderr, "[segment apply] declined: %s\n", reason.c_str());
@@ -517,6 +519,22 @@ bool MapAggregateColumns(LogicalOperator &relation, LogicalAggregate &aggregate,
 }
 
 //! The shape section 3.4.1 looks for, resolved to the two sides of the join.
+//! Whether BuildSegmentApply will push a relation below the SegmentApply for this aggregate
+//! side: the aggregate sits in one child of an inner join and the other child is the relation
+//! in between (TPC-H Q17's part).
+bool WillPushRelationBelow(LogicalOperator &aggregate_side) {
+	if (aggregate_side.type != LogicalOperatorType::LOGICAL_COMPARISON_JOIN) {
+		return false;
+	}
+	auto &inner = aggregate_side.Cast<LogicalComparisonJoin>();
+	if (inner.join_type != JoinType::INNER || inner.children.size() != 2) {
+		return false;
+	}
+	auto first_holds = FindAggregate(*inner.children[0]) != nullptr;
+	auto second_holds = FindAggregate(*inner.children[1]) != nullptr;
+	return first_holds != second_holds;
+}
+
 struct SegmentShape {
 	//! Which child of the join is the segmented relation, and which holds the aggregate.
 	idx_t relation_child = 0;
@@ -606,6 +624,43 @@ bool FindSegmentShape(LogicalComparisonJoin &join, SegmentShape &shape) {
 			if (!SameFilterSet(relation_filters, aggregate_filters)) {
 				Declined("the two sides have different filters");
 				continue;
+			}
+			// An aggregate side that is itself a join is only handled by the pushed-down
+			// variant; if that does not apply, the join keeps a relation E cannot see.
+			if (join.children[aggregate_index]->type == LogicalOperatorType::LOGICAL_COMPARISON_JOIN &&
+			    !WillPushRelationBelow(*join.children[aggregate_index])) {
+				Declined("the aggregate's side is a join the pushdown does not cover");
+				continue;
+			}
+			// Unless the pushed-down variant applies (the aggregate's side is a join that keeps
+			// the relation in between), every other condition has to be evaluable above the
+			// segment's key join: it may only read the segmented relation or what the
+			// aggregate's side exposes. A condition reaching *into* that side for a relation it
+			// does not expose would otherwise be left pointing at a binding that is gone.
+			if (!WillPushRelationBelow(*join.children[aggregate_index])) {
+				auto relation_side_bindings = join.children[relation_index]->GetColumnBindings();
+				auto aggregate_side_bindings = join.children[aggregate_index]->GetColumnBindings();
+				bool evaluable = true;
+				for (idx_t other = 0; other < join.conditions.size() && evaluable; other++) {
+					if (other == condition_index || !join.conditions[other].IsComparison()) {
+						continue;
+					}
+					auto check = [&](const Expression &expr) {
+						ExpressionIterator::VisitExpression<BoundColumnRefExpression>(
+						    expr, [&](const BoundColumnRefExpression &colref) {
+							    if (!InBindings(relation_side_bindings, colref.Binding()) &&
+							        !InBindings(aggregate_side_bindings, colref.Binding())) {
+								    evaluable = false;
+							    }
+						    });
+					};
+					check(join.conditions[other].GetLHS());
+					check(join.conditions[other].GetRHS());
+				}
+				if (!evaluable) {
+					Declined("a join condition reads a relation the aggregate's side does not expose");
+					continue;
+				}
 			}
 			// ... and the relation has to expose every base column the aggregate reads.
 			BindingExport aggregate_input_map;
@@ -728,8 +783,6 @@ bool SegmentPassesBindingsThrough(const LogicalOperator &op) {
 }
 
 //! Build the SegmentApply for a shape that FindSegmentShape accepted.
-bool InBindings(const vector<ColumnBinding> &bindings, const ColumnBinding &binding);
-
 //! The bindings a parameter leaf of the given width exposes.
 vector<ColumnBinding> ParameterBindings(TableIndex table_index, idx_t column_count) {
 	vector<ColumnBinding> result;
