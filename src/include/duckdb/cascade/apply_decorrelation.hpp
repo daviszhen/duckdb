@@ -47,6 +47,10 @@ public:
 private:
 	unique_ptr<LogicalOperator> DecorrelateNode(unique_ptr<LogicalOperator> op, BindingExport &exports);
 	unique_ptr<LogicalOperator> DecorrelateApply(unique_ptr<LogicalOperator> op, BindingExport &exports);
+	//! Identities (5) and (6): an Apply over a set operation becomes a set operation of
+	//! Applies, one per branch, each with its own copy of the outer relation. Returns
+	//! nothing (leaving `op` alone) when the shape is not one of those identities.
+	unique_ptr<LogicalOperator> TryDistributeOverSetOperation(unique_ptr<LogicalOperator> &op, BindingExport &exports);
 	//! Correlated scalar subquery, by identity (9) of Galindo-Legaria & Joshi:
 	//! group by the outer columns over a left outer join, so an outer row with no
 	//! match still has a group and the aggregate sees a NULL-padded row.

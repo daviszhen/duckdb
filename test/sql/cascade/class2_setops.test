@@ -1,0 +1,124 @@
+# name: test/sql/cascade/class2_setops.test
+# description: section 2.5 Class 2 - removing Apply by introducing a common subexpression
+# group: [cascade]
+
+# The paper's classes in section 2.5:
+#
+#   Class 1  subqueries that can be removed with no additional common subexpressions
+#   Class 2  subqueries that are removed by introducing additional common subexpressions
+#   Class 3  exception subqueries (Max1row, conditional execution)
+#
+# Class 2 is identities (5) to (7) of Figure 4, which duplicate the outer relation:
+#
+#   R A_x (E1 u E2) = (R A_x E1) u (R A_x E2)        (5)
+#   R A_x (E1 - E2) = (R A_x E1) - (R A_x E2)        (6)
+#   R A_x (E1 x E2) = (R A_x E1) ./R.key (R A_x E2)  (7)
+#
+# The paper itself does not remove these during normalization ("In our current implementation
+# these subqueries are not removed during normalization, but we do still consider unnesting
+# transformations during cost-based optimization"), so this file covers an extension.
+#
+# The outer relation here has a duplicate row on purpose: for the ALL variants the multiset
+# arithmetic distributes over the outer rows, and the tests would not notice if it did not.
+
+require-env DUCKDB_CASCADE 1
+
+require-env DUCKDB_CASCADE_KEEP_APPLY 1
+
+statement ok
+CREATE TABLE tu(a INTEGER);
+
+statement ok
+INSERT INTO tu VALUES (1),(2),(5),(2);
+
+statement ok
+CREATE TABLE tv(b INTEGER);
+
+statement ok
+INSERT INTO tv VALUES (2),(3),(2);
+
+statement ok
+CREATE TABLE tt(k INTEGER);
+
+statement ok
+INSERT INTO tt VALUES (1),(2),(4),(1);
+
+
+# Identity (5): the Apply distributes over UNION ALL, one copy of the outer relation per
+# branch. k=1 matches one row in each branch and appears twice in tt, k=2 matches two rows in
+# each branch, k=4 matches nothing.
+query I
+SELECT s.a FROM tt, (SELECT a FROM tu WHERE tu.a = tt.k UNION ALL SELECT b FROM tv WHERE tv.b = tt.k) s ORDER BY 1;
+----
+1
+1
+2
+2
+2
+2
+
+# Identity (6), EXCEPT ALL: k=1 keeps its one unmatched row (twice, one per outer row), k=2
+# subtracts two from two, k=4 has nothing.
+query I
+SELECT s.a FROM tt, (SELECT a FROM tu WHERE tu.a = tt.k EXCEPT ALL SELECT b FROM tv WHERE tv.b = tt.k) s ORDER BY 1;
+----
+1
+1
+
+query I
+SELECT s.a FROM tt, (SELECT a FROM tu WHERE tu.a = tt.k INTERSECT ALL SELECT b FROM tv WHERE tv.b = tt.k) s ORDER BY 1;
+----
+2
+2
+
+# The join's own predicate distributes with the Apply.
+query I
+SELECT count(*) FROM tt JOIN (SELECT a FROM tu WHERE tu.a = tt.k UNION ALL SELECT b FROM tv WHERE tv.b = tt.k) s ON s.a = tt.k;
+----
+6
+
+query I
+SELECT count(*) FROM tt JOIN (SELECT a FROM tu WHERE tu.a = tt.k EXCEPT ALL SELECT b FROM tv WHERE tv.b = tt.k) s ON s.a = tt.k;
+----
+2
+
+# A correlated derived table is the same mechanism with no set operation in between: the
+# body predicate becomes an inner join condition.
+query I
+SELECT s.a FROM tt, (SELECT a FROM tu WHERE tu.a = tt.k) s ORDER BY 1;
+----
+1
+1
+2
+2
+
+
+# Boundaries, pinned so that a later change has to update them deliberately.
+#
+# The DISTINCT set operations need their duplicate elimination *per outer row*: a global
+# DISTINCT over the union of both branches would also collapse two identical outer rows into
+# one, which is wrong precisely because tt has a duplicate row here.
+statement error
+SELECT count(*) FROM tt, (SELECT a FROM tu WHERE tu.a = tt.k UNION SELECT b FROM tv WHERE tv.b = tt.k) s;
+----
+
+statement error
+SELECT count(*) FROM tt, (SELECT a FROM tu WHERE tu.a = tt.k EXCEPT SELECT b FROM tv WHERE tv.b = tt.k) s;
+----
+
+statement error
+SELECT count(*) FROM tt, (SELECT a FROM tu WHERE tu.a = tt.k INTERSECT SELECT b FROM tv WHERE tv.b = tt.k) s;
+----
+
+# An EXISTS over a union needs two markers combined (OR), which the semi/anti/mark path does
+# not do yet.
+statement error
+SELECT count(*) FROM tt WHERE EXISTS (SELECT 1 FROM tu WHERE tu.a = tt.k UNION ALL SELECT 1 FROM tv WHERE tv.b = tt.k);
+----
+
+# A scalar subquery over a union needs the padded row of a left outer join to appear once per
+# outer row, which a union of two outer joins cannot express (it would pad twice, or dedup a
+# genuinely repeated row).
+statement error
+SELECT count(*) FROM tt WHERE 4 > (SELECT sum(x) FROM (SELECT a AS x FROM tu WHERE tu.a = tt.k UNION ALL SELECT b AS x FROM tv WHERE tv.b = tt.k) q);
+----

@@ -1,5 +1,7 @@
 #include "duckdb/cascade/apply_decorrelation.hpp"
 
+#include "duckdb/cascade/cascade_config.hpp"
+
 #include "duckdb/common/exception.hpp"
 #include "duckdb/function/builtin_function_lookup.hpp"
 #include "duckdb/function/function_binder.hpp"
@@ -22,6 +24,7 @@
 #include "duckdb/planner/operator/logical_dependent_join.hpp"
 #include "duckdb/planner/operator/logical_filter.hpp"
 #include "duckdb/planner/operator/logical_projection.hpp"
+#include "duckdb/planner/operator/logical_set_operation.hpp"
 
 namespace duckdb {
 
@@ -409,12 +412,113 @@ static void AddJoinCondition(LogicalComparisonJoin &join, unique_ptr<Expression>
 	join.conditions.emplace_back(std::move(lhs), std::move(rhs), comparison.GetExpressionType());
 }
 
+namespace {
+//! A join condition has to be one comparison. An ON predicate that is a conjunction of
+//! comparisons is split; anything else is reported rather than guessed at.
+bool CollectComparisons(unique_ptr<Expression> predicate, vector<unique_ptr<Expression>> &result) {
+	if (predicate->GetExpressionClass() == ExpressionClass::BOUND_CONJUNCTION &&
+	    predicate->GetExpressionType() == ExpressionType::CONJUNCTION_AND) {
+		auto &conjunction = predicate->Cast<BoundConjunctionExpression>();
+		for (auto &child : conjunction.GetChildrenMutable()) {
+			if (!CollectComparisons(std::move(child), result)) {
+				return false;
+			}
+		}
+		return true;
+	}
+	if (!BoundComparisonExpression::IsComparison(*predicate)) {
+		return false;
+	}
+	result.push_back(std::move(predicate));
+	return true;
+}
+} // namespace
+
+unique_ptr<LogicalOperator> ApplyDecorrelator::TryDistributeOverSetOperation(unique_ptr<LogicalOperator> &op,
+                                                                              BindingExport &exports) {
+	auto &apply = op->Cast<LogicalDependentJoin>();
+	// The identities are stated for the cross form (`A_x`); the marker family needs its
+	// marks combined and the outer-join forms cannot distribute at all, so they are left
+	// to the existing rules (and refused loudly if they cannot be handled).
+	if (apply.join_type != JoinType::INNER || apply.correlated_columns.empty()) {
+		return nullptr;
+	}
+	auto &right = *op->children[1];
+	if (right.type != LogicalOperatorType::LOGICAL_UNION && right.type != LogicalOperatorType::LOGICAL_EXCEPT &&
+	    right.type != LogicalOperatorType::LOGICAL_INTERSECT) {
+		return nullptr;
+	}
+	auto &setop = right.Cast<LogicalSetOperation>();
+	if (setop.children.size() < 2) {
+		return nullptr;
+	}
+	auto outer_bindings = op->children[0]->GetColumnBindings();
+	auto inner_bindings = right.GetColumnBindings();
+
+	// One Apply per branch, each with its own copy of the outer relation. The copies are
+	// what the paper calls the additional common subexpressions of this class.
+	vector<unique_ptr<LogicalOperator>> branches;
+	for (auto &branch : setop.children) {
+		// The join's own ON predicate names the set operation's columns; inside a branch
+		// those are the branch's columns at the same positions, so the predicate is
+		// repointed at them. Applying it per branch is the same as applying it to the
+		// union's rows for an inner join.
+		auto branch_bindings = branch->GetColumnBindings();
+		auto branch_condition = unique_ptr<Expression>();
+		if (apply.condition) {
+			branch_condition = apply.condition->Copy();
+			BindingExport condition_map;
+			for (idx_t i = 0; i < inner_bindings.size() && i < branch_bindings.size(); i++) {
+				condition_map.emplace_back(inner_bindings[i], branch_bindings[i]);
+			}
+			RewriteBindings(branch_condition, condition_map);
+		}
+		auto branch_apply = make_uniq<LogicalDependentJoin>(JoinType::INNER);
+		branch_apply->correlated_columns = apply.correlated_columns;
+		branch_apply->condition = std::move(branch_condition);
+		branch_apply->children.push_back(op->children[0]->Copy(context));
+		branch_apply->children.push_back(std::move(branch));
+		// The branch's own export map is dropped on purpose: the set operation re-binds by
+		// position, so what the branch did to its bindings is invisible above it.
+		BindingExport branch_exports;
+		branches.push_back(DecorrelateApply(std::move(branch_apply), branch_exports));
+	}
+	auto result = make_uniq<LogicalSetOperation>(setop.table_index, outer_bindings.size() + inner_bindings.size(),
+	                                            std::move(branches), setop.type, setop.setop_all,
+	                                            setop.allow_out_of_order);
+	// The parent read the Apply's output: the outer relation's columns, then the
+	// sub-query's. The set operation exposes exactly those, in that order.
+	for (idx_t i = 0; i < outer_bindings.size(); i++) {
+		exports.emplace_back(outer_bindings[i], ColumnBinding(setop.table_index, ProjectionIndex(i)));
+	}
+	for (idx_t i = 0; i < inner_bindings.size(); i++) {
+		exports.emplace_back(inner_bindings[i],
+		                     ColumnBinding(setop.table_index, ProjectionIndex(outer_bindings.size() + i)));
+	}
+	if (CascadeConfig::PrintPlans()) {
+		Printer::Print("--- cascade: section 2.5 class 2 - Apply distributed over a set operation "
+		               "(identity (5)/(6)); the outer relation is copied per branch");
+	}
+	return std::move(result);
+}
+
 unique_ptr<LogicalOperator> ApplyDecorrelator::DecorrelateApply(unique_ptr<LogicalOperator> op, BindingExport &exports) {
 	auto &apply = op->Cast<LogicalDependentJoin>();
 	const auto &correlated = apply.correlated_columns;
 	auto join_type = apply.join_type;
 	auto mark_index = apply.mark_index;
 	auto any_join = apply.any_join;
+
+	// Identities (5) and (6) of Figure 4: an Apply distributes over a set operation.
+	//     R A_x (E1 u E2) = (R A_x E1) u (R A_x E2)
+	//     R A_x (E1 - E2) = (R A_x E1) - (R A_x E2)
+	// (and the same with n for intersect). This is the paper's Class 2: each branch needs
+	// its own copy of the outer relation, which is exactly the "additional common
+	// subexpression" the class is named after - here R is copied, so a plan that keeps both
+	// branches scans it twice unless a later optimization shares the subtree.
+	if (auto distributed = TryDistributeOverSetOperation(op, exports)) {
+		return distributed;
+	}
 
 	vector<unique_ptr<Expression>> extracted;
 	auto left = std::move(op->children[0]);
@@ -460,6 +564,35 @@ unique_ptr<LogicalOperator> ApplyDecorrelator::DecorrelateApply(unique_ptr<Logic
 		    "(uncorrelated semi/anti/mark subquery)");
 	}
 
+	if (join_type == JoinType::INNER) {
+		// Identities (2) and (3) in the direction that removes the Apply: the body
+		// predicate becomes a join condition and the Apply becomes an ordinary inner join.
+		// Unlike the marker family it must keep SQL's meaning for an unknown comparison -
+		// a NULL correlation is not a match - so the comparison stays a plain equality and
+		// the right side is not stripped of NULLs. (A correlated derived table is this
+		// shape: `FROM t, (SELECT ... WHERE u.a = t.k) s`.)
+		// An inner Apply may carry the join's own ON predicate as well; for inner
+		// semantics it is just one more condition on the joined rows.
+		vector<unique_ptr<Expression>> conditions;
+		for (auto &predicate : extracted) {
+			conditions.push_back(std::move(predicate));
+		}
+		if (apply.condition) {
+			if (!CollectComparisons(std::move(apply.condition), conditions)) {
+				throw NotImplementedException(
+				    "cascade: a correlated cross Apply whose join predicate is not a comparison is not "
+				    "implemented yet");
+			}
+		}
+		auto inner_join = make_uniq<LogicalComparisonJoin>(JoinType::INNER);
+		inner_join->children.push_back(std::move(left));
+		inner_join->children.push_back(std::move(right));
+		for (auto &predicate : conditions) {
+			AddJoinCondition(*inner_join, std::move(predicate), correlated, false);
+		}
+		return std::move(inner_join);
+	}
+
 	// Rule 2 covers the semi/anti/mark family. Only those may have their right
 	// sub-tree widened: their output is the left side (plus the mark column), so
 	// extra columns on the right stay invisible to the parent.
@@ -473,6 +606,7 @@ unique_ptr<LogicalOperator> ApplyDecorrelator::DecorrelateApply(unique_ptr<Logic
 	// condition, and - unlike EXISTS - it keeps its three-valued marker, so it
 	// must not receive the NULL-stripping treatment below.
 	auto any_condition = std::move(apply.condition);
+
 
 	// The correlation comparison is always made NULL-safe, and the right side is
 	// stripped of NULLs in the correlated columns. Together they keep the
