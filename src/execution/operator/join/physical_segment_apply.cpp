@@ -394,6 +394,41 @@ static void GatherParameterScans(PhysicalOperator &op,
 //! E's pipelines have to run in dependency order. The executor normally gets this from its
 //! event graph; here the driver runs them itself, so the order is worked out once.
 static void OrderPipelinesByDependency(vector<shared_ptr<Pipeline>> &pipelines) {
+	// Two kinds of edge decide the order. The framework's own dependencies cover the cases its
+	// scheduler would order for us. On top of that, a blocking operator inside E has to be
+	// *built* by its own pipeline before any pipeline that reads it runs - and that edge is not
+	// always in GetAllDependencies() (a join's build and probe pipelines can hang off the same
+	// meta pipeline, in which case reading it early finds a null hash table). The structural
+	// edge is derived from the operators each pipeline runs: every pipeline depends on every
+	// pipeline whose *sink* is an operator that this one reads as its source or in between.
+	unordered_map<PhysicalOperator *, vector<Pipeline *>> builders;
+	for (auto &pipeline : pipelines) {
+		if (auto sink = pipeline->GetSink()) {
+			builders[sink.get()].push_back(pipeline.get());
+		}
+	}
+	unordered_map<Pipeline *, vector<Pipeline *>> readers;
+	auto add_reads = [&](Pipeline &reader, PhysicalOperator &op) {
+		auto entry = builders.find(&op);
+		if (entry == builders.end()) {
+			return;
+		}
+		auto &list = readers[&reader];
+		for (auto *builder : entry->second) {
+			if (builder != &reader) {
+				list.push_back(builder);
+			}
+		}
+	};
+	for (auto &pipeline : pipelines) {
+		if (auto source = pipeline->GetSource()) {
+			add_reads(*pipeline, *source);
+		}
+		for (auto &op : pipeline->GetIntermediateOperators()) {
+			add_reads(*pipeline, op.get());
+		}
+	}
+
 	vector<shared_ptr<Pipeline>> ordered;
 	ordered.reserve(pipelines.size());
 	unordered_set<Pipeline *> pending;
@@ -411,6 +446,17 @@ static void OrderPipelinesByDependency(vector<shared_ptr<Pipeline>> &pipelines) 
 				if (pending.find(dependency.get()) != pending.end()) {
 					ready = false;
 					break;
+				}
+			}
+			if (ready) {
+				auto entry = readers.find(pipeline.get());
+				if (entry != readers.end()) {
+					for (auto *builder : entry->second) {
+						if (pending.find(builder) != pending.end()) {
+							ready = false;
+							break;
+						}
+					}
 				}
 			}
 			if (!ready) {
@@ -455,7 +501,24 @@ void PhysicalSegmentApply::BuildPipelines(Pipeline &current, MetaPipeline &meta_
 	segment_meta_pipeline->Ready();
 
 	segment_meta_pipeline->GetPipelines(segment_pipelines, true);
+	if (SegmentDebug()) {
+		fprintf(stderr, "[segment apply] E has %llu pipelines (before ordering):\n",
+		        (unsigned long long)segment_pipelines.size());
+		for (auto &pipeline : segment_pipelines) {
+			fprintf(stderr, "[segment apply]   src=%s sink=%s deps=%llu\n",
+			        pipeline->GetSource() ? pipeline->GetSource()->GetName().c_str() : "-",
+			        pipeline->GetSink() ? pipeline->GetSink()->GetName().c_str() : "-",
+			        (unsigned long long)pipeline->GetAllDependencies().size());
+		}
+	}
 	OrderPipelinesByDependency(segment_pipelines);
+	if (SegmentDebug()) {
+		for (auto &pipeline : segment_pipelines) {
+			fprintf(stderr, "[segment apply]   ordered: src=%s sink=%s\n",
+			        pipeline->GetSource() ? pipeline->GetSource()->GetName().c_str() : "-",
+			        pipeline->GetSink() ? pipeline->GetSink()->GetName().c_str() : "-");
+		}
+	}
 	if (segment_pipelines.empty()) {
 		throw InternalException("segment apply: E produced no pipelines");
 	}
