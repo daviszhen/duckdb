@@ -1,6 +1,7 @@
 #include "duckdb/cascade/aggregate_pushdown.hpp"
 
 #include "duckdb/cascade/cascade_config.hpp"
+#include "duckdb/cascade/cascade_keys.hpp"
 #include "duckdb/catalog/catalog_entry/table_catalog_entry.hpp"
 #include "duckdb/common/unordered_set.hpp"
 #include "duckdb/main/client_context.hpp"
@@ -33,28 +34,6 @@ bool PushdownIsSideBinding(const vector<ColumnBinding> &side, const ColumnBindin
 }
 
 //! True if the expression reads no column of the given side at all. An expression with no
-//! column references qualifies, so a constant is on every side at once.
-bool PushdownReadsOnly(const Expression &expr, const vector<ColumnBinding> &side) {
-	bool only = true;
-	ExpressionIterator::VisitExpression<BoundColumnRefExpression>(
-	    expr, [&](const BoundColumnRefExpression &colref) {
-		    if (!PushdownIsSideBinding(side, colref.Binding())) {
-			    only = false;
-		    }
-	    });
-	return only;
-}
-
-bool PushdownExpressionReads(const Expression &expr, const vector<ColumnBinding> &side) {
-	bool found = false;
-	ExpressionIterator::VisitExpression<BoundColumnRefExpression>(
-	    expr, [&](const BoundColumnRefExpression &colref) {
-		    if (PushdownIsSideBinding(side, colref.Binding())) {
-			    found = true;
-		    }
-	    });
-	return found;
-}
 
 //! The position of the grouping expression that *is* exactly this column, or nothing. A
 //! predicate column that is only a function of a grouping column cannot be used: the
@@ -103,139 +82,34 @@ bool PushdownEvaluableAbove(const Expression &expr, const vector<ColumnBinding> 
 	return evaluable;
 }
 
-//! The base-table scan a side reduces to, skipping filters, or nothing.
-optional_ptr<LogicalOperator> PushdownBaseTable(LogicalOperator &op) {
-	auto current = &op;
-	while (current->type == LogicalOperatorType::LOGICAL_FILTER && current->children.size() == 1) {
-		current = current->children[0].get();
-	}
-	if (current->type != LogicalOperatorType::LOGICAL_GET) {
-		return nullptr;
-	}
-	return current;
+
+//! column references qualifies, so a constant is on every side at once.
+bool PushdownReadsOnly(const Expression &expr, const vector<ColumnBinding> &side) {
+	bool only = true;
+	ExpressionIterator::VisitExpression<BoundColumnRefExpression>(
+	    expr, [&](const BoundColumnRefExpression &colref) {
+		    if (!PushdownIsSideBinding(side, colref.Binding())) {
+			    only = false;
+		    }
+	    });
+	return only;
 }
 
-//! Section 3.1's second condition, in the form the catalog can answer: the join picks at
-//! most one row of `kept` per group. That holds when a unique constraint of the kept table
-//! is fully equated by the predicate to expressions the group determines - every equality
-//! has the constraint's column on one side and an expression that does not read the kept
-//! side on the other, and with the constraint's columns being grouping columns those
-//! expressions are functions of the group. Without it the join above would multiply the
-//! pre-aggregated group, and the two plans would count different rows.
-bool PushdownKeyIsGuarded(LogicalComparisonJoin &join, LogicalOperator &kept, const vector<ColumnBinding> &kept_bindings,
-                          const LogicalAggregate &aggregate) {
-	auto base = PushdownBaseTable(kept);
-	if (!base) {
+//! Section 3.1's second condition for pushing a GroupBy below a join, verbatim: "the key of
+//! the relation S is part of the grouping columns". With the key grouped, no two rows of that
+//! relation can share a group - so the join above cannot multiply a pre-aggregated group - and
+//! the paper's explanation says exactly that.
+bool PushdownKeyIsGrouped(LogicalOperator &kept, const LogicalAggregate &aggregate) {
+	auto key = CascadeSideKey(kept);
+	if (key.empty()) {
 		return false;
 	}
-	auto &get = base->Cast<LogicalGet>();
-	auto table = get.GetTable();
-	if (!table) {
-		return false;
-	}
-	auto &column_list = table->GetColumns();
-	auto &scan_columns = get.GetColumnIds();
-	// The scan reads more columns than it exposes (filters are pushed into it and the rest is
-	// projected away), and an exposed binding's column index is its position in the scan's
-	// column list - the two lists are not parallel.
-	auto exposed_position = [&](idx_t logical_index) {
-		for (idx_t position = 0; position < kept_bindings.size(); position++) {
-			auto scan_position = kept_bindings[position].column_index.GetIndexUnsafe();
-			if (scan_position >= scan_columns.size()) {
-				continue;
-			}
-			auto &column = scan_columns[scan_position];
-			if (column.HasPrimaryIndex() && column.ToLogical().index == logical_index) {
-				return position;
-			}
-		}
-		return DConstants::INVALID_INDEX;
-	};
-	// The key candidates: every unique constraint of the table, plus the columns the
-	// DUCKDB_CASCADE_KEYS experiment names (the benchmark schemas declare none, see
-	// CascadeConfig::IsDeclaredKey).
-	vector<vector<ColumnBinding>> candidates;
-	for (auto &constraint : table->GetConstraints()) {
-		if (constraint->type != ConstraintType::UNIQUE) {
-			continue;
-		}
-		auto indexes = constraint->Cast<UniqueConstraint>().GetLogicalIndexes(column_list);
-		if (indexes.empty()) {
-			continue;
-		}
-		vector<ColumnBinding> candidate;
-		for (auto &index : indexes) {
-			auto position = exposed_position(index.index);
-			if (position == DConstants::INVALID_INDEX) {
-				break;
-			}
-			candidate.push_back(kept_bindings[position]);
-		}
-		if (candidate.size() == indexes.size()) {
-			candidates.push_back(std::move(candidate));
+	for (auto &binding : key) {
+		if (!PushdownGroupingPosition(aggregate, binding).IsValid()) {
+			return false;
 		}
 	}
-	auto &columns = table->GetColumns();
-	for (idx_t position = 0; position < kept_bindings.size(); position++) {
-		auto scan_position = kept_bindings[position].column_index.GetIndexUnsafe();
-		if (scan_position >= scan_columns.size() || !scan_columns[scan_position].HasPrimaryIndex()) {
-			continue;
-		}
-		auto logical = scan_columns[scan_position].ToLogical();
-		if (logical.index >= columns.LogicalColumnCount()) {
-			continue;
-		}
-		auto &column = columns.GetColumn(LogicalIndex(logical.index));
-		if (CascadeConfig::IsDeclaredKey(table->name.GetIdentifierName(), column.Name().GetIdentifierName())) {
-			candidates.push_back(vector<ColumnBinding> {kept_bindings[position]});
-		}
-	}
-	for (auto &key_bindings : candidates) {
-		bool all_grouping = true;
-		for (auto &binding : key_bindings) {
-			if (!PushdownGroupingPosition(aggregate, binding).IsValid()) {
-				all_grouping = false;
-				break;
-			}
-		}
-		if (!all_grouping) {
-			continue;
-		}
-		// Every one of those columns has to be equated to something that does not read the
-		// kept side.
-		bool covered = true;
-		for (auto &binding : key_bindings) {
-			bool equated = false;
-			for (auto &condition : join.conditions) {
-				if (!condition.IsComparison() ||
-				    condition.GetComparisonType() != ExpressionType::COMPARE_EQUAL) {
-					continue;
-				}
-				auto matches = [&](const Expression &key, const Expression &other) {
-					if (key.GetExpressionClass() != ExpressionClass::BOUND_COLUMN_REF) {
-						return false;
-					}
-					if (key.Cast<BoundColumnRefExpression>().Binding() != binding) {
-						return false;
-					}
-					return !PushdownExpressionReads(other, kept_bindings);
-				};
-				if (matches(condition.GetLHS(), condition.GetRHS()) ||
-				    matches(condition.GetRHS(), condition.GetLHS())) {
-					equated = true;
-					break;
-				}
-			}
-			if (!equated) {
-				covered = false;
-				break;
-			}
-		}
-		if (covered) {
-			return true;
-		}
-	}
-	return false;
+	return true;
 }
 
 void PushdownRemapBindings(unique_ptr<Expression> &expr, const PushdownBindings &map) {
@@ -439,7 +313,7 @@ unique_ptr<LogicalOperator> AggregatePushdown::PushNode(
 			return op;
 		}
 	}
-	if (!PushdownKeyIsGuarded(join, kept, kept_bindings, aggregate)) {
+	if (!PushdownKeyIsGrouped(kept, aggregate)) {
 		return op;
 	}
 	// Every grouping expression has to be reproducible above the join: either it is computed

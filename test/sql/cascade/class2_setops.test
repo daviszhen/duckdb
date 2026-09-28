@@ -93,6 +93,53 @@ SELECT s.a FROM tt, (SELECT a FROM tu WHERE tu.a = tt.k) s ORDER BY 1;
 2
 
 
+# Identity (7), the cross product. The paper's condition is a key on the outer relation: the
+# two branches are matched back through it, and it is the key's uniqueness that keeps the
+# match from multiplying the branches against each other.
+statement ok
+CREATE TABLE tk(k INTEGER PRIMARY KEY);
+
+statement ok
+INSERT INTO tk VALUES (1),(2),(4);
+
+# Both branches are correlated, so neither can be removed on its own: k=2 matches two rows in
+# tu and two in tv, while k=1 matches nothing in either.
+query II
+SELECT s.a, s.w FROM tk, (SELECT p.a AS a, r.b AS w FROM (SELECT a FROM tu WHERE tu.a = tk.k) p, (SELECT b FROM tv WHERE tv.b = tk.k) r) s ORDER BY 1,2;
+----
+2	2
+2	2
+2	2
+2	2
+
+# The same with the join's own predicate, which is a filter over the rewritten plan.
+query I
+SELECT count(*) FROM tk JOIN (SELECT p.a AS a, r.b AS w FROM (SELECT a FROM tu WHERE tu.a = tk.k) p, (SELECT b FROM tv WHERE tv.b = tk.k) r) s ON s.w = tk.k;
+----
+4
+
+# Only one side of the cross product is correlated. That branch has nothing to match on the
+# key, so it stays a plain cross product with the outer relation.
+query I
+SELECT count(*) FROM tk, (SELECT p.a AS a, r.b AS b FROM (SELECT a FROM tu WHERE tu.a = tk.k) p, (SELECT b FROM tv) r) s WHERE s.a = 2;
+----
+6
+
+# A unique column may hold NULL even though it is a key, and `=` never matches it, so no
+# branch produces a row for that outer row. The key match is NULL-safe so that the NULL key
+# of the two branches cannot pair up into a row the cross product never had.
+statement ok
+CREATE TABLE tkn(k INTEGER UNIQUE);
+
+statement ok
+INSERT INTO tkn VALUES (1),(2),(NULL);
+
+query I
+SELECT count(*) FROM tkn, (SELECT p.a AS a, r.b AS w FROM (SELECT a FROM tu WHERE tu.a = tkn.k) p, (SELECT b FROM tv WHERE tv.b = tkn.k) r) s;
+----
+4
+
+
 # Boundaries, pinned so that a later change has to update them deliberately.
 #
 # The DISTINCT set operations need their duplicate elimination *per outer row*: a global
@@ -108,6 +155,12 @@ SELECT count(*) FROM tt, (SELECT a FROM tu WHERE tu.a = tt.k EXCEPT SELECT b FRO
 
 statement error
 SELECT count(*) FROM tt, (SELECT a FROM tu WHERE tu.a = tt.k INTERSECT SELECT b FROM tv WHERE tv.b = tt.k) s;
+----
+
+# Identity (7) needs a key to match the branches back on, and tt has none (it even holds a
+# duplicate). The shape is recognised and refused rather than planned without the key.
+statement error
+SELECT count(*) FROM tt, (SELECT p.a AS a, r.b AS w FROM (SELECT a FROM tu WHERE tu.a = tt.k) p, (SELECT b FROM tv WHERE tv.b = tt.k) r) s;
 ----
 
 # An EXISTS over a union needs two markers combined (OR), which the semi/anti/mark path does

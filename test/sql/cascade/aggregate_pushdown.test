@@ -109,3 +109,27 @@ query I
 SELECT sum(tr.v) FROM ts JOIN tr ON tr.k = ts.a;
 ----
 600
+
+
+# The paper's second condition is "the key of the relation S is part of the grouping columns" -
+# not "the predicate equates the key". Here the grouping has S's key (`tb.a`) while the
+# predicate joins on a different column of it, which is enough: no two rows of `tb` can share
+# a group once their key is grouped.
+statement ok
+CREATE TABLE tb(a INTEGER PRIMARY KEY, b INTEGER);
+
+statement ok
+INSERT INTO tb VALUES (1,1),(2,2),(3,9);
+
+query IIII
+SELECT tr.k, tb.a, tb.b, sum(tr.v) FROM tb JOIN tr ON tr.k = tb.b GROUP BY tr.k, tb.a, tb.b ORDER BY 1, 2, 3;
+----
+1	1	1	300
+2	2	2	300
+
+# A key wrapped in an expression no longer blocks it either.
+query III
+SELECT tr.k, ts.a, sum(tr.v) FROM ts JOIN tr ON tr.k = ts.a + 0 GROUP BY tr.k, ts.a ORDER BY 1, 2;
+----
+1	1	300
+2	2	300

@@ -154,3 +154,27 @@ SELECT ts.a, tr.v FROM ts JOIN tr ON tr.k = ts.a ORDER BY ts.a, tr.v;
 1	100
 1	200
 2	300
+
+
+# The paper's premise is "the relation being joined has a key" - not "the predicate equates
+# it". The key is what makes that relation's rows distinct on the columns the pulled-up
+# grouping carries, so a predicate that never mentions the key is fine. (An earlier, stricter
+# condition of ours refused this.)
+statement ok
+CREATE TABLE tp(a INTEGER PRIMARY KEY, b INTEGER);
+
+statement ok
+INSERT INTO tp VALUES (1,1),(2,2),(3,9);
+
+query I
+SELECT count(*) FROM (SELECT tp.a, g.t FROM tp JOIN (SELECT k, sum(v) AS t FROM tr GROUP BY k) g ON tp.b = g.k) q;
+----
+2
+
+# The key being *exposed* is part of it: a projection above the base table hides it, and the
+# rule asks the catalog rather than looking through projections.
+query I
+SELECT count(*) FROM (SELECT kept.sb, g.t FROM (SELECT s.b AS sb FROM ts s) kept
+                      JOIN (SELECT k, sum(v) AS t FROM tr GROUP BY k) g ON kept.sb = g.k) q;
+----
+0

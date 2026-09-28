@@ -1,8 +1,8 @@
 #include "duckdb/cascade/aggregate_pullup.hpp"
 
 #include "duckdb/cascade/cascade_config.hpp"
+#include "duckdb/cascade/cascade_keys.hpp"
 #include "duckdb/catalog/catalog_entry/table_catalog_entry.hpp"
-#include "duckdb/common/unordered_set.hpp"
 #include "duckdb/main/client_context.hpp"
 #include "duckdb/parser/constraints/unique_constraint.hpp"
 #include "duckdb/planner/binder.hpp"
@@ -80,6 +80,8 @@ void PullupSubstituteThrough(unique_ptr<Expression> &expr, const vector<LogicalP
 //! Does the expression reach one of the aggregate's own results, following the projections
 //! that stand between it and the GroupBy? The join predicate may not read those, because
 //! below the join they do not exist. Asked before anything is mutated, so that giving up
+
+
 //! leaves the plan exactly as it was.
 bool PullupReadsAggregateResult(const Expression &expr, const vector<LogicalProjection *> &projections,
                                 TableIndex aggregate_index) {
@@ -110,147 +112,14 @@ bool PullupReadsAggregateResult(const Expression &expr, const vector<LogicalProj
 	return found;
 }
 
-bool PullupExpressionReadsTables(const Expression &expr, const unordered_set<idx_t> &tables) {
-	bool found = false;
-	ExpressionIterator::VisitExpression<BoundColumnRefExpression>(
-	    expr, [&](const BoundColumnRefExpression &colref) {
-		    if (tables.find(colref.Binding().table_index.index) != tables.end()) {
-			    found = true;
-		    }
-	    });
-	return found;
-}
-
-//! The base-table scan the kept relation reduces to, skipping filters, or nothing.
-optional_ptr<LogicalOperator> PullupBaseTable(LogicalOperator &op) {
-	auto current = &op;
-	while (current->type == LogicalOperatorType::LOGICAL_FILTER && current->children.size() == 1) {
-		current = current->children[0].get();
-	}
-	if (current->type != LogicalOperatorType::LOGICAL_GET) {
-		return nullptr;
-	}
-	return current;
-}
-
-//! Section 3.1's "the relation being joined has a key", in the form the catalog can answer:
-//! the kept relation is a base-table scan (possibly under filters) whose table declares a
-//! primary key or unique constraint, and the join predicate equates every column of that
-//! constraint to an expression of the other side, so each row of the aggregated relation
-//! matches at most one row here. Without that, two kept rows would join one outer row, the
-//! pulled-up grouping would put both in the same group, and the rows it aggregates would be
-//! counted twice.
-bool PullupHasJoinKey(LogicalComparisonJoin &join, idx_t kept_side, const vector<ColumnBinding> &kept_bindings) {
-	auto base = PullupBaseTable(*join.children[kept_side]);
-	if (!base) {
-		return false;
-	}
-	auto &get = base->Cast<LogicalGet>();
-	auto table = get.GetTable();
-	if (!table) {
-		return false;
-	}
-	auto &column_list = table->GetColumns();
-	auto &scan_columns = get.GetColumnIds();
-	// The scan reads more columns than it exposes: the optimizer pushes filters into it and
-	// projects the rest away, and an exposed binding's column index is its position in the
-	// scan's column list. The two lists are therefore not parallel, and a key column only
-	// counts when the scan exposes it - that mismatch used to hide every key behind a
-	// filtered scan (TPC-H Q17's `part` scan reads three columns and exposes one).
-	auto exposed_position = [&](idx_t logical_index) {
-		for (idx_t position = 0; position < kept_bindings.size(); position++) {
-			auto scan_position = kept_bindings[position].column_index.GetIndexUnsafe();
-			if (scan_position >= scan_columns.size()) {
-				continue;
-			}
-			auto &column = scan_columns[scan_position];
-			if (column.HasPrimaryIndex() && column.ToLogical().index == logical_index) {
-				return position;
-			}
-		}
-		return DConstants::INVALID_INDEX;
-	};
-	unordered_set<idx_t> kept_tables;
-	for (auto &binding : kept_bindings) {
-		kept_tables.insert(binding.table_index.index);
-	}
-	// The key candidates: every unique constraint of the table, plus the columns the
-	// DUCKDB_CASCADE_KEYS experiment names (the benchmark schemas declare none, see
-	// CascadeConfig::IsDeclaredKey).
-	vector<vector<idx_t>> candidates;
-	for (auto &constraint : table->GetConstraints()) {
-		if (constraint->type != ConstraintType::UNIQUE) {
-			continue;
-		}
-		auto indexes = constraint->Cast<UniqueConstraint>().GetLogicalIndexes(column_list);
-		if (indexes.empty()) {
-			continue;
-		}
-		vector<idx_t> candidate;
-		for (auto &index : indexes) {
-			auto position = exposed_position(index.index);
-			if (position == DConstants::INVALID_INDEX) {
-				break;
-			}
-			candidate.push_back(position);
-		}
-		if (candidate.size() == indexes.size()) {
-			candidates.push_back(std::move(candidate));
-		}
-	}
-	auto &columns = table->GetColumns();
-	for (idx_t position = 0; position < kept_bindings.size(); position++) {
-		auto scan_position = kept_bindings[position].column_index.GetIndexUnsafe();
-		if (scan_position >= scan_columns.size() || !scan_columns[scan_position].HasPrimaryIndex()) {
-			continue;
-		}
-		auto logical = scan_columns[scan_position].ToLogical();
-		if (logical.index >= columns.LogicalColumnCount()) {
-			continue;
-		}
-		auto &column = columns.GetColumn(LogicalIndex(logical.index));
-		if (CascadeConfig::IsDeclaredKey(table->name.GetIdentifierName(), column.Name().GetIdentifierName())) {
-			candidates.push_back(vector<idx_t> {position});
-		}
-	}
-	for (auto &positions : candidates) {
-		for (auto position : positions) {
-		}
-		// Every key column has to be equated to the aggregated side.
-		bool covered = true;
-		for (auto position : positions) {
-			auto &key_binding = kept_bindings[position];
-			bool equated = false;
-			for (auto &condition : join.conditions) {
-				if (!condition.IsComparison() ||
-				    condition.GetComparisonType() != ExpressionType::COMPARE_EQUAL) {
-					continue;
-				}
-				auto equates_key = [&](const Expression &key, const Expression &other) {
-					if (key.GetExpressionClass() != ExpressionClass::BOUND_COLUMN_REF) {
-						return false;
-					}
-					if (key.Cast<BoundColumnRefExpression>().Binding() != key_binding) {
-						return false;
-					}
-					return !PullupExpressionReadsTables(other, kept_tables);
-				};
-				if (equates_key(condition.GetLHS(), condition.GetRHS()) ||
-				    equates_key(condition.GetRHS(), condition.GetLHS())) {
-					equated = true;
-					break;
-				}
-			}
-			if (!equated) {
-				covered = false;
-				break;
-			}
-		}
-		if (covered) {
-			return true;
-		}
-	}
-	return false;
+//! Section 3.1's premise, in the form the catalog can answer: "the relation being joined has
+//! a key". A key is enough on its own, because it makes that relation's rows distinct on the
+//! columns the pulled-up grouping carries - the paper states the premise for exactly that
+//! reason: with a duplicate there, two rows would fall into one group and the rows it
+//! aggregates would be counted twice. (An earlier version also required the predicate to
+//! equate the key; that is sufficient too, but narrower than the paper.)
+bool PullupKeptSideIsKeyed(LogicalOperator &kept) {
+	return !CascadeSideKey(kept).empty();
 }
 
 void PullupRewriteOperatorBindings(LogicalOperator &op, const PullupBindings &map) {
@@ -447,7 +316,7 @@ unique_ptr<LogicalOperator> AggregatePullup::PullNode(
 		if (candidate.aggregate->grouping_sets.size() > 1) {
 			continue;
 		}
-		if (!PullupHasJoinKey(join, 1 - candidate_side, join.children[1 - candidate_side]->GetColumnBindings())) {
+		if (!PullupKeptSideIsKeyed(*join.children[1 - candidate_side])) {
 			continue;
 		}
 		aggregate_side = candidate_side;

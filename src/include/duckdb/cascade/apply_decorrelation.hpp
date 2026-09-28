@@ -51,6 +51,14 @@ private:
 	//! Applies, one per branch, each with its own copy of the outer relation. Returns
 	//! nothing (leaving `op` alone) when the shape is not one of those identities.
 	unique_ptr<LogicalOperator> TryDistributeOverSetOperation(unique_ptr<LogicalOperator> &op, BindingExport &exports);
+	//! Identity (7): an Apply over a cross product becomes the two branches matched back
+	//! through a key of the outer relation. Returns nothing when the shape is not that one.
+	unique_ptr<LogicalOperator> TryDistributeOverCrossProduct(unique_ptr<LogicalOperator> &op, BindingExport &exports);
+	//! The key of a plan side. A side that is one of the materialised CTEs this pass
+	//! introduced still stands for the keyed relation that went into it, and the catalog can
+	//! no longer see that, so the key is remembered here. Without it identity (7) only fires
+	//! once per query: the second application looks at a CTE reference.
+	vector<ColumnBinding> SideKey(LogicalOperator &side);
 	//! Correlated scalar subquery, by identity (9) of Galindo-Legaria & Joshi:
 	//! group by the outer columns over a left outer join, so an outer row with no
 	//! match still has a group and the aggregate sees a NULL-padded row.
@@ -71,6 +79,8 @@ private:
 private:
 	Binder &binder;
 	ClientContext &context;
+	//! Key positions of the relations this pass materialised, by CTE index.
+	unordered_map<idx_t, vector<idx_t>> cte_key_positions;
 };
 
 } // namespace duckdb
