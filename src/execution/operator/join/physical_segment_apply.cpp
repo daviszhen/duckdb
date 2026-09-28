@@ -276,7 +276,10 @@ void PhysicalSegmentApply::EvaluateSegment(ExecutionContext &context, ColumnData
 	// producers, so that no consumer still points at the build states that phase 1b replaces.
 	// (A probe pipeline's source state points straight into the build side's table.)
 	for (auto pipeline = segment_pipelines.rbegin(); pipeline != segment_pipelines.rend(); ++pipeline) {
-		(*pipeline)->ResetForReschedule(false);
+		// Drop the source state outright before anything is torn down: a source state can point
+		// straight into a build state (a join's or an aggregate's), and those are replaced in
+		// phase 1b. Clearing is what lets a *nested* join inside E be re-run - TPC-H Q17 has one.
+		(*pipeline)->ClearSource();
 	}
 	// Phase 1b: this segment's production sinks start empty. They are re-created rather than
 	// reset: a hash join's probe tears the table it built down again, so a "reset" would hand
@@ -299,6 +302,11 @@ void PhysicalSegmentApply::EvaluateSegment(ExecutionContext &context, ColumnData
 	for (auto &pipeline : segment_pipelines) {
 		try {
 			pipeline->ResetForReschedule(false);
+			// ... and force the source state itself to be rebuilt. A source state can support
+			// re-use, in which case the reset above keeps its pointers into a build state that
+			// phase 1b has since replaced - which is exactly the null hash table this used to
+			// crash on once E contained a join of its own (TPC-H Q17's part join).
+			pipeline->ResetSource(true);
 			ExecuteSegmentPipeline(executor, *pipeline);
 		} catch (std::exception &ex) {
 			if (SegmentDebug()) {

@@ -379,10 +379,75 @@ optional_ptr<LogicalAggregate> FindAggregate(LogicalOperator &op) {
 	        current->type == LogicalOperatorType::LOGICAL_FILTER)) {
 		current = current->children[0].get();
 	}
-	if (current->type != LogicalOperatorType::LOGICAL_AGGREGATE_AND_GROUP_BY) {
-		return nullptr;
+	if (current->type == LogicalOperatorType::LOGICAL_AGGREGATE_AND_GROUP_BY) {
+		return current->Cast<LogicalAggregate>();
 	}
-	return current->Cast<LogicalAggregate>();
+	// The aggregate can also sit one join away: TPC-H Q17's decorrelated plan keeps `part`
+	// inside the same sub-tree as the aggregate, and the join with it is exactly what the
+	// paper pushes below the SegmentApply. E then contains that whole sub-tree.
+	if (current->type == LogicalOperatorType::LOGICAL_COMPARISON_JOIN &&
+	    current->Cast<LogicalComparisonJoin>().join_type == JoinType::INNER) {
+		for (auto &child : current->children) {
+			if (auto nested = FindAggregate(*child)) {
+				return nested;
+			}
+		}
+	}
+	return nullptr;
+}
+
+//! Whether the aggregate's own grouping is the given base column - i.e. the segment key.
+bool AggregateGroupedOn(LogicalAggregate &aggregate, const BaseColumnIdentity &identity) {
+	vector<BaseColumnIdentity> groups;
+	CollectAggregateIdentities(aggregate, groups);
+	for (auto &group : groups) {
+		if (group == identity) {
+			return true;
+		}
+	}
+	return false;
+}
+
+//! Section 3.4.1 asks for a conjunct that compares two instances of the same column. DuckDB's
+//! decorrelated TPC-H Q17 does not have one: `lineitem.l_partkey = part.p_partkey` and
+//! `part.p_partkey = l2_partkey` only equate the two lineitem instances *through* part. So
+//! when the outer equality compares different base columns, the aggregate's side is searched
+//! for the hop that leads back to the segmented relation's column.
+bool FindIndirectKey(LogicalOperator &aggregate_side, const ColumnBinding &through,
+                     const BaseColumnIdentity &relation_identity, ColumnBinding &key, LogicalType &key_type) {
+	if (aggregate_side.type != LogicalOperatorType::LOGICAL_COMPARISON_JOIN) {
+		return false;
+	}
+	auto &inner = aggregate_side.Cast<LogicalComparisonJoin>();
+	if (inner.join_type != JoinType::INNER) {
+		return false;
+	}
+	for (auto &condition : inner.conditions) {
+		if (!condition.IsComparison() || condition.GetComparisonType() != ExpressionType::COMPARE_EQUAL) {
+			continue;
+		}
+		auto &lhs = condition.GetLHS();
+		auto &rhs = condition.GetRHS();
+		if (lhs.GetExpressionClass() != ExpressionClass::BOUND_COLUMN_REF ||
+		    rhs.GetExpressionClass() != ExpressionClass::BOUND_COLUMN_REF) {
+			continue;
+		}
+		auto &left = lhs.Cast<BoundColumnRefExpression>();
+		auto &right = rhs.Cast<BoundColumnRefExpression>();
+		for (idx_t side = 0; side < 2; side++) {
+			auto &same = (side == 0 ? left : right).Binding();
+			auto &candidate = (side == 0 ? right : left);
+			if (!(same == through)) {
+				continue;
+			}
+			if (IdentityOf(aggregate_side, candidate.Binding()) == relation_identity) {
+				key = candidate.Binding();
+				key_type = candidate.GetReturnType();
+				return true;
+			}
+		}
+	}
+	return false;
 }
 
 //! Every base column the aggregate's own expressions read, mapped to the position of the
@@ -490,9 +555,22 @@ bool FindSegmentShape(LogicalComparisonJoin &join, SegmentShape &shape) {
 
 			auto relation_identity = IdentityOf(*join.children[relation_index], relation_ref.Binding());
 			auto aggregate_identity = IdentityOf(*join.children[aggregate_index], aggregate_ref.Binding());
+			auto key_binding = aggregate_ref.Binding();
+			auto key_type = aggregate_ref.GetReturnType();
 			if (!(relation_identity == aggregate_identity)) {
-				Declined("not the same base column on both sides");
-				continue;
+				// Not compared directly - look for the instance one hop away, inside the
+				// aggregate's side (TPC-H Q17's part join).
+				ColumnBinding indirect_key;
+				LogicalType indirect_type;
+				auto indirect_aggregate = FindAggregate(*join.children[aggregate_index]);
+				if (!indirect_aggregate ||
+				    !FindIndirectKey(*join.children[aggregate_index], aggregate_ref.Binding(), relation_identity,
+				                     indirect_key, indirect_type)) {
+					Declined("not the same base column on both sides");
+					continue;
+				}
+				key_binding = indirect_key;
+				key_type = indirect_type;
 			}
 			// The aggregate side has to be an aggregate, grouped by that same column.
 			auto aggregate = FindAggregate(*join.children[aggregate_index]);
@@ -502,6 +580,10 @@ bool FindSegmentShape(LogicalComparisonJoin &join, SegmentShape &shape) {
 			}
 			if (aggregate->groups.empty()) {
 				Declined("the aggregate has no grouping columns");
+				continue;
+			}
+			if (!AggregateGroupedOn(*aggregate, relation_identity)) {
+				Declined("the aggregate is not grouped by the segmented relation's key");
 				continue;
 			}
 			// ... and it has to read the same rows as the segmented relation does.
@@ -552,8 +634,8 @@ bool FindSegmentShape(LogicalComparisonJoin &join, SegmentShape &shape) {
 			shape.aggregate_child = aggregate_index;
 			shape.relation_key_position = key_position;
 			shape.relation_key_type = join.children[relation_index]->types[key_position];
-			shape.aggregate_key = aggregate_ref.Binding();
-			shape.aggregate_key_type = aggregate_ref.GetReturnType();
+			shape.aggregate_key = key_binding;
+			shape.aggregate_key_type = key_type;
 			shape.key_condition = condition_index;
 			return true;
 		}
