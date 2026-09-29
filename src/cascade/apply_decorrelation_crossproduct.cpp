@@ -2,6 +2,7 @@
 
 #include "duckdb/cascade/cascade_bindings.hpp"
 #include "duckdb/cascade/cascade_correlation.hpp"
+#include "duckdb/cascade/cascade_keys.hpp"
 #include "duckdb/planner/binder.hpp"
 #include "duckdb/planner/expression/bound_columnref_expression.hpp"
 #include "duckdb/planner/expression_iterator.hpp"
@@ -284,6 +285,27 @@ unique_ptr<LogicalOperator> ApplyDecorrelator::TryDistributeOverCrossProduct(uni
 		               "(identity (7)); the branches are matched back on the outer key");
 	}
 	return std::move(result);
+}
+
+vector<ColumnBinding> ApplyDecorrelator::SideKey(LogicalOperator &side) {
+	auto key = CascadeSideKey(side);
+	if (!key.empty() || side.type != LogicalOperatorType::LOGICAL_CTE_REF) {
+		return key;
+	}
+	auto entry = cte_key_positions.find(side.Cast<LogicalCTERef>().cte_index.index);
+	if (entry == cte_key_positions.end()) {
+		return key;
+	}
+	// A reference exposes the CTE's columns in the order they were materialised, which is the
+	// order of the relation the key positions were taken from.
+	vector<ColumnBinding> result;
+	auto ref_bindings = side.GetColumnBindings();
+	for (auto position : entry->second) {
+		if (position < ref_bindings.size()) {
+			result.push_back(ref_bindings[position]);
+		}
+	}
+	return result;
 }
 
 } // namespace duckdb
