@@ -464,6 +464,10 @@ void CascadesOptimizer::ApplyRule(GroupId group, GroupExpr &expr, CascadesRule &
 		once_memory.emplace_back(&rule, &expr);
 	}
 	if (rule.Apply(*this, group, expr)) {
+		if (CascadeConfig::PrintPlans()) {
+			Printer::Print(StringUtil::Format("--- cascade(cascades) rule applied: %s in group %llu", rule.Name(),
+			                                  (unsigned long long)group));
+		}
 		rules_applied++;
 	} else {
 		// Matched and applied, but produced nothing (the shape was not there after all).
