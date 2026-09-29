@@ -44,7 +44,16 @@ public:
 	//! Eliminate every Apply in the plan.
 	unique_ptr<LogicalOperator> Decorrelate(unique_ptr<LogicalOperator> plan);
 
+	//! Whether identity (5)/(6) distributed an Apply over a set operation, i.e. whether the plan
+	//! now shares the outer relation between the branches through a materialised CTE. DuckDB's
+	//! pull-up passes mis-rewrite that shape (see CascadeOptimizer::Optimize), so the caller has
+	//! to know it afterwards.
+	bool DistributedSetOperation() const {
+		return distributed_set_operation;
+	}
+
 private:
+	bool distributed_set_operation = false;
 	unique_ptr<LogicalOperator> DecorrelateNode(unique_ptr<LogicalOperator> op, BindingExport &exports);
 	unique_ptr<LogicalOperator> DecorrelateApply(unique_ptr<LogicalOperator> op, BindingExport &exports);
 	//! Identities (5) and (6): an Apply over a set operation becomes a set operation of

@@ -10,6 +10,7 @@
 #include "duckdb/common/exception.hpp"
 #include "duckdb/common/printer.hpp"
 #include "duckdb/main/client_context.hpp"
+#include "duckdb/main/config.hpp"
 #include "duckdb/planner/logical_operator.hpp"
 #include "duckdb/planner/subquery/flatten_dependent_join.hpp"
 
@@ -50,8 +51,30 @@ unique_ptr<LogicalOperator> CascadeOptimizer::Optimize(unique_ptr<LogicalOperato
 
 	if (CascadeConfig::RunDuckOptimizers()) {
 		// Fair comparison: our rewrite, then DuckDB's own downstream passes over it.
+		//
+		// FIXME: one of those passes, FilterPullup, is wrong on the plan identity (5)/(6) builds.
+		// That plan is a set operation whose branches each read the shared outer relation through
+		// the materialised CTE, and FilterPullup pulls a filter out of the left branch up above
+		// the EXCEPT - rewriting its column references to the set operation's positions - which
+		// changes the multiset difference. A four-line repro (cascade + KEEP_APPLY + OPTIMIZE):
+		//
+		//     SELECT s.a FROM tt, (SELECT a FROM tu WHERE tu.a = tt.k
+		//                          EXCEPT ALL SELECT b FROM tv WHERE tv.b = tt.k) s;
+		//
+		// answers 1,1 without the optimizer and 1,1,1,1,2,2,2,2,2,2,5,5,5,5 with it; disabling
+		// `filter_pullup` by hand restores 1,1. Until the pass is fixed, keep it away from this
+		// shape - the plan we build is verified correct on its own (the sqllogictest pins it).
+		// Only the shape that needs the guard; every other plan keeps the pass.
+		auto &disabled = DBConfig::GetConfig(context).options.disabled_optimizers;
+		bool inserted = false;
+		if (decorrelator.DistributedSetOperation()) {
+			inserted = disabled.insert(OptimizerType::FILTER_PULLUP).second;
+		}
 		Optimizer optimizer(binder, context);
 		plan = optimizer.Optimize(std::move(plan));
+		if (inserted) {
+			disabled.erase(OptimizerType::FILTER_PULLUP);
+		}
 	} else {
 		// A plan must still satisfy the mandatory rewrites DuckDB applies even with
 		// the optimizer disabled, otherwise the physical planner rejects it.

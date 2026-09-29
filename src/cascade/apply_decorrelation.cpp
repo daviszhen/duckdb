@@ -578,6 +578,7 @@ unique_ptr<LogicalOperator> ApplyDecorrelator::TryDistributeOverSetOperation(uni
 		Printer::Print("--- cascade: section 2.5 class 2 - Apply distributed over a set operation "
 		               "(identity (5)/(6)); the outer relation is shared through a materialised CTE");
 	}
+	distributed_set_operation = true;
 	return std::move(result);
 }
 
