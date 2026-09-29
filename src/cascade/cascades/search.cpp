@@ -2,6 +2,7 @@
 
 #include "duckdb/cascade/cascade_config.hpp"
 #include "duckdb/cascade/cascades/rules/apply_to_join.hpp"
+#include "duckdb/cascade/cascades/rules/lift_local_predicate.hpp"
 #include "duckdb/cascade/cascades/rules/push_filter_below_groupby.hpp"
 #include "duckdb/common/exception.hpp"
 #include "duckdb/common/enums/logical_operator_type.hpp"
@@ -47,6 +48,9 @@ void CascadesOptimizer::RegisterRules() {
 	// Identity (1)/(2): an inner Apply without correlation is a join. This is the rule that can
 	// lower the enforcer counter, so it goes first.
 	AddRule(make_uniq<ApplyToJoin>());
+	// Section 2, identity (3): a predicate reading only the sub-query's own columns moves above
+	// the Apply.
+	AddRule(make_uniq<LiftLocalPredicate>());
 	// Section 3.1 (A): a predicate constant within a group moves below the GroupBy.
 	AddRule(make_uniq<PushFilterBelowGroupBy>());
 }
