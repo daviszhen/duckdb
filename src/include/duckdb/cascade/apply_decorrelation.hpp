@@ -52,8 +52,16 @@ public:
 		return distributed_set_operation;
 	}
 
+	//! Whether identity (9) turned a correlated scalar sub-query into the group-by over a left
+	//! outer join. DuckDB's CompressedMaterialization is wrong on that shape (it narrows the
+	//! group-by key and leaves a stale reference behind), see CascadeOptimizer::Optimize.
+	bool ScalarAggregate() const {
+		return scalar_aggregate;
+	}
+
 private:
 	bool distributed_set_operation = false;
+	bool scalar_aggregate = false;
 	unique_ptr<LogicalOperator> DecorrelateNode(unique_ptr<LogicalOperator> op, BindingExport &exports);
 	unique_ptr<LogicalOperator> DecorrelateApply(unique_ptr<LogicalOperator> op, BindingExport &exports);
 	//! Identities (5) and (6): an Apply over a set operation becomes a set operation of

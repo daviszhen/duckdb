@@ -64,16 +64,34 @@ unique_ptr<LogicalOperator> CascadeOptimizer::Optimize(unique_ptr<LogicalOperato
 		// answers 1,1 without the optimizer and 1,1,1,1,2,2,2,2,2,2,5,5,5,5 with it; disabling
 		// `filter_pullup` by hand restores 1,1. Until the pass is fixed, keep it away from this
 		// shape - the plan we build is verified correct on its own (the sqllogictest pins it).
-		// Only the shape that needs the guard; every other plan keeps the pass.
+		// ... CompressedMaterialization is wrong on the plan identity (9) builds: it narrows a
+		// group-by key and expects to compensate above, but on this shape it leaves a reference to
+		// a column that is no longer in scope:
+		//
+		//     SELECT a, (SELECT count(*) FROM s WHERE s.a < t.a) FROM t;
+		//
+		// `Failed to bind column reference "" [18.0] (bindings: {#[0.0]})`; disabling the pass by
+		// hand answers it. The equality forms happen to survive, but the guard covers the whole
+		// identity - a lost narrowing pass costs speed, a wrong plan costs correctness.
+		//
+		// Both guards are per plan: every other plan keeps the passes.
 		auto &disabled = DBConfig::GetConfig(context).options.disabled_optimizers;
-		bool inserted = false;
+		vector<OptimizerType> added;
+		auto guard = [&](OptimizerType type) {
+			if (disabled.insert(type).second) {
+				added.push_back(type);
+			}
+		};
 		if (decorrelator.DistributedSetOperation()) {
-			inserted = disabled.insert(OptimizerType::FILTER_PULLUP).second;
+			guard(OptimizerType::FILTER_PULLUP);
+		}
+		if (decorrelator.ScalarAggregate()) {
+			guard(OptimizerType::COMPRESSED_MATERIALIZATION);
 		}
 		Optimizer optimizer(binder, context);
 		plan = optimizer.Optimize(std::move(plan));
-		if (inserted) {
-			disabled.erase(OptimizerType::FILTER_PULLUP);
+		for (auto type : added) {
+			disabled.erase(type);
 		}
 	} else {
 		// A plan must still satisfy the mandatory rewrites DuckDB applies even with
