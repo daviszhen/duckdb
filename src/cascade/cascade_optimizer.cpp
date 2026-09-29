@@ -88,6 +88,13 @@ unique_ptr<LogicalOperator> CascadeOptimizer::Optimize(unique_ptr<LogicalOperato
 		if (decorrelator.ScalarAggregate()) {
 			guard(OptimizerType::COMPRESSED_MATERIALIZATION);
 		}
+		if (decorrelator.NestedScalarAggregate()) {
+			// ... and StatisticsPropagator is wrong on the nested shape: it derives a filter
+			// (e.g. `a = 1` from the WHERE clause) and pushes it below the group-by identity (8)
+			// builds, where the group keys do not satisfy it - the answer silently comes back
+			// empty instead of `1|2, 1|2`.
+			guard(OptimizerType::STATISTICS_PROPAGATION);
+		}
 		if (decorrelator.SharedSubQueries()) {
 			// ... and CommonSubplanOptimizer is wrong when several correlated sub-queries share
 			// the outer relation. It materialises the shared part into `__common_subplan_N` and

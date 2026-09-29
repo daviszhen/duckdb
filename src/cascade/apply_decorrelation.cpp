@@ -1130,6 +1130,7 @@ unique_ptr<LogicalOperator> ApplyDecorrelator::DecorrelateNestedScalar(
     unique_ptr<LogicalOperator> left, unique_ptr<LogicalOperator> right, const vector<LogicalOperator *> &projections,
     LogicalAggregate &top, LogicalAggregate &nested, vector<unique_ptr<Expression>> &extracted,
     const CorrelatedColumns &correlated, BindingExport &exports, const ColumnBinding &value_binding) {
+	nested_scalar = true;
 	auto needed = CollectRightColumns(extracted, correlated);
 	if (needed.empty()) {
 		throw NotImplementedException("cascade: a correlated scalar subquery with no sub-query column");

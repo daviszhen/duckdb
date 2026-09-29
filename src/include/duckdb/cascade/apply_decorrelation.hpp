@@ -66,10 +66,18 @@ public:
 		return scalar_subqueries > 1;
 	}
 
+	//! Whether identity (8) had to move an Apply below the sub-query's own GroupBy. DuckDB's
+	//! StatisticsPropagator derives a filter for that shape and pushes it where the group keys
+	//! do not satisfy it, which silently empties the answer, see CascadeOptimizer::Optimize.
+	bool NestedScalarAggregate() const {
+		return nested_scalar;
+	}
+
 private:
 	bool distributed_set_operation = false;
 	bool scalar_aggregate = false;
 	idx_t scalar_subqueries = 0;
+	bool nested_scalar = false;
 	unique_ptr<LogicalOperator> DecorrelateNode(unique_ptr<LogicalOperator> op, BindingExport &exports);
 	unique_ptr<LogicalOperator> DecorrelateApply(unique_ptr<LogicalOperator> op, BindingExport &exports);
 	//! Identities (5) and (6): an Apply over a set operation becomes a set operation of
