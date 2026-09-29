@@ -102,15 +102,23 @@ unique_ptr<LogicalOperator> CascadesOptimizer::Optimize(unique_ptr<LogicalOperat
 				}
 				auto &apply = expr->op->Cast<LogicalDependentJoin>();
 				string right_types;
+				string right_below;
 				for (auto &candidate : memo.GetGroup(expr->children[1]).exprs) {
 					right_types += (right_types.empty() ? "" : ",") + EnumUtil::ToString(candidate->type);
+					// One level deeper: where the correlated predicate actually is. The right side is
+					// a projection, so the predicate cannot be on it.
+					for (auto child : candidate->children) {
+						for (auto &below : memo.GetGroup(child).exprs) {
+							right_below += (right_below.empty() ? "" : ",") + EnumUtil::ToString(below->type);
+						}
+					}
 				}
 				Printer::Print(StringUtil::Format(
 				    "--- cascade(cascades) apply in group %llu: children=%llu condition=%s correlated=%llu "
-				    "right=[%s]",
+				    "right=[%s] below=[%s]",
 				    (unsigned long long)group, (unsigned long long)expr->children.size(),
 				    apply.condition ? "yes" : "no", (unsigned long long)apply.correlated_columns.size(),
-				    right_types.c_str()));
+				    right_types.c_str(), right_below.c_str()));
 			}
 		}
 	}
