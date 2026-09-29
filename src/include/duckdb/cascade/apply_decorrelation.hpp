@@ -15,6 +15,7 @@
 
 #include "duckdb/common/common.hpp"
 #include "duckdb/planner/binder.hpp"
+#include "duckdb/cascade/cascade_bindings.hpp"
 #include "duckdb/planner/column_binding.hpp"
 
 namespace duckdb {
@@ -23,12 +24,6 @@ class ClientContext;
 class Expression;
 class LogicalAggregate;
 class LogicalOperator;
-
-//! A rewrite can change the bindings a node exposes. The caller gets the old ->
-//! new mapping back so it can repoint its own expressions; without it, replacing
-//! a sub-tree with an aggregate (which re-binds its groups) would strand every
-//! reference the parent holds.
-using BindingExport = vector<std::pair<ColumnBinding, ColumnBinding>>;
 
 //! Rewrite the marker joins that Apply elimination produces into the semi/anti
 //! joins they actually mean, whenever the marker is consumed only as a

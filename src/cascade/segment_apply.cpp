@@ -193,9 +193,6 @@ static bool SegmentDebug() {
 	static const bool enabled = std::getenv("DUCKDB_CASCADE_SEGMENT_DEBUG") != nullptr;
 	return enabled;
 }
-
-bool InBindings(const vector<ColumnBinding> &bindings, const ColumnBinding &binding);
-
 static void Declined(const string &reason) {
 	if (SegmentDebug()) {
 		fprintf(stderr, "[segment apply] declined: %s\n", reason.c_str());
@@ -781,91 +778,6 @@ bool FindSegmentShape(LogicalComparisonJoin &join, SegmentShape &shape) {
 	}
 	return false;
 }
-
-void SegmentRewriteExpressionBindings(unique_ptr<Expression> &expr, const BindingExport &exports) {
-	ExpressionIterator::VisitExpressionMutable<BoundColumnRefExpression>(
-	    expr, [&](BoundColumnRefExpression &colref, unique_ptr<Expression> &) {
-		    for (auto &entry : exports) {
-			    if (colref.Binding() == entry.first) {
-				    colref.BindingMutable() = entry.second;
-				    return;
-			    }
-		    }
-	    });
-}
-
-void SegmentRewriteOperatorBindings(LogicalOperator &op, const BindingExport &exports) {
-	for (auto &expr : op.expressions) {
-		SegmentRewriteExpressionBindings(expr, exports);
-	}
-	switch (op.type) {
-	case LogicalOperatorType::LOGICAL_FILTER:
-		break;
-	case LogicalOperatorType::LOGICAL_AGGREGATE_AND_GROUP_BY: {
-		auto &aggregate = op.Cast<LogicalAggregate>();
-		for (auto &expr : aggregate.groups) {
-			SegmentRewriteExpressionBindings(expr, exports);
-		}
-		break;
-	}
-	case LogicalOperatorType::LOGICAL_ORDER_BY:
-	case LogicalOperatorType::LOGICAL_TOP_N: {
-		auto &orders = (op.type == LogicalOperatorType::LOGICAL_ORDER_BY)
-		                   ? op.Cast<LogicalOrder>().orders
-		                   : op.Cast<LogicalTopN>().orders;
-		for (auto &order : orders) {
-			SegmentRewriteExpressionBindings(order.expression, exports);
-		}
-		break;
-	}
-	case LogicalOperatorType::LOGICAL_DISTINCT: {
-		auto &distinct = op.Cast<LogicalDistinct>();
-		for (auto &target : distinct.distinct_targets) {
-			SegmentRewriteExpressionBindings(target, exports);
-		}
-		break;
-	}
-	case LogicalOperatorType::LOGICAL_ANY_JOIN: {
-		auto &any_join = op.Cast<LogicalAnyJoin>();
-		SegmentRewriteExpressionBindings(any_join.condition, exports);
-		break;
-	}
-	case LogicalOperatorType::LOGICAL_COMPARISON_JOIN:
-	case LogicalOperatorType::LOGICAL_DELIM_JOIN:
-	case LogicalOperatorType::LOGICAL_ASOF_JOIN: {
-		auto &join = op.Cast<LogicalComparisonJoin>();
-		for (auto &condition : join.conditions) {
-			if (!condition.IsComparison()) {
-				continue;
-			}
-			SegmentRewriteExpressionBindings(condition.LeftReference(), exports);
-			SegmentRewriteExpressionBindings(condition.RightReference(), exports);
-		}
-		break;
-	}
-	default:
-		break;
-	}
-}
-
-bool SegmentPassesBindingsThrough(const LogicalOperator &op) {
-	switch (op.type) {
-	case LogicalOperatorType::LOGICAL_FILTER:
-	case LogicalOperatorType::LOGICAL_ORDER_BY:
-	case LogicalOperatorType::LOGICAL_LIMIT:
-	case LogicalOperatorType::LOGICAL_TOP_N:
-	case LogicalOperatorType::LOGICAL_DISTINCT:
-	case LogicalOperatorType::LOGICAL_COMPARISON_JOIN:
-	case LogicalOperatorType::LOGICAL_DELIM_JOIN:
-	case LogicalOperatorType::LOGICAL_ASOF_JOIN:
-	case LogicalOperatorType::LOGICAL_ANY_JOIN:
-	case LogicalOperatorType::LOGICAL_CROSS_PRODUCT:
-		return true;
-	default:
-		return false;
-	}
-}
-
 //! Build the SegmentApply for a shape that FindSegmentShape accepted.
 //! The bindings a parameter leaf of the given width exposes.
 vector<ColumnBinding> ParameterBindings(TableIndex table_index, idx_t column_count) {
@@ -1036,10 +948,10 @@ unique_ptr<LogicalOperator> BuildSegmentApply(LogicalComparisonJoin &join, const
 		throw InternalException("cascade: SegmentApply lost the relation's columns");
 	}
 	for (auto &expr : aggregate->groups) {
-		SegmentRewriteExpressionBindings(expr, aggregate_input_map);
+		RewriteExpressionBindings(expr, aggregate_input_map);
 	}
 	for (auto &expr : aggregate->expressions) {
-		SegmentRewriteExpressionBindings(expr, aggregate_input_map);
+		RewriteExpressionBindings(expr, aggregate_input_map);
 	}
 	auto aggregate_parameter = make_uniq<LogicalSegmentParameterGet>(aggregate_index, parameter_types);
 	aggregate->children[0] = std::move(aggregate_parameter);
@@ -1082,8 +994,8 @@ unique_ptr<LogicalOperator> BuildSegmentApply(LogicalComparisonJoin &join, const
 			fprintf(stderr, "[segment apply] pushed condition LHS=%s RHS=%s\n", left->ToString().c_str(),
 			        right->ToString().c_str());
 		}
-		SegmentRewriteExpressionBindings(left, relation_map);
-		SegmentRewriteExpressionBindings(right, relation_map);
+		RewriteExpressionBindings(left, relation_map);
+		RewriteExpressionBindings(right, relation_map);
 		if (SegmentDebug()) {
 			ExpressionIterator::VisitExpression<BoundColumnRefExpression>(
 			    *right, [&](const BoundColumnRefExpression &colref) {
@@ -1096,7 +1008,7 @@ unique_ptr<LogicalOperator> BuildSegmentApply(LogicalComparisonJoin &join, const
 		    BoundComparisonExpression::Create(condition.GetComparisonType(), std::move(left), std::move(right)));
 	}
 	for (auto &filter : pushed_filters) {
-		SegmentRewriteExpressionBindings(filter, relation_map);
+		RewriteExpressionBindings(filter, relation_map);
 		remaining.push_back(std::move(filter));
 	}
 	for (idx_t i = 0; i < join.conditions.size(); i++) {
@@ -1110,8 +1022,8 @@ unique_ptr<LogicalOperator> BuildSegmentApply(LogicalComparisonJoin &join, const
 		}
 		auto left = condition.GetLHS().Copy();
 		auto right = condition.GetRHS().Copy();
-		SegmentRewriteExpressionBindings(left, relation_map);
-		SegmentRewriteExpressionBindings(right, relation_map);
+		RewriteExpressionBindings(left, relation_map);
+		RewriteExpressionBindings(right, relation_map);
 		if (SegmentDebug()) {
 			ExpressionIterator::VisitExpression<BoundColumnRefExpression>(
 			    *left, [&](const BoundColumnRefExpression &colref) {
@@ -1198,16 +1110,6 @@ void CollectConditionBindings(LogicalComparisonJoin &join, vector<ColumnBinding>
 		add(condition.GetRHS());
 	}
 }
-
-bool InBindings(const vector<ColumnBinding> &bindings, const ColumnBinding &binding) {
-	for (auto &candidate : bindings) {
-		if (candidate == binding) {
-			return true;
-		}
-	}
-	return false;
-}
-
 //! The bindings a plan produces whose value is the same for every row of a segment. Seeded
 //! with the segmenting columns the parameter exposes, and propagated only through plain
 //! column references: an aggregate's grouping column that is the segmenting column is
@@ -1384,8 +1286,8 @@ unique_ptr<LogicalOperator> PushJoinBelowSegmentApply(LogicalComparisonJoin &joi
 			if (!condition.IsComparison()) {
 				continue;
 			}
-			SegmentRewriteExpressionBindings(condition.LeftReference(), condition_map);
-			SegmentRewriteExpressionBindings(condition.RightReference(), condition_map);
+			RewriteExpressionBindings(condition.LeftReference(), condition_map);
+			RewriteExpressionBindings(condition.RightReference(), condition_map);
 		}
 	}
 
@@ -1475,8 +1377,8 @@ unique_ptr<LogicalOperator> RewriteNode(unique_ptr<LogicalOperator> op, Binder &
 		if (child_exports.empty()) {
 			continue;
 		}
-		SegmentRewriteOperatorBindings(*op, child_exports);
-		if (SegmentPassesBindingsThrough(*op)) {
+		RewriteOperatorBindings(*op, child_exports);
+		if (PassesBindingsThrough(*op)) {
 			for (auto &entry : child_exports) {
 				exports.push_back(entry);
 			}

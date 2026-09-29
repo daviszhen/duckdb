@@ -301,10 +301,6 @@ static void ExposeRightColumns(LogicalOperator &right, const vector<NeededColumn
 		mapping.emplace_back(col.binding, ColumnBinding(projection.table_index, ProjectionIndex(position)));
 	}
 }
-
-static void RewriteBindings(unique_ptr<Expression> &expr,
-                            const vector<std::pair<ColumnBinding, ColumnBinding>> &mapping);
-
 //! Identities (3) and (4) of Galindo-Legaria & Joshi as a framework rather than a
 //! single step. A correlated predicate travels up through the row-preserving operators
 //! of the sub-query's body until it reaches the Apply, where it becomes a join
@@ -330,7 +326,7 @@ static unique_ptr<LogicalOperator> LiftCorrelatedPredicates(unique_ptr<LogicalOp
 			vector<std::pair<ColumnBinding, ColumnBinding>> mapping;
 			ExposeRightColumns(*op, needed, mapping);
 			for (auto &predicate : pending) {
-				RewriteBindings(predicate, mapping);
+				RewriteExpressionBindings(predicate, mapping);
 			}
 		}
 		return op;
@@ -359,32 +355,6 @@ static unique_ptr<LogicalOperator> LiftCorrelatedPredicates(unique_ptr<LogicalOp
 	// The correlation that is left is reported by the caller.
 	return op;
 }
-
-//! Point the lifted predicates at the bindings the right sub-tree now exposes.
-static void RewriteBindings(unique_ptr<Expression> &expr,
-                            const vector<std::pair<ColumnBinding, ColumnBinding>> &mapping) {
-	ExpressionIterator::VisitExpressionMutable<BoundColumnRefExpression>(
-	    expr, [&](BoundColumnRefExpression &colref, unique_ptr<Expression> &) {
-		    for (auto &entry : mapping) {
-			    if (colref.Binding() == entry.first) {
-				    colref.BindingMutable() = entry.second;
-				    return;
-			    }
-		    }
-	    });
-}
-
-//! Follow a binding through the exposure mapping.
-static ColumnBinding MapBinding(const ColumnBinding &binding,
-                                const vector<std::pair<ColumnBinding, ColumnBinding>> &mapping) {
-	for (auto &entry : mapping) {
-		if (entry.first == binding) {
-			return entry.second;
-		}
-	}
-	return binding;
-}
-
 //! Turn an extracted correlated predicate into a join condition. Comparisons
 //! become proper join conditions; anything else is kept as a single-expression
 //! condition, which DuckDB resolves over the combined scope.
@@ -535,7 +505,7 @@ unique_ptr<LogicalOperator> ApplyDecorrelator::TryDistributeOverSetOperation(uni
 			for (idx_t i = 0; i < inner_bindings.size() && i < branch_bindings.size(); i++) {
 				condition_map.emplace_back(inner_bindings[i], branch_bindings[i]);
 			}
-			RewriteBindings(branch_condition, condition_map);
+			RewriteExpressionBindings(branch_condition, condition_map);
 		}
 
 		auto branch_apply = make_uniq<LogicalDependentJoin>(JoinType::INNER);
@@ -796,7 +766,7 @@ unique_ptr<LogicalOperator> ApplyDecorrelator::TryDistributeOverCrossProduct(uni
 		}
 		for (auto &expr : shaping->expressions) {
 			auto copy = expr->Copy();
-			RewriteBindings(copy, branch_map);
+			RewriteExpressionBindings(copy, branch_map);
 			top_list.push_back(std::move(copy));
 		}
 		has_shaped_top = true;
@@ -838,7 +808,7 @@ unique_ptr<LogicalOperator> ApplyDecorrelator::TryDistributeOverCrossProduct(uni
 				filter_map.emplace_back(e2_bindings[i], dropped_bindings[first_branch_width + i]);
 			}
 		}
-		RewriteBindings(condition, filter_map);
+		RewriteExpressionBindings(condition, filter_map);
 		filter->expressions.push_back(std::move(condition));
 		filter->children.push_back(std::move(result_plan));
 		result_plan = std::move(filter);
@@ -1081,9 +1051,6 @@ struct ExposedColumn {
 	LogicalType type;
 };
 
-//! Point an operator's own expressions at the bindings its child now exposes.
-static void RewriteOperatorBindings(LogicalOperator &op, const BindingExport &exports);
-
 //! The GroupBy a scalar sub-query's correlation can be hiding under: a sub-query like
 //! `select sum(x) from (select a, max(b) as x from s where s.a = t.a group by a) q`
 //! aggregates twice, and the correlated predicate belongs to the inner GroupBy.
@@ -1176,7 +1143,7 @@ unique_ptr<LogicalOperator> ApplyDecorrelator::DecorrelateNestedScalar(
 		ExposeRightColumns(*inner, needed, mapping);
 	}
 	for (auto &predicate : extracted) {
-		RewriteBindings(predicate, mapping);
+		RewriteExpressionBindings(predicate, mapping);
 	}
 	if (SubtreeReferencesCorrelation(*inner, correlated)) {
 		throw NotImplementedException("cascade: identity (8) does not handle this correlated subquery shape yet "
@@ -1386,7 +1353,7 @@ unique_ptr<LogicalOperator> ApplyDecorrelator::DecorrelateScalar(unique_ptr<Logi
 		ExposeRightColumns(*inner, needed, mapping);
 	}
 	for (auto &predicate : extracted) {
-		RewriteBindings(predicate, mapping);
+		RewriteExpressionBindings(predicate, mapping);
 	}
 
 	auto left_bindings = left->GetColumnBindings();
@@ -1481,7 +1448,7 @@ unique_ptr<LogicalOperator> ApplyDecorrelator::DecorrelateScalar(unique_ptr<Logi
 			// Plain comparison, not IS NOT DISTINCT FROM: the outer row has to mean
 			// exactly what the user wrote, so a NULL outer value matches nothing and
 			// receives the empty-input answer from pi_c.
-			RewriteBindings(predicate, key_export);
+			RewriteExpressionBindings(predicate, key_export);
 			AddJoinCondition(*join, std::move(predicate), correlated, false);
 		}
 
@@ -1625,7 +1592,7 @@ unique_ptr<LogicalOperator> ApplyDecorrelator::DecorrelateScalar(unique_ptr<Logi
 		}
 		aggregate_export.emplace_back(ColumnBinding(old_aggregate_index, ProjectionIndex(0)), value_now);
 		for (auto &expr : bottom.expressions) {
-			RewriteBindings(expr, aggregate_export);
+			RewriteExpressionBindings(expr, aggregate_export);
 		}
 		bottom.children[0] = std::move(body);
 
@@ -1681,85 +1648,6 @@ unique_ptr<LogicalOperator> ApplyDecorrelator::DecorrelateScalar(unique_ptr<Logi
 		exports.emplace_back(value_binding, value_now);
 	}
 	return result;
-}
-
-//! Point an operator's own expressions at the bindings its child now exposes.
-static void RewriteOperatorBindings(LogicalOperator &op, const BindingExport &exports) {
-	for (auto &expr : op.expressions) {
-		RewriteBindings(expr, exports);
-	}
-	switch (op.type) {
-	case LogicalOperatorType::LOGICAL_COMPARISON_JOIN:
-	case LogicalOperatorType::LOGICAL_DELIM_JOIN:
-	case LogicalOperatorType::LOGICAL_ASOF_JOIN: {
-		auto &join = op.Cast<LogicalComparisonJoin>();
-		for (auto &condition : join.conditions) {
-			if (!condition.IsComparison()) {
-				continue;
-			}
-			RewriteBindings(condition.LeftReference(), exports);
-			RewriteBindings(condition.RightReference(), exports);
-		}
-		break;
-	}
-	case LogicalOperatorType::LOGICAL_ANY_JOIN: {
-		auto &condition = op.Cast<LogicalAnyJoin>().condition;
-		if (condition) {
-			RewriteBindings(condition, exports);
-		}
-		break;
-	}
-	case LogicalOperatorType::LOGICAL_DEPENDENT_JOIN: {
-		// An Apply keeps its ON predicate in a member of its own, and the columns it
-		// compares can move like any other expression's.
-		auto &condition = op.Cast<LogicalDependentJoin>().condition;
-		if (condition) {
-			RewriteBindings(condition, exports);
-		}
-		break;
-	}
-	case LogicalOperatorType::LOGICAL_AGGREGATE_AND_GROUP_BY: {
-		// An aggregate keeps its grouping expressions in their own member, away from
-		// op.expressions, so they need rewriting too.
-		for (auto &group : op.Cast<LogicalAggregate>().groups) {
-			RewriteBindings(group, exports);
-		}
-		break;
-	}
-	default:
-		break;
-	}
-}
-
-//! True for operators that expose their child's bindings unchanged. A rewrite
-//! below one of them is therefore still visible to its own parent, so the export
-//! mapping has to keep travelling upwards.
-static bool PassesBindingsThrough(const LogicalOperator &op) {
-	switch (op.type) {
-	case LogicalOperatorType::LOGICAL_FILTER:
-	case LogicalOperatorType::LOGICAL_ORDER_BY:
-	case LogicalOperatorType::LOGICAL_LIMIT:
-	case LogicalOperatorType::LOGICAL_TOP_N:
-	case LogicalOperatorType::LOGICAL_DISTINCT:
-	case LogicalOperatorType::LOGICAL_COMPARISON_JOIN:
-	case LogicalOperatorType::LOGICAL_DELIM_JOIN:
-	case LogicalOperatorType::LOGICAL_ASOF_JOIN:
-	case LogicalOperatorType::LOGICAL_ANY_JOIN:
-	case LogicalOperatorType::LOGICAL_CROSS_PRODUCT:
-		return true;
-	default:
-		return false;
-	}
-}
-
-//! Point every operator of a sub-tree at the bindings its child now exposes. RewriteOperatorBindings
-//! looks at one node's own expressions, which is enough when a mapping travels upwards, but a
-//! sub-query's references to the outer relation live *inside* it and have to be rewritten in place.
-static void RewriteTreeBindings(LogicalOperator &op, const BindingExport &exports) {
-	RewriteOperatorBindings(op, exports);
-	for (auto &child : op.children) {
-		RewriteTreeBindings(*child, exports);
-	}
 }
 
 unique_ptr<LogicalOperator> ApplyDecorrelator::DecorrelateNode(unique_ptr<LogicalOperator> op, BindingExport &exports) {
