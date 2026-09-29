@@ -21,10 +21,13 @@
 //     index, i.e. exactly what the decorrelator's ExposeRightColumns and DecrementCorrelationDepth
 //     maintain. Moving the condition is not enough; the column exposure has to be reproduced.
 //   * The same rule body spliced twice in one build and not at all in another (applied=4 but
-//     ParentsOf(consumer_group) empty), which is not yet explained. Before writing the exposure
-//     code, that has to be understood: print FindMarkConsumer's answer and ParentsOf's result on
-//     the failing statement in both versions and compare. A consumer with no parents is the root
-//     of the memo, and a SEMI join cannot stand in for it (it exposes the left side only).
+//     ParentsOf(consumer_group) empty) is *not* nondeterminism: the splice rewrites the parents'
+//     child ids, so after the first one the consumer group has no parents left and later
+//     applications find nothing to re-point. Derived state again - ParentsOf answers from the
+//     current children - and it has a consequence for the real rewrite: the second application on
+//     the same group is expected to do nothing, and must not be read as a failure. A consumer with
+//     no parents at the *first* application is a different case: that is the memo's root, and a
+//     SEMI join cannot stand in for it because it exposes the left side only.
 //
 // Both matrices are green with this rule as it stands (it is inert on the corpus), so the shape
 // above is a design note, not a description of what the code does today.
@@ -176,6 +179,21 @@ bool CorrelatedApplyToJoin::Apply(CascadesOptimizer &optimizer, GroupId group, G
 			Printer::Print(StringUtil::Format(
 			    "--- cascade(cascades)   mark consumer: filter in group %llu negated=%d -> would become %s",
 			    (unsigned long long)consumer_group, (int)negated, negated ? "ANTI" : "SEMI"));
+		}
+	}
+	{
+		// Live check of the two inputs the correct rewrite needs, printed where the group id is
+		// known. It is here rather than in the note because a print that never runs tells nothing:
+		// this one runs whenever the rule is applicable.
+		GroupId consumer_group = INVALID_GROUP_ID;
+		GroupExpr *consumer = nullptr;
+		bool negated = false;
+		auto found = memo.FindMarkConsumer(group, consumer_group, consumer, negated);
+		if (CascadeConfig::PrintPlans()) {
+			Printer::Print(StringUtil::Format(
+			    "--- cascade(cascades) rule %s: consumer found=%d group=%llu negated=%d parents=%llu", Name(),
+			    (int)found, (unsigned long long)consumer_group, (int)negated,
+			    (unsigned long long)(found ? memo.ParentsOf(consumer_group).size() : 0)));
 		}
 	}
 	auto join = make_uniq<LogicalComparisonJoin>(apply.join_type);
