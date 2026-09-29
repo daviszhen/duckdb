@@ -95,7 +95,14 @@ bool BuildPushdownMap(CascadesOptimizer &optimizer, GroupExpr &filter, const Fil
 		for (idx_t i = 0; i < projection.expressions.size(); i++) {
 			auto &expr = *projection.expressions[i];
 			if (expr.GetExpressionClass() != ExpressionClass::BOUND_COLUMN_REF) {
-				// A computed column cannot be re-expressed below the aggregate here.
+				// A computed column cannot be re-expressed below the aggregate, and this is the
+				// ordinary case in this mode, not an edge case: the mandatory aggregate rewrites
+				// put a projection computing CAST(...) between the filter and the GroupBy, so
+				//     SELECT * FROM (SELECT k, sum(v) AS s FROM t GROUP BY k) x WHERE k = 1
+				// declines here. That is deliberate - the predicate reads a computed column, and
+				// assuming the cast is a no-op is exactly the kind of assumption a rewriter must
+				// not make. It shows up as no-effect (the task ran), not as rejected (the promise
+				// saw the shape), which is how the two are told apart in the statistics.
 				return false;
 			}
 			auto inner = expr.Cast<BoundColumnRefExpression>().Binding();

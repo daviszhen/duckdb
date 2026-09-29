@@ -188,6 +188,10 @@ void CascadesOptimizer::ExploreGroup(GroupId group) {
 			// cost a check, not a task.
 			auto promise = rule->Promise(*this, *data.exprs[i]);
 			if (promise == CascadesRulePromise::NONE) {
+				if (CascadeConfig::PrintPlans()) {
+					Printer::Print("--- cascade(cascades) rule " + string(rule->Name()) +
+					               ": promise says the precondition does not hold, not queued");
+				}
 				rules_rejected++;
 				continue;
 			}
