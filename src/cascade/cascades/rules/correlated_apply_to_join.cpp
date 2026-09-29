@@ -7,6 +7,8 @@
 #include "duckdb/common/printer.hpp"
 #include "duckdb/planner/expression/bound_comparison_expression.hpp"
 #include "duckdb/planner/expression/bound_function_expression.hpp"
+#include "duckdb/planner/expression/bound_operator_expression.hpp"
+#include "duckdb/planner/expression_iterator.hpp"
 #include "duckdb/planner/operator/logical_comparison_join.hpp"
 #include "duckdb/planner/operator/logical_dependent_join.hpp"
 #include "duckdb/planner/operator/logical_filter.hpp"
@@ -87,6 +89,35 @@ CascadesRulePromise CorrelatedApplyToJoin::Promise(CascadesOptimizer &optimizer,
 	}
 	if (!PredicatesPairBothSides(*filter, left_group.exprs[0]->bindings, right_group.exprs[0]->bindings)) {
 		return CascadesRulePromise::NONE;
+	}
+	for (idx_t candidate_group = 0; candidate_group < memo.GroupCount(); candidate_group++) {
+		for (auto &candidate : memo.GetGroup(candidate_group).exprs) {
+			if (!candidate->op) {
+				continue;
+			}
+			for (auto &expression : candidate->op->expressions) {
+				bool negated = false;
+				ExpressionIterator::VisitExpression<BoundOperatorExpression>(
+				    *expression, [&](const BoundOperatorExpression &node) {
+					    if (node.GetExpressionType() == ExpressionType::OPERATOR_NOT) {
+						    negated = true;
+					    }
+				    });
+				ExpressionIterator::VisitExpression<BoundFunctionExpression>(
+				    *expression, [&](const BoundFunctionExpression &node) {
+					    if (node.GetExpressionType() == ExpressionType::OPERATOR_NOT) {
+						    negated = true;
+					    }
+				    });
+				if (negated) {
+					if (CascadeConfig::PrintPlans()) {
+						Printer::Print("--- cascade(cascades) rule " + string(Name()) +
+						               " refused: the plan negates the mark consumer");
+					}
+					return CascadesRulePromise::NONE;
+				}
+			}
+		}
 	}
 	return CascadesRulePromise::HIGH;
 }
