@@ -58,12 +58,31 @@ unique_ptr<LogicalOperator> CascadesOptimizer::Optimize(unique_ptr<LogicalOperat
 		tasks.Push(task);
 	}
 	RunTasks();
+	// The invariants are checked before the plan is taken apart, so a rule that broke the memo is
+	// reported as such rather than as a binding error three passes later.
+	string violation;
+	if (!memo.Validate(violation)) {
+		throw InternalException("cascade(cascades): memo invariant broken: " + violation);
+	}
 	auto result = memo.ExtractPlan(root);
 	result->ResolveOperatorTypes();
 	if (CascadeConfig::PrintPlans()) {
 		Printer::Print("--- cascade(cascades) chosen plan:\n" + result->ToString(&context));
 	}
 	if (CascadeConfig::PrintPlans()) {
+		for (idx_t group = 0; group < memo.GroupCount(); group++) {
+			auto &data = memo.GetGroup(group);
+			OptimizationContext context;
+			context.group = group;
+			auto winner = memo.WinnerOf(context);
+			Printer::Print(StringUtil::Format("--- cascade(cascades) group %llu: exprs=%llu logical=%llu physical=%llu "
+			                                  "winner=%s cost=%.2f",
+			                                  (unsigned long long)group, (unsigned long long)data.exprs.size(),
+			                                  (unsigned long long)data.logical_count,
+			                                  (unsigned long long)data.physical_count,
+			                                  winner ? EnumUtil::ToString(winner->type).c_str() : "(none)",
+			                                  winner ? winner->cost : 0.0));
+		}
 		Printer::Print(StringUtil::Format("--- cascade(cascades): groups=%llu exprs=%llu physical=%llu | "
 		                                  "explored=%llu rules applied=%llu no-effect=%llu rejected=%llu alternatives=%llu",
 		                                  (unsigned long long)memo.GroupCount(), (unsigned long long)memo.ExprCount(),

@@ -185,13 +185,13 @@ bool PushFilterBelowGroupBy::Apply(CascadesOptimizer &optimizer, GroupId group, 
 		filter->expressions.push_back(std::move(copy));
 	}
 	auto filter_group = memo.AddGroup();
-	optimizer.AddExpression(filter_group, Memo::MakeExpr(std::move(filter), {shape.aggregate->children[0]}));
+	optimizer.AddExpression(filter_group, memo.MakeExpr(std::move(filter), {shape.aggregate->children[0]}));
 
 	auto pushed = RebuildAggregate(aggregate, filter_group);
 	if (!shape.projection) {
 		// Filter(GroupBy(X)) -> the group can also be built as GroupBy(Filter(X)): the filter passes
 		// the aggregate's columns through, so both produce the same ones.
-		optimizer.AddExpression(group, Memo::MakeExpr(std::move(pushed), {filter_group}));
+		optimizer.AddExpression(group, memo.MakeExpr(std::move(pushed), {filter_group}));
 		return true;
 	}
 	// With a projection in between the filter cannot simply move: the projection owns a table
@@ -199,7 +199,7 @@ bool PushFilterBelowGroupBy::Apply(CascadesOptimizer &optimizer, GroupId group, 
 	// GroupBy(Filter(X)). The alternative is then Projection(GroupBy(Filter(X))), which exposes
 	// the projection's columns exactly as the original did.
 	auto aggregate_group = memo.AddGroup();
-	optimizer.AddExpression(aggregate_group, Memo::MakeExpr(std::move(pushed), {filter_group}));
+	optimizer.AddExpression(aggregate_group, memo.MakeExpr(std::move(pushed), {filter_group}));
 
 	auto &projection = shape.projection->op->Cast<LogicalProjection>();
 	vector<unique_ptr<Expression>> select_list;
@@ -208,7 +208,7 @@ bool PushFilterBelowGroupBy::Apply(CascadesOptimizer &optimizer, GroupId group, 
 	}
 	auto rebuilt = make_uniq<LogicalProjection>(projection.table_index, std::move(select_list));
 	rebuilt->estimated_cardinality = projection.estimated_cardinality;
-	optimizer.AddExpression(group, Memo::MakeExpr(std::move(rebuilt), {aggregate_group}));
+	optimizer.AddExpression(group, memo.MakeExpr(std::move(rebuilt), {aggregate_group}));
 	return true;
 }
 

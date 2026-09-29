@@ -63,6 +63,10 @@ struct GroupExpr {
 	unique_ptr<LogicalOperator> op;
 	//! Child groups, in the operator's own child order.
 	vector<GroupId> children;
+	//! The columns this expression exposes. Captured while the operator still has its children -
+	//! GetColumnBindings() walks them, and in the memo they are gone - so that invariant 2 can be
+	//! checked at all: two expressions of one group have to expose the same columns.
+	vector<ColumnBinding> bindings;
 	//! Set once an implementation rule produced it; the skeleton has none, so a logical
 	//! expression is also its own chosen plan (that is what "no physical rules" means).
 	bool physical = false;
@@ -96,11 +100,18 @@ public:
 	GroupId AddGroup();
 
 	//! Wrap an operator and the groups of its children into a memo expression. The operator's
-	//! own `children` are left empty: in the memo they are group ids.
-	static unique_ptr<GroupExpr> MakeExpr(unique_ptr<LogicalOperator> op, vector<GroupId> children);
+	//! own `children` are left empty: in the memo they are group ids. The bindings are derived
+	//! from the operator and the children's groups, since they cannot be asked of the operator.
+	unique_ptr<GroupExpr> MakeExpr(unique_ptr<LogicalOperator> op, vector<GroupId> children);
+
+	//! Check the invariants a memo has to satisfy, and say which one broke. They are the safety
+	//! net under every rule: a rule that produces a group expression with a missing child, or one
+	//! that exposes different columns than its group, is caught here rather than three passes
+	//! later as a binding error.
+	bool Validate(string &error) const;
 
 	//! The expression the given context settled on, or nullptr when it has not been optimised.
-	GroupExpr *WinnerOf(const OptimizationContext &context);
+	GroupExpr *WinnerOf(const OptimizationContext &context) const;
 	void SetWinner(const OptimizationContext &context, GroupExpr *expr);
 
 	//! Rebuild a plan from the winners below this group. The memo is consumed by this call:
