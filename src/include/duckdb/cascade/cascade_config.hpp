@@ -7,6 +7,12 @@
 // optimizer and DuckDB's own optimizer can be run over the same query and
 // compared, both being reachable from one binary.
 //
+// Each switch turns on one rule of Galindo-Legaria & Joshi, "Orthogonal
+// Optimization of Subqueries and Aggregation" (SIGMOD 2001); the paper reference
+// is with each one below. For the order they run in and how each maps onto the
+// paper's sections, start at the banner of cascade_optimizer.cpp, and for a rule's
+// statement open its own file (the .cpp banners carry the formula).
+//
 //===----------------------------------------------------------------------===//
 
 #pragma once

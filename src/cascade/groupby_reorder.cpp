@@ -1,3 +1,19 @@
+// Section 3.1: move a predicate below the GroupBy it is constant within, so the aggregate
+// sees fewer rows.
+//
+//   (A)  s_p(G_{A,F} R) = G_{A,F}(s_p R)           p's columns are determined by A
+//   (D)  (G_{A,F} R) loj_p S = G_{A,F}(R loj_{p'} S)   the paper treats semijoin/antijoin as
+//                                                      filters, so the same condition applies
+//
+// The gain is one-directional - the aggregate can only end up seeing fewer rows - which is
+// why (A) is on by default. The (D) half is separable because moving a semijoin below the
+// GroupBy filters before aggregating, and the paper leaves that choice to the cost-based
+// optimizer.
+//
+// Paper: Galindo-Legaria & Joshi (SIGMOD 2001), section 3.1.
+// Switches: DUCKDB_CASCADE_REORDER, DUCKDB_CASCADE_REORDER_SEMIJOIN.
+//===----------------------------------------------------------------------===//
+
 #include "duckdb/cascade/groupby_reorder.hpp"
 
 #include "duckdb/planner/expression/bound_columnref_expression.hpp"

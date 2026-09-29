@@ -1,3 +1,18 @@
+// Section 3.1's GroupBy push-down: the aggregate moves below the join and disappears, so the
+// join reads one row per group instead of one per row.
+//
+//   G_{A,F}(S |>_p R) = S |>_p G_{A - cols(S), F}(R)
+//
+// Three conditions have to hold (see the checks in the code): the aggregate's parameters
+// have to come from one side, the grouping columns that side does not provide have to be
+// determined by the join predicate, and the other side has to be keyed so a group cannot
+// land on two rows. It removes the global aggregate, which is why it is a cost decision and
+// off by default.
+//
+// Paper: Galindo-Legaria & Joshi (SIGMOD 2001), section 3.1.
+// Switch: DUCKDB_CASCADE_AGG_PUSHDOWN (off).
+//===----------------------------------------------------------------------===//
+
 #include "duckdb/cascade/aggregate_pushdown.hpp"
 
 #include "duckdb/cascade/cascade_config.hpp"

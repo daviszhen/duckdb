@@ -1,3 +1,22 @@
+// Section 3.4: segmented execution of a parameterized expression.
+//
+//   R SA_A E = union over a of ( {a} x E(sigma_{A=a} R) )                  (section 3.4.1)
+//   (R SA_A E) |>_p T = (R |>_p T) SA_{A + cols(T)} E                      (section 3.4.2)
+//
+// 3.4.1 introduces the operator where a join predicate compares two instances of the same
+// column and one side of that comparison is aggregated. The plan becomes a
+// LogicalSegmentApply: the relation is partitioned by the segmenting columns and E is
+// evaluated once per segment, with the segment itself visible to E as a table-valued
+// parameter (LogicalSegmentParameterGet). That is the paper's Figure 6/7 example, and it is
+// deliberately *not* DuckDB's delim join - no delim machinery is used anywhere here.
+// 3.4.2 moves a join below the SegmentApply when its predicate reads only T or columns that
+// are constant within a segment ("all or nothing", so no segment can be split), adding T's
+// key to the segmenting columns.
+//
+// Paper: Galindo-Legaria & Joshi (SIGMOD 2001), section 3.4.
+// Switch: DUCKDB_CASCADE_SEGMENT (off by default).
+//===----------------------------------------------------------------------===//
+
 #include "duckdb/cascade/segment_apply.hpp"
 
 #include <algorithm>

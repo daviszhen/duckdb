@@ -1,3 +1,17 @@
+// Section 3.1's GroupBy pull-up: the aggregate moves above the join, so the join reduces the
+// rows the aggregate reads instead of the aggregate reducing the rows the join reads.
+//
+//   S |>_p (G_{A,F} R) = G_{A + cols(S), F}(S |>_p R)      S has to be keyed
+//
+// It removes the global aggregation rather than keeping it, so it is a cost decision and off
+// by default. It is also the primitive section 3.4.2 executes:
+//
+//   (R SA_A E) |>_p T = (R |>_p T) SA_{A + cols(T)} E
+//
+// Paper: Galindo-Legaria & Joshi (SIGMOD 2001), sections 3.1 and 3.4.2.
+// Switch: DUCKDB_CASCADE_AGG_PULLUP (off).
+//===----------------------------------------------------------------------===//
+
 #include "duckdb/cascade/aggregate_pullup.hpp"
 
 #include "duckdb/cascade/cascade_config.hpp"

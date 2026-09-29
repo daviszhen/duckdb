@@ -1,3 +1,27 @@
+// The correlated scalar sub-query: identities (8) and (9) of Figure 4, together with the
+// move section 3.2 describes. See ApplyDecorrelator::DecorrelateScalar.
+//
+//   (9)   R A_x (G_{F1} E)  = G_{cols(R),F'}(R A_LOJ E)
+//         group the outer side over a left outer join, so an outer row with no match still
+//         has a group - and SQL's agg(empty) = agg({NULL}) makes that group's value right.
+//   (8)   R A_x (G_{A,F} E) = G_{A + cols(R),F}(R A_x E)
+//         the correlation sits below a GroupBy of the sub-query's own; the Apply slides
+//         under it and the outer columns join its grouping.
+//   (3.2) G_{A,F}(S LOJ_p R) = pi_c(S LOJ_p (G_{A - cols(S),F} R))
+//         the strategy that pushes the GroupBy below the outer join; pi_c is the
+//         compensating projection that gives an unmatched outer row the aggregate over an
+//         empty input.
+//
+// Both strategies end in the same shape and are chosen by whether the predicate can be
+// answered below the GroupBy. count is the aggregate whose empty-input answer is not NULL,
+// so it needs pi_c; every other SQL aggregate already returns what agg(empty) does.
+// Identity (9) folds outer rows that share a grouping value into one group, so the outer
+// rows are handed back afterwards by joining the result to the original relation - which is
+// why it needs no key on the outer side.
+//
+// Paper: Galindo-Legaria & Joshi (SIGMOD 2001), sections 2.5 and 3.2.
+//===----------------------------------------------------------------------===//
+
 #include "duckdb/cascade/apply_decorrelation.hpp"
 #include "duckdb/cascade/cascade_config.hpp"
 #include "duckdb/cascade/cascade_correlation.hpp"

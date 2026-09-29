@@ -1,3 +1,24 @@
+// The cascade pipeline, in the order it runs, and where each stage comes from in
+// Galindo-Legaria & Joshi, "Orthogonal Optimization of Subqueries and Aggregation"
+// (SIGMOD 2001):
+//
+//   ApplyDecorrelator              section 2, Figure 4 identities (1)-(9); classes in 2.5
+//   SimplifyMarkerJoins            section 2, marker -> semijoin/antijoin
+//   ReorderGroupBy                 section 3.1, rules (A) and (D)
+//   -- DuckDB's own optimizer, only with DUCKDB_CASCADE_OPTIMIZE=1 --
+//   AggregatePullup                section 3.1 pull-up (the primitive 3.4.2 executes)
+//   AggregatePushdown              section 3.1 push-down
+//   LocalAggregatePusher           section 3.3, local/global split
+//   BuildSegmentApplyAlternatives  section 3.4.1 and 3.4.2 (Figure 6/7)
+//   -- or, with the optimizer off, DuckDB's mandatory aggregate rewrites --
+//
+// Two things are worth knowing when reading a plan produced here. Our rewrite runs before
+// DuckDB's optimizer, so the optimizer sees plans it did not build; PASS_GUARDS below lists
+// the passes that mis-rewrite the plans particular identities produce, each with its repro.
+// And every rule is behind a switch (see cascade_config.hpp), off unless the switch is set,
+// so the default path is never touched.
+//===----------------------------------------------------------------------===//
+
 #include "duckdb/cascade/cascade_optimizer.hpp"
 
 #include "duckdb/cascade/aggregate_pullup.hpp"

@@ -1,3 +1,14 @@
+// Keys for the relations the optimizations need one for.
+//
+// "The other side is keyed" is among the preconditions of the paper's section 3.1
+// (GroupBy pull-up, GroupBy push-down) and section 3.4.2, but the schemas TPC's dbgen
+// generates declare no primary keys - and a key that only the data happens to satisfy is not
+// a key. The knowledge is therefore supplied out of band (DUCKDB_CASCADE_KEYS), which is
+// also why those rules correctly decline on every TPC query without it.
+//
+// Paper: Galindo-Legaria & Joshi (SIGMOD 2001), sections 3.1 and 3.4.2 (preconditions).
+//===----------------------------------------------------------------------===//
+
 #include "duckdb/cascade/cascade_keys.hpp"
 
 #include "duckdb/cascade/cascade_config.hpp"

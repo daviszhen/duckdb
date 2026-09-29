@@ -1,3 +1,17 @@
+// Class 2 of section 2.5, identities (5) and (6) of Figure 4: an Apply over a set operation
+// becomes one Apply per branch, and the outer relation is materialised once as a CTE so
+// every branch reads the same rows. That shared subplan is exactly the "additional common
+// expression" class 2 is named after, and the reason the paper removes this class during
+// cost-based optimization rather than during normalization.
+//
+//   R A_x (E1 u_all E2) = (R A_x E1) u_all (R A_x E2)
+//   R A_x (E1 -_all E2) = (R A_x E1) -_all (R A_x E2)
+//
+// Paper: Galindo-Legaria & Joshi (SIGMOD 2001), section 2.5, Figure 4 identities (5)/(6).
+// The outer columns stay part of each row, which is what keeps EXCEPT ALL correct per
+// outer row: two outer rows with the same value remain two rows in each branch.
+//===----------------------------------------------------------------------===//
+
 #include "duckdb/cascade/apply_decorrelation.hpp"
 
 #include "duckdb/cascade/cascade_bindings.hpp"

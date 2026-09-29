@@ -1,3 +1,9 @@
+// The binding bookkeeping every cascade rewrite shares - see cascade_bindings.hpp. Not a
+// rule out of the paper: a rewrite replaces a sub-tree, the replacement exposes different
+// columns, and this is how it tells its callers which ones moved. Section 2's identities and
+// section 3's rules all need it to stay correct.
+//===----------------------------------------------------------------------===//
+
 #include "duckdb/cascade/cascade_bindings.hpp"
 
 #include "duckdb/common/exception.hpp"

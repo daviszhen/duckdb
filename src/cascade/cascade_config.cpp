@@ -1,3 +1,9 @@
+// The runtime switches. The header lists each one together with the paper rule it turns on;
+// all of them are off unless set, so the default path is DuckDB's own optimizer untouched.
+// They exist so that the cascade optimizer and DuckDB's optimizer can be run over the same
+// binary.
+//===----------------------------------------------------------------------===//
+
 #include "duckdb/cascade/cascade_config.hpp"
 
 #include "duckdb/common/string_util.hpp"

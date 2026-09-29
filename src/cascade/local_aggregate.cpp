@@ -1,3 +1,23 @@
+// Section 3.3: split one aggregate into a local aggregate below the join and a global one
+// above it, so the join reads the local aggregate's groups instead of the raw rows.
+//
+//   G_{A,F} R = G_{A,F_g} LG_{A,F_l} R
+//
+// Keeping the global aggregate is what makes this unconditional: section 3.1's push-down
+// needs the other side of the join to be keyed, this does not. The paper's decompositions:
+//
+//   sum / min / max   two levels of the same shape
+//   count             local count, global sum, cast back to the original type
+//   avg               footnote 3: split into sum and count, divided in a projection above
+//   sum(a) where a is a grouping column  ->  a x count(*)   (only the outer form)
+//
+// The local aggregate's grouping columns may be extended freely (they only have to be a
+// refinement of the global ones). DISTINCT and FILTER aggregates are left alone.
+//
+// Paper: Galindo-Legaria & Joshi (SIGMOD 2001), section 3.3.
+// Switch: DUCKDB_CASCADE_LOCAL_AGG (off).
+//===----------------------------------------------------------------------===//
+
 #include "duckdb/cascade/local_aggregate.hpp"
 
 #include "duckdb/function/builtin_function_lookup.hpp"

@@ -1,3 +1,12 @@
+// The correlation helpers - see cascade_correlation.hpp. Not a rule of its own: identities
+// (3) and (4) of Figure 4 as a framework. A correlated predicate is lifted out of the
+// sub-query's body one row-preserving operator at a time, the columns it reads are exposed
+// through the projection on top, and it becomes a join condition with the right NULL
+// semantics (only an equality may be made NULL-safe; a `<` can never be a hash key).
+//
+// Paper: Galindo-Legaria & Joshi (SIGMOD 2001), section 2.3.
+//===----------------------------------------------------------------------===//
+
 #include "duckdb/cascade/cascade_correlation.hpp"
 
 #include "duckdb/cascade/cascade_bindings.hpp"

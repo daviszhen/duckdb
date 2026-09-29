@@ -1,3 +1,16 @@
+// Class 2 of section 2.5, identity (7) of Figure 4, plus the SideKey helper it needs:
+//
+//   R A_x (E1 x E2) = (R A_x E1) |>_{R.key} (R A_x E2)
+//
+// The two branches are removed independently and then matched back through a key of the
+// outer relation, so one outer row is paired with its own branch results exactly once -
+// that key is the paper's precondition, and without one the rule declines instead of
+// guessing. The comparison is IS NOT DISTINCT FROM so an outer row whose key is NULL
+// still finds its rows.
+//
+// Paper: Galindo-Legaria & Joshi (SIGMOD 2001), section 2.5, Figure 4 identity (7).
+//===----------------------------------------------------------------------===//
+
 #include "duckdb/cascade/apply_decorrelation.hpp"
 
 #include "duckdb/cascade/cascade_bindings.hpp"

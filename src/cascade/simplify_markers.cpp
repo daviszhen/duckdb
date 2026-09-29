@@ -1,3 +1,12 @@
+// The last step of section 2's Apply elimination: a sub-query becomes a join that carries a
+// marker column, and the marker is dead weight unless a predicate reads it. Where the marker
+// is only consumed as a predicate, the join is the semijoin/antijoin it means - EXISTS,
+// NOT EXISTS, IN - which is also what DuckDB's own Deliminator does after
+// FlattenDependentJoins.
+//
+// Paper: Galindo-Legaria & Joshi (SIGMOD 2001), section 2 (the marker family of Figure 4).
+//===----------------------------------------------------------------------===//
+
 #include "duckdb/cascade/apply_decorrelation.hpp"
 
 #include "duckdb/planner/expression/bound_columnref_expression.hpp"

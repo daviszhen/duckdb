@@ -1,3 +1,27 @@
+// Apply elimination: section 2 of Galindo-Legaria & Joshi, "Orthogonal Optimization of
+// Subqueries and Aggregation" (SIGMOD 2001) - the nine identities of Figure 4.
+//
+//   R A_f E  ->  an ordinary join, by whichever identity matches:
+//     (1) E unrelated to R          R A_x E          = R x_true E
+//     (2) ... with a predicate      R A_x (s_p E)    = R x_p E
+//     (3) predicate into the Apply  R A_x (s_p E)    = s_p (R A_x E)
+//     (4) projection widened        R A_x (pi_v E)   = pi_{v + cols(R)}(R A_x E)
+//     (5) union all                 R A_x (E1 u E2)  = (R A_x E1) u (R A_x E2)      [class 2]
+//     (6) except all                R A_x (E1 - E2)  = (R A_x E1) - (R A_x E2)      [class 2]
+//     (7) cross product             R A_x (E1 x E2)  = (R A_x E1) |> R.key (R A_x E2)  [class 2]
+//     (8) aggregate in the body     R A_x (G_{A,F} E)  = G_{A + cols(R),F}(R A_x E)
+//     (9) scalar aggregate          R A_x (G_{F1} E)   = G_{cols(R),F'}(R A_LOJ E)
+//
+// Sections 2.3-2.5: (1)-(4) and (8)/(9) are class 1; (5)-(7) are class 2, removed by
+// introducing the "additional common expression" the class is named after (here a
+// materialised CTE); class 3 (Max1row, conditional Apply) is refused rather than guessed
+// at, as the paper itself does not remove it.
+//
+// This file is the framework - the recursion over the plan and the dispatch. The
+// identities live in apply_decorrelation_{setop,crossproduct,scalar}.cpp.
+// Switches: DUCKDB_CASCADE, and DUCKDB_CASCADE_KEEP_APPLY to keep the Apply operator.
+//===----------------------------------------------------------------------===//
+
 #include "duckdb/cascade/apply_decorrelation.hpp"
 
 #include "duckdb/cascade/cascade_config.hpp"
