@@ -158,7 +158,18 @@ unique_ptr<LogicalOperator> CascadesOptimizer::Optimize(unique_ptr<LogicalOperat
 	}
 	string violation;
 	if (!memo.Validate(violation)) {
-		throw InternalException("cascade(cascades): memo invariant broken: " + violation);
+		// The counters go into the failure. A statement that throws inside Optimize never reaches the
+		// summary line, so its work is *missing* from the statistics rather than reported as zero -
+		// and reading "no counters" as "the rule never fired" is a mistake that has been made here
+		// more than once. An invariant violation caused by a rule is exactly the case where the
+		// counters matter most.
+		throw InternalException(StringUtil::Format(
+		    "cascade(cascades): memo invariant broken: %s | groups=%llu exprs=%llu explored=%llu applied=%llu "
+		    "no-effect=%llu rejected=%llu alternatives=%llu enforced=%llu",
+		    violation, (unsigned long long)memo.GroupCount(), (unsigned long long)memo.ExprCount(),
+		    (unsigned long long)groups_explored, (unsigned long long)rules_applied,
+		    (unsigned long long)rules_no_effect, (unsigned long long)rules_rejected,
+		    (unsigned long long)expressions_added, (unsigned long long)enforced));
 	}
 	auto result = memo.ExtractPlan(root);
 	// The enforcer: the memo was asked for a decorrelated plan, and if the rules could not provide
@@ -182,8 +193,14 @@ unique_ptr<LogicalOperator> CascadesOptimizer::Optimize(unique_ptr<LogicalOperat
 			throw InternalException("cascade(cascades): selftest injected violation %llu and the memo still validated",
 			                        (unsigned long long)self_test);
 		}
-		Printer::Print(StringUtil::Format("--- cascade(cascades) selftest: invariant %llu rejected as expected: %s",
-		                                  (unsigned long long)self_test, selftest_violation));
+		// Throw rather than print: the self-test has to exercise the path a real rule bug takes, and
+		// that path is where the counters have to appear, because a statement that throws inside
+		// Optimize never reaches the summary line - its work is missing from the statistics rather
+		// than reported as zero, which is a reading mistake that has been made here more than once.
+		throw InternalException(StringUtil::Format(
+		    "cascade(cascades) selftest: invariant %llu rejected as expected: %s | applied=%llu alternatives=%llu",
+		    (unsigned long long)self_test, selftest_violation, (unsigned long long)rules_applied,
+		    (unsigned long long)expressions_added));
 	}
 	if (CascadeConfig::PrintPlans()) {
 		Printer::Print("--- cascade(cascades) chosen plan:\n" + result->ToString(&context));
