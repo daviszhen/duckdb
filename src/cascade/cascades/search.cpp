@@ -3,6 +3,7 @@
 #include "duckdb/cascade/cascade_config.hpp"
 #include "duckdb/cascade/cascades/rules/push_filter_below_groupby.hpp"
 #include "duckdb/common/exception.hpp"
+#include "duckdb/common/enums/logical_operator_type.hpp"
 #include "duckdb/common/printer.hpp"
 #include "duckdb/common/string_util.hpp"
 #include "duckdb/main/client_context.hpp"
@@ -169,7 +170,13 @@ void CascadesOptimizer::FinishExpr(GroupId group, GroupExpr &expr) {
 	OptimizationContext context;
 	context.group = group;
 	auto current = memo.WinnerOf(context);
-	if (!current || cost < current->cost) {
+	auto wins = !current || cost < current->cost;
+	if (CascadeConfig::PrintPlans()) {
+		Printer::Print(StringUtil::Format("--- cascade(cascades) candidate: group=%llu type=%s cost=%.2f%s",
+		                                  (unsigned long long)group, EnumUtil::ToString(expr.type).c_str(), cost,
+		                                  wins ? " <- winner" : ""));
+	}
+	if (wins) {
 		expr.cost = cost;
 		memo.SetWinner(context, &expr);
 	}
@@ -177,13 +184,16 @@ void CascadesOptimizer::FinishExpr(GroupId group, GroupExpr &expr) {
 
 double CascadesOptimizer::CostOf(GroupExpr &expr) {
 	vector<double> child_costs;
+	vector<double> child_rows;
 	for (auto child : expr.children) {
 		OptimizationContext context;
 		context.group = child;
 		auto winner = memo.WinnerOf(context);
 		child_costs.push_back(winner ? winner->cost : 0.0);
+		// The rows a child produces are what this operator pays to look at.
+		child_rows.push_back(winner && winner->op ? CostModel::Cardinality(*winner->op) : 1.0);
 	}
-	return CostModel::Cost(expr, child_costs);
+	return CostModel::Cost(expr, child_costs, child_rows);
 }
 
 void CascadesOptimizer::ApplyRule(GroupId group, GroupExpr &expr, CascadesRule &rule) {
