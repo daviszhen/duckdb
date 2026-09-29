@@ -1,6 +1,7 @@
 #include "duckdb/cascade/cascades/rules/push_filter_below_groupby.hpp"
 
 #include "duckdb/cascade/cascade_config.hpp"
+#include "duckdb/cascade/cascade_bindings.hpp"
 #include "duckdb/cascade/cascades/memo.hpp"
 #include "duckdb/cascade/cascades/search.hpp"
 #include "duckdb/common/printer.hpp"
@@ -63,7 +64,32 @@ bool BuildPushdownMap(CascadesOptimizer &optimizer, GroupExpr &filter, const Fil
 	if (shape.aggregate->children.size() != 1) {
 		return false;
 	}
-	// Hop one: the filter reads the projection's columns, the projection names the aggregate's.
+	if (aggregate.grouping_sets.size() > 1) {
+		// Grouping sets pad the columns a set does not mention with NULL, so a predicate on such a
+		// column is *not* constant within a group and must not move:
+		//
+		//   SELECT a, count(*) FROM tgrp GROUP BY GROUPING SETS ((a),()) HAVING a IS NOT NULL
+		//
+		// pushed below the aggregate answers 0 rows instead of 3. The pipeline's
+		// groupby_reorder.cpp carries the same guard, and it is the one DuckDB's own filter
+		// pushdown carries.
+		return false;
+	}
+	// Hop two: a grouping column's expression below the aggregate has to be a plain column.
+	BindingExport below;
+	for (idx_t i = 0; i < aggregate.groups.size(); i++) {
+		auto &group = *aggregate.groups[i];
+		if (group.GetExpressionClass() != ExpressionClass::BOUND_COLUMN_REF) {
+			return false;
+		}
+		below.emplace_back(ColumnBinding(aggregate.group_index, ProjectionIndex(i)),
+		                   group.Cast<BoundColumnRefExpression>().Binding());
+	}
+	// Hop one, *composed* with hop two: the filter reads the projection's columns, the projection
+	// names the aggregate's, and the aggregate's grouping columns name what is below it. The two
+	// hops have to be folded into one entry per column - the rewriter takes the first match and
+	// stops, so a flat two-hop mapping silently stops half way, leaving the predicate pointing at
+	// the aggregate's output while it now sits below the aggregate.
 	if (shape.projection) {
 		auto &projection = shape.projection->op->Cast<LogicalProjection>();
 		for (idx_t i = 0; i < projection.expressions.size(); i++) {
@@ -72,18 +98,12 @@ bool BuildPushdownMap(CascadesOptimizer &optimizer, GroupExpr &filter, const Fil
 				// A computed column cannot be re-expressed below the aggregate here.
 				return false;
 			}
-			mapping.emplace_back(ColumnBinding(projection.table_index, ProjectionIndex(i)),
-			                     expr.Cast<BoundColumnRefExpression>().Binding());
+			auto inner = expr.Cast<BoundColumnRefExpression>().Binding();
+			mapping.emplace_back(ColumnBinding(projection.table_index, ProjectionIndex(i)), MapBinding(inner, below));
 		}
 	}
-	// Hop two: a grouping column's expression below the aggregate has to be a plain column.
-	for (idx_t i = 0; i < aggregate.groups.size(); i++) {
-		auto &group = *aggregate.groups[i];
-		if (group.GetExpressionClass() != ExpressionClass::BOUND_COLUMN_REF) {
-			return false;
-		}
-		mapping.emplace_back(ColumnBinding(aggregate.group_index, ProjectionIndex(i)),
-		                     group.Cast<BoundColumnRefExpression>().Binding());
+	for (auto &entry : below) {
+		mapping.push_back(entry);
 	}
 	// Every column the predicate reads has to be covered by the two hops.
 	bool ok = true;

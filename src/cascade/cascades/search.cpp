@@ -61,6 +61,9 @@ unique_ptr<LogicalOperator> CascadesOptimizer::Optimize(unique_ptr<LogicalOperat
 	auto result = memo.ExtractPlan(root);
 	result->ResolveOperatorTypes();
 	if (CascadeConfig::PrintPlans()) {
+		Printer::Print("--- cascade(cascades) chosen plan:\n" + result->ToString(&context));
+	}
+	if (CascadeConfig::PrintPlans()) {
 		Printer::Print(StringUtil::Format("--- cascade(cascades): groups=%llu exprs=%llu physical=%llu | "
 		                                  "explored=%llu rules applied=%llu no-effect=%llu rejected=%llu alternatives=%llu",
 		                                  (unsigned long long)memo.GroupCount(), (unsigned long long)memo.ExprCount(),
