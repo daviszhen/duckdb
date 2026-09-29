@@ -1,5 +1,34 @@
 #include "duckdb/cascade/cascades/rules/correlated_apply_to_join.hpp"
 
+// OPEN: what this rewrite still needs, and what has been measured. Kept here because the
+// measurements are the expensive part and they must not be rediscovered.
+//
+// The rewrite below replaces the Apply's own group with a MARK join. That is *not* what DuckDB's
+// own decorrelation does: comparing the two plans for decorrelation.test:27 shows the enforcer
+// producing a SEMI join that keeps the projection and has no mark filter above it, while this rule
+// produces a MARK join, drops the projection, and leaves the parent's "SUBQUERY" filter in place.
+// Three attempts at the correct shape (build SEMI/ANTI, splice the absorbed pair out of the
+// parents) were measured and reverted; what they showed:
+//
+//   * The pair to splice is (this Apply's group, the mark filter's group above it). Memo::ParentsOf
+//     and Memo::ReplaceExpression/Reschedule exist for that, and Memo::FindMarkConsumer already
+//     answers SEMI versus ANTI - the two Apply nodes are identical in every field, the negation
+//     lives only in the consumer.
+//   * With the splice in place the rule did work - "spliced group 5, join SEMI in group 8",
+//     enforced 30 -> 25 - and then failed to bind:
+//         Failed to bind column reference "b" [0.0] (bindings: {#[7.0], #[7.1]})
+//     The available set is a *correlated copy* of the two-column left table at another table
+//     index, i.e. exactly what the decorrelator's ExposeRightColumns and DecrementCorrelationDepth
+//     maintain. Moving the condition is not enough; the column exposure has to be reproduced.
+//   * The same rule body spliced twice in one build and not at all in another (applied=4 but
+//     ParentsOf(consumer_group) empty), which is not yet explained. Before writing the exposure
+//     code, that has to be understood: print FindMarkConsumer's answer and ParentsOf's result on
+//     the failing statement in both versions and compare. A consumer with no parents is the root
+//     of the memo, and a SEMI join cannot stand in for it (it exposes the left side only).
+//
+// Both matrices are green with this rule as it stands (it is inert on the corpus), so the shape
+// above is a design note, not a description of what the code does today.
+
 #include "duckdb/cascade/cascade_config.hpp"
 #include "duckdb/cascade/cascade_correlation.hpp"
 #include "duckdb/cascade/cascades/memo.hpp"
