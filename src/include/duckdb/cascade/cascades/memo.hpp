@@ -128,6 +128,12 @@ public:
 	//! wins. Returns false when the expression is not in that group.
 	bool ReplaceExpression(GroupId group, const GroupExpr *old_expression, unique_ptr<GroupExpr> replacement);
 
+	//! The expression above this group that consumes a mark column: the filter reading it, the group
+	//! that filter lives in, and whether the read is negated (which is what separates EXISTS from
+	//! NOT EXISTS - the two Apply nodes are identical, so the consumer is the only place the
+	//! difference lives). Returns false when nothing above consumes a mark.
+	bool FindMarkConsumer(GroupId apply_group, GroupId &filter_group, GroupExpr *&filter, bool &negated) const;
+
 	//! Check the invariants a memo has to satisfy, and say which one broke. They are the safety
 	//! net under every rule: a rule that produces a group expression with a missing child, or one
 	//! that exposes different columns than its group, is caught here rather than three passes

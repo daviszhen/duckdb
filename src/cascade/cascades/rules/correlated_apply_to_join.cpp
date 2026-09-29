@@ -136,6 +136,19 @@ bool CorrelatedApplyToJoin::Apply(CascadesOptimizer &optimizer, GroupId group, G
 		return false;
 	}
 
+	{
+		// The consumer decides SEMI versus ANTI: the two Apply nodes are identical, the negation
+		// lives above them. Printed (and thus checked) here because this is where the group id is
+		// known, and because the rewrite that follows has to take the consumer with it.
+		GroupId consumer_group = INVALID_GROUP_ID;
+		GroupExpr *consumer = nullptr;
+		bool negated = false;
+		if (memo.FindMarkConsumer(group, consumer_group, consumer, negated) && CascadeConfig::PrintPlans()) {
+			Printer::Print(StringUtil::Format(
+			    "--- cascade(cascades)   mark consumer: filter in group %llu negated=%d -> would become %s",
+			    (unsigned long long)consumer_group, (int)negated, negated ? "ANTI" : "SEMI"));
+		}
+	}
 	auto join = make_uniq<LogicalComparisonJoin>(apply.join_type);
 	if (apply.join_type == JoinType::MARK) {
 		join->mark_index = apply.mark_index;

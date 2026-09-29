@@ -5,6 +5,12 @@
 #include "duckdb/main/client_context.hpp"
 #include "duckdb/planner/operator/logical_aggregate.hpp"
 #include "duckdb/planner/operator/logical_comparison_join.hpp"
+#include "duckdb/planner/expression/bound_columnref_expression.hpp"
+#include "duckdb/planner/expression/bound_function_expression.hpp"
+#include "duckdb/planner/expression/bound_operator_expression.hpp"
+#include "duckdb/planner/expression/bound_subquery_expression.hpp"
+#include "duckdb/planner/expression_iterator.hpp"
+#include "duckdb/planner/operator/logical_filter.hpp"
 #include "duckdb/planner/operator/logical_projection.hpp"
 
 namespace duckdb {
@@ -154,6 +160,62 @@ bool Memo::ReplaceExpression(GroupId group, const GroupExpr *old_expression, uni
 		// costed *after* its children have winners.
 		data.explored = false;
 		return true;
+	}
+	return false;
+}
+
+bool Memo::FindMarkConsumer(GroupId apply_group, GroupId &filter_group, GroupExpr *&filter, bool &negated) const {
+	// The mark column is the extra binding the Apply exposes beyond its left side; measured as
+	// {#[0.0], #[14.0]} for an existence sub-query, i.e. the last one.
+	if (groups[apply_group]->exprs.empty() || groups[apply_group]->exprs[0]->bindings.empty()) {
+		return false;
+	}
+	auto mark_binding = groups[apply_group]->exprs[0]->bindings.back();
+	for (auto parent : ParentsOf(apply_group)) {
+		for (auto &expr : groups[parent]->exprs) {
+			if (expr->type != LogicalOperatorType::LOGICAL_FILTER || !expr->op) {
+				continue;
+			}
+			for (auto &expression : expr->op->expressions) {
+				bool found_negation = false;
+				bool found_subquery = false;
+				ExpressionIterator::VisitExpression<BoundSubqueryExpression>(
+				    *expression, [&](const BoundSubqueryExpression &subquery) {
+					    found_subquery = true;
+					    if (subquery.GetSubqueryType() == SubqueryType::NOT_EXISTS) {
+						    found_negation = true;
+					    }
+				    });
+				ExpressionIterator::VisitExpression<BoundOperatorExpression>(
+				    *expression, [&](const BoundOperatorExpression &node) {
+					    if (node.GetExpressionType() == ExpressionType::OPERATOR_NOT) {
+						    found_negation = true;
+					    }
+				    });
+				ExpressionIterator::VisitExpression<BoundFunctionExpression>(
+				    *expression, [&](const BoundFunctionExpression &node) {
+					    if (node.GetExpressionType() == ExpressionType::OPERATOR_NOT) {
+						    found_negation = true;
+					    }
+				    });
+				// Reading the mark column counts as consuming it - for EXISTS the consumer is an
+				// ordinary column reference, only the negated form has a NOT around it, which is why
+				// the two are detected separately.
+				bool reads_mark = false;
+				ExpressionIterator::VisitExpression<BoundColumnRefExpression>(
+				    *expression, [&](const BoundColumnRefExpression &colref) {
+					    if (colref.Binding() == mark_binding) {
+						    reads_mark = true;
+					    }
+				    });
+				if (found_subquery || reads_mark) {
+					filter_group = parent;
+					filter = expr.get();
+					negated = found_negation;
+					return true;
+				}
+			}
+		}
 	}
 	return false;
 }
