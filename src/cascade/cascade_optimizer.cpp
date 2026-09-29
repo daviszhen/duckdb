@@ -88,6 +88,14 @@ unique_ptr<LogicalOperator> CascadeOptimizer::Optimize(unique_ptr<LogicalOperato
 		if (decorrelator.ScalarAggregate()) {
 			guard(OptimizerType::COMPRESSED_MATERIALIZATION);
 		}
+		if (decorrelator.SharedSubQueries()) {
+			// ... and CommonSubplanOptimizer is wrong when several correlated sub-queries share
+			// the outer relation. It materialises the shared part into `__common_subplan_N` and
+			// leaves the group keys of the aggregates we built pointing at columns it moved
+			// (`Failed to bind column reference "a" [30.0] (bindings: {#[31.0]})`, two scalar
+			// sub-queries with non-equality correlations). Disabling that one pass answers it.
+			guard(OptimizerType::COMMON_SUBPLAN);
+		}
 		Optimizer optimizer(binder, context);
 		plan = optimizer.Optimize(std::move(plan));
 		for (auto type : added) {

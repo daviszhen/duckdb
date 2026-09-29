@@ -1295,6 +1295,7 @@ unique_ptr<LogicalOperator> ApplyDecorrelator::DecorrelateScalar(unique_ptr<Logi
 	// Subqueries and Aggregation":
 	//     R A_x (G_{F1} E)  =  G_{columns(R), F'}( R LOJ E )
 	scalar_aggregate = true;
+	scalar_subqueries++;
 	// It holds because SQL aggregates satisfy agg(empty) = agg({null}): a left outer
 	// join hands an outer row with no match a single NULL-padded row, and the
 	// aggregate over that row is exactly the aggregate over an empty input.

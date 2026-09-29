@@ -59,9 +59,17 @@ public:
 		return scalar_aggregate;
 	}
 
+	//! Whether more than one correlated sub-query was decorrelated. Their plans then share the
+	//! outer relation, and DuckDB's CommonSubplanOptimizer materialises that shared part into a
+	//! CTE and leaves the group keys of our aggregates pointing at bindings it moved.
+	bool SharedSubQueries() const {
+		return scalar_subqueries > 1;
+	}
+
 private:
 	bool distributed_set_operation = false;
 	bool scalar_aggregate = false;
+	idx_t scalar_subqueries = 0;
 	unique_ptr<LogicalOperator> DecorrelateNode(unique_ptr<LogicalOperator> op, BindingExport &exports);
 	unique_ptr<LogicalOperator> DecorrelateApply(unique_ptr<LogicalOperator> op, BindingExport &exports);
 	//! Identities (5) and (6): an Apply over a set operation becomes a set operation of
