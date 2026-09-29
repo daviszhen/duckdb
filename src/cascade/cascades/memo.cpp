@@ -25,6 +25,21 @@ GroupId Memo::Add(unique_ptr<LogicalOperator> op) {
 	return groups.size() - 1;
 }
 
+GroupId Memo::AddGroup() {
+	groups.push_back(make_uniq<Group>());
+	return groups.size() - 1;
+}
+
+unique_ptr<GroupExpr> Memo::MakeExpr(unique_ptr<LogicalOperator> op, vector<GroupId> children) {
+	D_ASSERT(op);
+	auto expr = make_uniq<GroupExpr>();
+	expr->type = op->type;
+	expr->op = std::move(op);
+	expr->op->children.clear();
+	expr->children = std::move(children);
+	return expr;
+}
+
 GroupExpr *Memo::WinnerOf(const OptimizationContext &context) {
 	for (auto &entry : winners) {
 		if (entry.first.group == context.group && entry.first.props == context.props) {

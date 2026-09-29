@@ -1,6 +1,7 @@
 #include "duckdb/cascade/cascades/search.hpp"
 
 #include "duckdb/cascade/cascade_config.hpp"
+#include "duckdb/cascade/cascades/rules/push_filter_below_groupby.hpp"
 #include "duckdb/common/exception.hpp"
 #include "duckdb/common/printer.hpp"
 #include "duckdb/common/string_util.hpp"
@@ -31,8 +32,8 @@ void CascadesOptimizer::RegisterRules() {
 	//   section 3.1 (A)   predicate below the GroupBy
 	//                     -> ORCA ExfPushGbBelowJoin / ExfPushGbWithHavingBelowJoin
 	//
-	// With none registered, the search still runs end to end and must reproduce the input plan
-	// exactly - which is what makes this commit verifiable.
+	// Section 3.1 (A): a predicate constant within a group moves below the GroupBy.
+	AddRule(make_uniq<PushFilterBelowGroupBy>());
 }
 
 unique_ptr<LogicalOperator> CascadesOptimizer::Optimize(unique_ptr<LogicalOperator> plan) {
@@ -55,11 +56,13 @@ unique_ptr<LogicalOperator> CascadesOptimizer::Optimize(unique_ptr<LogicalOperat
 	result->ResolveOperatorTypes();
 	if (CascadeConfig::PrintPlans()) {
 		Printer::Print(StringUtil::Format("--- cascade(cascades): groups=%llu exprs=%llu physical=%llu | "
-		                                  "explored=%llu rules applied=%llu rejected=%llu",
+		                                  "explored=%llu rules applied=%llu no-effect=%llu rejected=%llu alternatives=%llu",
 		                                  (unsigned long long)memo.GroupCount(), (unsigned long long)memo.ExprCount(),
 		                                  (unsigned long long)memo.PhysicalCount(),
 		                                  (unsigned long long)groups_explored, (unsigned long long)rules_applied,
-		                                  (unsigned long long)rules_rejected));
+		                                  (unsigned long long)rules_no_effect,
+		                                  (unsigned long long)rules_rejected,
+		                                  (unsigned long long)expressions_added));
 	}
 	return result;
 }
@@ -198,12 +201,17 @@ void CascadesOptimizer::ApplyRule(GroupId group, GroupExpr &expr, CascadesRule &
 		rules_rejected++;
 		return;
 	}
-	rule.Apply(*this, group, expr);
-	rules_applied++;
+	if (rule.Apply(*this, group, expr)) {
+		rules_applied++;
+	} else {
+		// Matched and applied, but produced nothing (the shape was not there after all).
+		rules_no_effect++;
+	}
 }
 
 void CascadesOptimizer::AddExpression(GroupId group, unique_ptr<GroupExpr> expr) {
 	auto &data = memo.GetGroup(group);
+	expressions_added++;
 	if (expr->physical) {
 		data.physical_count++;
 	} else {

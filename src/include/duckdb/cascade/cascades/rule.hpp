@@ -31,6 +31,7 @@
 
 #pragma once
 
+#include "duckdb/cascade/cascade_bindings.hpp"
 #include "duckdb/common/common.hpp"
 
 namespace duckdb {
@@ -58,8 +59,11 @@ public:
 	virtual bool ApplyOnce() const {
 		return false;
 	}
-	//! Produce the replacements; each is added to the memo by the caller.
-	virtual void Apply(CascadesOptimizer &optimizer, GroupId group, GroupExpr &expr) = 0;
+	//! Produce the replacements. Returns whether it added at least one expression: a rule that
+	//! matched, was applied, and declined (or found nothing to do) must not be counted as if it
+	//! had rewritten the plan - that distinction is how "the rule ran" is told from "the rule
+	//! worked", and the statistics keep them apart.
+	virtual bool Apply(CascadesOptimizer &optimizer, GroupId group, GroupExpr &expr) = 0;
 
 	CascadesRuleKind Kind() const {
 		return kind;

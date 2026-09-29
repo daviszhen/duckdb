@@ -52,6 +52,11 @@ public:
 	idx_t RulesApplied() const {
 		return rules_applied;
 	}
+	//! How many alternative expressions the rules put into the memo. This is the number that
+	//! says a rule did something, independently of whether its alternative won on cost.
+	idx_t ExpressionsAdded() const {
+		return expressions_added;
+	}
 	idx_t RulesRejected() const {
 		return rules_rejected;
 	}
@@ -77,6 +82,8 @@ private:
 	vector<std::pair<const CascadesRule *, GroupId>> rule_memory;
 	idx_t groups_explored = 0;
 	idx_t rules_applied = 0;
+	idx_t expressions_added = 0;
+	idx_t rules_no_effect = 0;
 	idx_t rules_rejected = 0;
 };
 

@@ -88,6 +88,14 @@ public:
 	//! Copy `op` into the memo - children detached and memoised bottom-up - and return its group.
 	GroupId Add(unique_ptr<LogicalOperator> op);
 
+	//! A fresh, empty equivalence class. A rule that needs a place for an intermediate
+	//! expression - the filter it pushed below the aggregate - creates one, then adds to it.
+	GroupId AddGroup();
+
+	//! Wrap an operator and the groups of its children into a memo expression. The operator's
+	//! own `children` are left empty: in the memo they are group ids.
+	static unique_ptr<GroupExpr> MakeExpr(unique_ptr<LogicalOperator> op, vector<GroupId> children);
+
 	//! The expression the given context settled on, or nullptr when it has not been optimised.
 	GroupExpr *WinnerOf(const OptimizationContext &context);
 	void SetWinner(const OptimizationContext &context, GroupExpr *expr);
