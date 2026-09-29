@@ -28,6 +28,52 @@ Binder &CascadeOptimizer::GetBinder() {
 	return binder;
 }
 
+namespace {
+
+//! A DuckDB optimizer pass that must not look at a plan one of the identities below built,
+//! together with the shape that trips it. Every entry is a bug report: the pass rewrites the
+//! plan we hand it in a way that leaves a stale binding behind (or silently changes the answer),
+//! and the plan we build on its own is verified correct by the sqllogictests. Keeping the repro
+//! next to the guard is the point of the table - a guard without one is not a bug fix.
+struct PassGuard {
+	//! Which decorrelator outcome brings the shape about.
+	bool (ApplyDecorrelator::*triggers)() const;
+	//! The pass that cannot see it.
+	OptimizerType pass;
+};
+
+const PassGuard PASS_GUARDS[] = {
+    // Identity (5)/(6) - an Apply distributed over a set operation - builds a set operation
+    // whose branches each read the shared outer relation through a materialised CTE.
+    // FilterPullup pulls a filter out of the left branch up above the EXCEPT and rewrites its
+    // column references to the set operation's positions, which changes the multiset
+    // difference. Repro (cascade + KEEP_APPLY + OPTIMIZE):
+    //     SELECT s.a FROM tt, (SELECT a FROM tu WHERE tu.a = tt.k
+    //                          EXCEPT ALL SELECT b FROM tv WHERE tv.b = tt.k) s;
+    // answers 1,1 without the optimizer and 1,1,1,1,2,2,2,2,2,2,5,5,5,5 with it.
+    {&ApplyDecorrelator::DistributedSetOperation, OptimizerType::FILTER_PULLUP},
+    // Identity (9) - a correlated scalar sub-query - groups over a left outer join.
+    // CompressedMaterialization narrows that group-by key and expects to compensate above it,
+    // but on this shape it leaves a reference to a column that is no longer in scope
+    // (`Failed to bind column reference "" [18.0]`, `SELECT a, (SELECT count(*) FROM s
+    // WHERE s.a < t.a) FROM t`). The equality forms happen to survive; the guard covers the
+    // whole identity, because a lost narrowing pass costs speed and a wrong plan costs
+    // correctness.
+    {&ApplyDecorrelator::ScalarAggregate, OptimizerType::COMPRESSED_MATERIALIZATION},
+    // Identity (8) - a correlated scalar sub-query whose body has a GroupBy of its own.
+    // StatisticsPropagator derives a filter (e.g. `a = 1` from the WHERE clause) and pushes
+    // it below the group-by the identity builds, where the group keys do not satisfy it: the
+    // answer comes back empty instead of `1|2, 1|2` - a silent wrong answer, the worst mode.
+    {&ApplyDecorrelator::NestedScalarAggregate, OptimizerType::STATISTICS_PROPAGATION},
+    // Two correlated sub-queries sharing the outer relation. CommonSubplanOptimizer
+    // materialises the shared part into `__common_subplan_N` and leaves the group keys of the
+    // aggregates we built pointing at columns it moved (`Failed to bind column reference "a"
+    // [30.0]`, two scalar sub-queries with non-equality correlations).
+    {&ApplyDecorrelator::SharedSubQueries, OptimizerType::COMMON_SUBPLAN},
+};
+
+} // namespace
+
 unique_ptr<LogicalOperator> CascadeOptimizer::Optimize(unique_ptr<LogicalOperator> plan) {
 	if (CascadeConfig::PrintPlans()) {
 		Printer::Print("--- cascade: bound logical plan (pre-optimization) ---");
@@ -50,58 +96,19 @@ unique_ptr<LogicalOperator> CascadeOptimizer::Optimize(unique_ptr<LogicalOperato
 	}
 
 	if (CascadeConfig::RunDuckOptimizers()) {
-		// Fair comparison: our rewrite, then DuckDB's own downstream passes over it.
-		//
-		// FIXME: one of those passes, FilterPullup, is wrong on the plan identity (5)/(6) builds.
-		// That plan is a set operation whose branches each read the shared outer relation through
-		// the materialised CTE, and FilterPullup pulls a filter out of the left branch up above
-		// the EXCEPT - rewriting its column references to the set operation's positions - which
-		// changes the multiset difference. A four-line repro (cascade + KEEP_APPLY + OPTIMIZE):
-		//
-		//     SELECT s.a FROM tt, (SELECT a FROM tu WHERE tu.a = tt.k
-		//                          EXCEPT ALL SELECT b FROM tv WHERE tv.b = tt.k) s;
-		//
-		// answers 1,1 without the optimizer and 1,1,1,1,2,2,2,2,2,2,5,5,5,5 with it; disabling
-		// `filter_pullup` by hand restores 1,1. Until the pass is fixed, keep it away from this
-		// shape - the plan we build is verified correct on its own (the sqllogictest pins it).
-		// ... CompressedMaterialization is wrong on the plan identity (9) builds: it narrows a
-		// group-by key and expects to compensate above, but on this shape it leaves a reference to
-		// a column that is no longer in scope:
-		//
-		//     SELECT a, (SELECT count(*) FROM s WHERE s.a < t.a) FROM t;
-		//
-		// `Failed to bind column reference "" [18.0] (bindings: {#[0.0]})`; disabling the pass by
-		// hand answers it. The equality forms happen to survive, but the guard covers the whole
-		// identity - a lost narrowing pass costs speed, a wrong plan costs correctness.
-		//
-		// Both guards are per plan: every other plan keeps the passes.
+		// Fair comparison: our rewrite, then DuckDB's own downstream passes over it - except for
+		// the passes in PASS_GUARDS below, which mis-rewrite the plan an identity built. Each
+		// entry carries its own repro; the guard is per plan and per shape, so every other plan
+		// still runs the whole optimizer.
 		auto &disabled = DBConfig::GetConfig(context).options.disabled_optimizers;
 		vector<OptimizerType> added;
-		auto guard = [&](OptimizerType type) {
-			if (disabled.insert(type).second) {
-				added.push_back(type);
+		for (auto &pass_guard : PASS_GUARDS) {
+			if (!(decorrelator.*(pass_guard.triggers))()) {
+				continue;
 			}
-		};
-		if (decorrelator.DistributedSetOperation()) {
-			guard(OptimizerType::FILTER_PULLUP);
-		}
-		if (decorrelator.ScalarAggregate()) {
-			guard(OptimizerType::COMPRESSED_MATERIALIZATION);
-		}
-		if (decorrelator.NestedScalarAggregate()) {
-			// ... and StatisticsPropagator is wrong on the nested shape: it derives a filter
-			// (e.g. `a = 1` from the WHERE clause) and pushes it below the group-by identity (8)
-			// builds, where the group keys do not satisfy it - the answer silently comes back
-			// empty instead of `1|2, 1|2`.
-			guard(OptimizerType::STATISTICS_PROPAGATION);
-		}
-		if (decorrelator.SharedSubQueries()) {
-			// ... and CommonSubplanOptimizer is wrong when several correlated sub-queries share
-			// the outer relation. It materialises the shared part into `__common_subplan_N` and
-			// leaves the group keys of the aggregates we built pointing at columns it moved
-			// (`Failed to bind column reference "a" [30.0] (bindings: {#[31.0]})`, two scalar
-			// sub-queries with non-equality correlations). Disabling that one pass answers it.
-			guard(OptimizerType::COMMON_SUBPLAN);
+			if (disabled.insert(pass_guard.pass).second) {
+				added.push_back(pass_guard.pass);
+			}
 		}
 		Optimizer optimizer(binder, context);
 		plan = optimizer.Optimize(std::move(plan));
