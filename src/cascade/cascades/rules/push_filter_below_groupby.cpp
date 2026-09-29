@@ -99,6 +99,17 @@ bool BuildPushdownMap(CascadesOptimizer &optimizer, GroupExpr &filter, const Fil
 				return false;
 			}
 			auto inner = expr.Cast<BoundColumnRefExpression>().Binding();
+			// The column the projection reads has to be a *grouping* column: an aggregate's result
+			// does not exist below the aggregate, and that is the whole reason the rule has a
+			// condition. Without this check
+			//
+			//   ... JOIN (SELECT k, sum(v) AS t FROM tr GROUP BY k) g ON ts.a = g.k AND g.t > 100
+			//
+			// moved `g.t > 100` below the aggregate, where `t` is exactly the sum it is computed
+			// from - a dangling reference, and the test exists to catch it.
+			if (inner.table_index != aggregate.group_index) {
+				return false;
+			}
 			mapping.emplace_back(ColumnBinding(projection.table_index, ProjectionIndex(i)), MapBinding(inner, below));
 		}
 	}
