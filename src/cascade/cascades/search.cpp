@@ -152,9 +152,10 @@ unique_ptr<LogicalOperator> CascadesOptimizer::Optimize(unique_ptr<LogicalOperat
 				}
 				Printer::Print(StringUtil::Format(
 				    "--- cascade(cascades) apply in group %llu: children=%llu join_type=%d condition=%s "
-				    "correlated=%llu right=[%s] below=[%s]",
+				    "correlated=%llu any=%d delim=%d nulls=%d right=[%s] below=[%s]",
 				    (unsigned long long)group, (unsigned long long)expr->children.size(), (int)apply.join_type,
 				    apply.condition ? "yes" : "no", (unsigned long long)apply.correlated_columns.size(),
+				    (int)apply.any_join, (int)apply.perform_delim, (int)apply.propagate_null_values,
 				    right_types.c_str(), right_below.c_str()));
 				Printer::Print(StringUtil::Format("--- cascade(cascades)   predicate probe:%s",
 				                                  predicate_probe.c_str()));
