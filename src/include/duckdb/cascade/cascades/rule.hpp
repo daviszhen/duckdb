@@ -53,8 +53,11 @@ public:
 
 	//! Does this rule's pattern match the expression at all? Cheapest check first.
 	virtual bool Matches(GroupExpr &expr) = 0;
-	//! ORCA's Exfp(): NONE when the precondition does not hold on this expression.
-	virtual CascadesRulePromise Promise(GroupExpr &expr) = 0;
+	//! ORCA's Exfp(): NONE when the precondition does not hold on this expression. It gets the
+	//! optimizer because the precondition is rarely visible in the expression alone - whether a
+	//! GroupBy sits below the filter is a property of the memo - and ORCA's Exfp() is given the
+	//! metadata for the same reason. A NONE promise means the task is never queued.
+	virtual CascadesRulePromise Promise(CascadesOptimizer &optimizer, GroupExpr &expr) = 0;
 	//! ORCA's IsApplyOnce().
 	virtual bool ApplyOnce() const {
 		return false;

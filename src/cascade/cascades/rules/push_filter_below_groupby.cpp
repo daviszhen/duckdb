@@ -151,18 +151,22 @@ unique_ptr<LogicalOperator> RebuildAggregate(const LogicalAggregate &aggregate, 
 
 } // namespace
 
-CascadesRulePromise PushFilterBelowGroupBy::Promise(GroupExpr &expr) {
-	// The full precondition needs the memo, so it is answered in Apply; the queue only orders by
-	// the cheap match. ORCA splits the same way: the pattern is static, Exfp() is not.
+CascadesRulePromise PushFilterBelowGroupBy::Promise(CascadesOptimizer &optimizer, GroupExpr &expr) {
+	// ORCA's Exfp(): answer "not applicable" where the shape is simply not there, so the task is
+	// never queued. Whether the predicate can be *rewritten* below the aggregate is a deeper
+	// question, answered while building the replacement - that one is a no-effect, not a
+	// rejection, and the counters keep the two apart.
+	FilterAboveGroupBy shape;
+	if (!DescribeShape(optimizer, expr, shape)) {
+		return CascadesRulePromise::NONE;
+	}
 	return CascadesRulePromise::MEDIUM;
 }
 
 bool PushFilterBelowGroupBy::Apply(CascadesOptimizer &optimizer, GroupId group, GroupExpr &expr) {
 	FilterAboveGroupBy shape;
 	if (!DescribeShape(optimizer, expr, shape)) {
-		if (CascadeConfig::PrintPlans()) {
-			Printer::Print("--- cascade(cascades) rule " + string(Name()) + ": no aggregate below the filter");
-		}
+		// The promise should have rejected this one before it was queued.
 		return false;
 	}
 	BindingExport mapping;

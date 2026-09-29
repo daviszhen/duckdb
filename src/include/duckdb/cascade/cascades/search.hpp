@@ -60,6 +60,9 @@ public:
 	idx_t RulesRejected() const {
 		return rules_rejected;
 	}
+	idx_t RulesSkipped() const {
+		return rules_skipped;
+	}
 
 private:
 	void RegisterRules();
@@ -83,10 +86,14 @@ private:
 	//! (rule, group) pairs already applied - ORCA's rule memory, without which the same
 	//! exploration rule would keep re-firing on the expressions it produced.
 	vector<std::pair<const CascadesRule *, GroupId>> rule_memory;
+	//! (rule, expression) pairs for the rules that may only run once per expression.
+	vector<std::pair<const CascadesRule *, GroupExpr *>> once_memory;
 	idx_t groups_explored = 0;
 	idx_t rules_applied = 0;
 	idx_t expressions_added = 0;
 	idx_t rules_no_effect = 0;
+	//! Rules whose ApplyOnce() refused a second application on the same expression.
+	idx_t rules_skipped = 0;
 	idx_t rules_rejected = 0;
 };
 

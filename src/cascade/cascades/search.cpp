@@ -183,12 +183,20 @@ void CascadesOptimizer::ExploreGroup(GroupId group) {
 			if (!rule->Matches(*data.exprs[i])) {
 				continue;
 			}
+			// The promise is asked once, here, and a NONE promise means the task is never queued:
+			// that is the point of ORCA's Exfp() - a rule whose precondition does not hold should
+			// cost a check, not a task.
+			auto promise = rule->Promise(*this, *data.exprs[i]);
+			if (promise == CascadesRulePromise::NONE) {
+				rules_rejected++;
+				continue;
+			}
 			CascadesTask task;
 			task.kind = CascadesTaskKind::APPLY_RULE;
 			task.group = group;
 			task.expr = data.exprs[i].get();
 			task.rule = rule.get();
-			task.promise = rule->Promise(*data.exprs[i]);
+			task.promise = promise;
 			tasks.Push(task);
 		}
 	}
@@ -250,12 +258,17 @@ void CascadesOptimizer::ApplyRule(GroupId group, GroupExpr &expr, CascadesRule &
 		}
 	}
 	rule_memory.emplace_back(&rule, group);
-	auto promise = rule.Promise(expr);
-	if (promise == CascadesRulePromise::NONE) {
-		// The precondition does not hold here - ORCA's Exfp() contract. Counting these is how
-		// "the rule ran but declined" is told apart from "the rule never saw the shape".
-		rules_rejected++;
-		return;
+	// Apply-once (ORCA's IsApplyOnce): on a deep expression a rule can be reached many times, and
+	// some rules must only run once per expression or the memo explodes. No rule sets it yet, so
+	// the counter below stays zero until one needs it - the mechanism is what is being wired.
+	if (rule.ApplyOnce()) {
+		for (auto &entry : once_memory) {
+			if (entry.first == &rule && entry.second == &expr) {
+				rules_skipped++;
+				return;
+			}
+		}
+		once_memory.emplace_back(&rule, &expr);
 	}
 	if (rule.Apply(*this, group, expr)) {
 		rules_applied++;

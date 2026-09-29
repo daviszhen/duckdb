@@ -36,7 +36,7 @@ public:
 	}
 
 	bool Matches(GroupExpr &expr) override;
-	CascadesRulePromise Promise(GroupExpr &expr) override;
+	CascadesRulePromise Promise(CascadesOptimizer &optimizer, GroupExpr &expr) override;
 	bool Apply(CascadesOptimizer &optimizer, GroupId group, GroupExpr &expr) override;
 };
 
