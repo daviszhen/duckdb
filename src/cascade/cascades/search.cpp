@@ -2,6 +2,7 @@
 
 #include "duckdb/cascade/cascade_config.hpp"
 #include "duckdb/cascade/cascades/rules/apply_to_join.hpp"
+#include "duckdb/cascade/cascades/rules/correlated_apply_to_join.hpp"
 #include "duckdb/cascade/cascades/rules/lift_local_predicate.hpp"
 #include "duckdb/cascade/cascades/rules/semi_apply_to_join.hpp"
 #include "duckdb/cascade/cascades/rules/push_filter_below_groupby.hpp"
@@ -58,6 +59,9 @@ void CascadesOptimizer::RegisterRules() {
 	// Identity (4), the shape the corpus has: the correlation of an existence sub-query becomes
 	// the condition of a semi or anti join.
 	AddRule(make_uniq<SemiApplyToJoin>());
+	// Identity (4), the shape this corpus has: the correlation of an existence sub-query becomes
+	// the condition of the semi, anti or mark join that replaces the Apply.
+	AddRule(make_uniq<CorrelatedApplyToJoin>());
 	// Section 3.1 (A): a predicate constant within a group moves below the GroupBy.
 	AddRule(make_uniq<PushFilterBelowGroupBy>());
 }

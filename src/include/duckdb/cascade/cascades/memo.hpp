@@ -77,6 +77,10 @@ struct GroupExpr {
 	bool physical = false;
 	//! Estimated cost, filled when the expression is optimised.
 	double cost = 0;
+	//! Whether the cost above was computed at all. Without this, "costed and lost" is
+	//! indistinguishable from "never costed" (both would show cost 0), and invariant 4 rejected a
+	//! winner for being dearer than an expression that had never been priced.
+	bool costed = false;
 	//! Estimated output rows, also filled when the expression is optimised: a parent's cost is
 	//! charged on the rows that reach it, so every expression has to report what it emits.
 	double rows = 0;

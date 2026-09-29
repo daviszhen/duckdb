@@ -68,6 +68,17 @@ unique_ptr<GroupExpr> Memo::MakeExpr(unique_ptr<LogicalOperator> op, vector<Grou
 		// deriving the wrong columns there would be worse than not deriving any.
 	{
 			auto join_type = expr->op->Cast<LogicalComparisonJoin>().join_type;
+			if (join_type == JoinType::MARK) {
+				// The left side plus the mark column, as LogicalJoin does for MARK. Verified against
+				// what an Apply actually exposes by the probe in search.cpp.
+				if (!expr->children.empty() && expr->children[0] < groups.size() &&
+				    !groups[expr->children[0]]->exprs.empty()) {
+					expr->bindings = groups[expr->children[0]]->exprs[0]->bindings;
+					expr->bindings.emplace_back(expr->op->Cast<LogicalComparisonJoin>().mark_index,
+					                            ProjectionIndex(0));
+				}
+				break;
+			}
 			if (join_type == JoinType::SEMI || join_type == JoinType::ANTI) {
 				// A semi or anti join keeps the left side's columns and nothing else; deriving that
 				// is worth it, because the second invariant then has something to check instead of
@@ -165,7 +176,7 @@ bool Memo::Validate(string &error) const {
 		for (auto &expr : data.exprs) {
 			if (expr.get() == winner) {
 				in_group = true;
-			} else if (expr->rows > 0 && expr->cost < winner->cost) {
+			} else if (expr->costed && expr->cost < winner->cost) {
 				error = StringUtil::Format("group %llu kept a winner costing %.2f while a %.2f expression is in it",
 				                           (unsigned long long)group, winner->cost, expr->cost);
 				return false;
