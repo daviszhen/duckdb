@@ -295,7 +295,32 @@ void CascadesOptimizer::FinishExpr(GroupId group, GroupExpr &expr) {
 	OptimizationContext context;
 	context.group = group;
 	auto current = memo.WinnerOf(context);
-	auto wins = !current || cost < current->cost;
+	// Deterministic tie-break. "The first one costed wins a tie" makes the winner depend on the
+	// order the task queue happened to reach the expressions in, and the same binary then picks
+	// different plans between runs - it did, which is what made a failing test file appear to move
+	// from one file to another. Ties go to the expression that comes first in its group instead.
+	auto index_of = [&](GroupExpr *candidate) -> idx_t {
+		if (!candidate) {
+			return DConstants::INVALID_INDEX;
+		}
+		auto &data = memo.GetGroup(group);
+		for (idx_t i = 0; i < data.exprs.size(); i++) {
+			if (data.exprs[i].get() == candidate) {
+				return i;
+			}
+		}
+		return DConstants::INVALID_INDEX;
+	};
+	bool wins;
+	if (!current) {
+		wins = true;
+	} else if (cost < current->cost) {
+		wins = true;
+	} else if (cost == current->cost) {
+		wins = index_of(&expr) < index_of(current);
+	} else {
+		wins = false;
+	}
 	if (CascadeConfig::PrintPlans()) {
 		Printer::Print(StringUtil::Format("--- cascade(cascades) candidate: group=%llu type=%s cost=%.2f%s",
 		                                  (unsigned long long)group, EnumUtil::ToString(expr.type).c_str(), cost,
