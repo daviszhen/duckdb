@@ -68,6 +68,9 @@ struct GroupExpr {
 	bool physical = false;
 	//! Estimated cost, filled when the expression is optimised.
 	double cost = 0;
+	//! Estimated output rows, also filled when the expression is optimised: a parent's cost is
+	//! charged on the rows that reach it, so every expression has to report what it emits.
+	double rows = 0;
 	//! Which rule produced it (0 = came from the input plan). For the stats printout.
 	idx_t rule_id = 0;
 };

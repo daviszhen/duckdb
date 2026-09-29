@@ -191,8 +191,10 @@ double CascadesOptimizer::CostOf(GroupExpr &expr) {
 		auto winner = memo.WinnerOf(context);
 		child_costs.push_back(winner ? winner->cost : 0.0);
 		// The rows a child produces are what this operator pays to look at.
-		child_rows.push_back(winner && winner->op ? CostModel::Cardinality(*winner->op) : 1.0);
+		child_rows.push_back(winner && winner->rows >= 1 ? winner->rows : 1.0);
 	}
+	// Every expression has to report its own output rows too, or its parent cannot be costed.
+	expr.rows = CostModel::OutputRows(expr, child_rows);
 	return CostModel::Cost(expr, child_costs, child_rows);
 }
 

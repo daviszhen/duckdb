@@ -39,6 +39,12 @@ public:
 	//! they only have to rank the operators sensibly for now: an aggregate is dear per row, a
 	//! filter and a projection are cheap.
 	static double RowCost(LogicalOperatorType type);
+	//! How many rows an expression is expected to emit. The host's estimate is used whenever there
+	//! is one; when there is not - an in-memory table has no statistics, and the estimates the
+	//! host computes live in the optimizer this mode bypasses - the type decides, and the
+	//! coefficients below are placeholders. They only have to rank plans the way a real
+	//! selectivity would: a filter removes most rows, an aggregate does not invent them.
+	static double OutputRows(const GroupExpr &expr, const vector<double> &child_rows);
 	//! Cost of an expression given each child's total cost and its output rows.
 	static double Cost(const GroupExpr &expr, const vector<double> &child_costs, const vector<double> &child_rows);
 };
