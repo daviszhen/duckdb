@@ -1707,6 +1707,15 @@ static void RewriteOperatorBindings(LogicalOperator &op, const BindingExport &ex
 		}
 		break;
 	}
+	case LogicalOperatorType::LOGICAL_DEPENDENT_JOIN: {
+		// An Apply keeps its ON predicate in a member of its own, and the columns it
+		// compares can move like any other expression's.
+		auto &condition = op.Cast<LogicalDependentJoin>().condition;
+		if (condition) {
+			RewriteBindings(condition, exports);
+		}
+		break;
+	}
 	case LogicalOperatorType::LOGICAL_AGGREGATE_AND_GROUP_BY: {
 		// An aggregate keeps its grouping expressions in their own member, away from
 		// op.expressions, so they need rewriting too.
@@ -1741,14 +1750,44 @@ static bool PassesBindingsThrough(const LogicalOperator &op) {
 	}
 }
 
+//! Point every operator of a sub-tree at the bindings its child now exposes. RewriteOperatorBindings
+//! looks at one node's own expressions, which is enough when a mapping travels upwards, but a
+//! sub-query's references to the outer relation live *inside* it and have to be rewritten in place.
+static void RewriteTreeBindings(LogicalOperator &op, const BindingExport &exports) {
+	RewriteOperatorBindings(op, exports);
+	for (auto &child : op.children) {
+		RewriteTreeBindings(*child, exports);
+	}
+}
+
 unique_ptr<LogicalOperator> ApplyDecorrelator::DecorrelateNode(unique_ptr<LogicalOperator> op, BindingExport &exports) {
-	for (auto &child : op->children) {
+	// What this operator's left side moved, so an Apply can hand the mapping on to its parent.
+	BindingExport left_exports;
+	for (idx_t child_index = 0; child_index < op->children.size(); child_index++) {
+		auto &child = op->children[child_index];
 		BindingExport child_exports;
 		child = DecorrelateNode(std::move(child), child_exports);
+		if (child_index == 0 && op->type == LogicalOperatorType::LOGICAL_DEPENDENT_JOIN) {
+			left_exports = child_exports;
+		}
 		if (child_exports.empty()) {
 			continue;
 		}
 		RewriteOperatorBindings(*op, child_exports);
+		if (op->type == LogicalOperatorType::LOGICAL_DEPENDENT_JOIN) {
+			// The sub-query correlates to this operator's left side, and that side has just
+			// been rewritten: both the metadata and every reference inside the sub-query have
+			// to follow, or the lift builds a join condition against bindings its left child
+			// no longer exposes (`Failed to bind column reference "a" [0.0]`, two scalar
+			// sub-queries in one SELECT).
+			auto &apply = op->Cast<LogicalDependentJoin>();
+			for (auto &info : apply.correlated_columns) {
+				info.binding = MapBinding(info.binding, child_exports);
+			}
+			for (idx_t other = 1; other < op->children.size(); other++) {
+				RewriteTreeBindings(*op->children[other], child_exports);
+			}
+		}
 		if (PassesBindingsThrough(*op)) {
 			for (auto &entry : child_exports) {
 				exports.push_back(entry);
@@ -1756,7 +1795,24 @@ unique_ptr<LogicalOperator> ApplyDecorrelator::DecorrelateNode(unique_ptr<Logica
 		}
 	}
 	if (op->type == LogicalOperatorType::LOGICAL_DEPENDENT_JOIN) {
-		return DecorrelateApply(std::move(op), exports);
+		// This Apply's own exports describe what its *left* side exposes, but the parent still
+		// names the outer columns the way they were bound before that left side was rewritten.
+		// A second Apply stacked on the same outer relation is exactly that case, so the two
+		// mappings have to be composed - otherwise the parent keeps asking for a binding that
+		// no longer exists (`Failed to bind column reference "a" [0.0]`, two scalar sub-queries
+		// in one SELECT).
+		auto own_from = exports.size();
+		auto result = DecorrelateApply(std::move(op), exports);
+		if (!left_exports.empty()) {
+			BindingExport own(exports.begin() + static_cast<ptrdiff_t>(own_from), exports.end());
+			for (auto &entry : left_exports) {
+				auto mapped = MapBinding(entry.second, own);
+				if (mapped != entry.first) {
+					exports.emplace_back(entry.first, mapped);
+				}
+			}
+		}
+		return result;
 	}
 	return op;
 }
