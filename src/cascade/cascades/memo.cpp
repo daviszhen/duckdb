@@ -4,6 +4,7 @@
 #include "duckdb/common/string_util.hpp"
 #include "duckdb/main/client_context.hpp"
 #include "duckdb/planner/operator/logical_aggregate.hpp"
+#include "duckdb/planner/operator/logical_comparison_join.hpp"
 #include "duckdb/planner/operator/logical_projection.hpp"
 
 namespace duckdb {
@@ -59,6 +60,24 @@ unique_ptr<GroupExpr> Memo::MakeExpr(unique_ptr<LogicalOperator> op, vector<Grou
 			auto &child_group = *groups[expr->children[0]];
 			if (!child_group.exprs.empty()) {
 				expr->bindings = child_group.exprs[0]->bindings;
+			}
+		}
+		break;
+	case LogicalOperatorType::LOGICAL_COMPARISON_JOIN:
+		// Only an inner join exposes both sides; a semi or anti join exposes the left one, and
+		// deriving the wrong columns there would be worse than not deriving any.
+		if (expr->op->Cast<LogicalComparisonJoin>().join_type != JoinType::INNER) {
+			break;
+		}
+		[[fallthrough]];
+	case LogicalOperatorType::LOGICAL_CROSS_PRODUCT:
+		for (auto child : expr->children) {
+			if (child >= groups.size() || groups[child]->exprs.empty()) {
+				expr->bindings.clear();
+				break;
+			}
+			for (auto &binding : groups[child]->exprs[0]->bindings) {
+				expr->bindings.push_back(binding);
 			}
 		}
 		break;
