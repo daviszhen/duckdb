@@ -13,6 +13,7 @@
 #include "duckdb/planner/operator/logical_dummy_scan.hpp"
 #include "duckdb/planner/expression/bound_comparison_expression.hpp"
 #include "duckdb/planner/operator/logical_dependent_join.hpp"
+#include "duckdb/planner/operator/logical_projection.hpp"
 #include "duckdb/planner/operator/logical_dependent_join.hpp"
 #include "duckdb/planner/operator/logical_filter.hpp"
 #include "duckdb/planner/operator/logical_projection.hpp"
@@ -169,6 +170,15 @@ unique_ptr<LogicalOperator> CascadesOptimizer::Optimize(unique_ptr<LogicalOperat
 						derived = left_probe_group.exprs[0]->bindings;
 					}
 					derived.emplace_back(apply.mark_index, ProjectionIndex(0));
+					for (auto &right_expr : memo.GetGroup(expr->children[1]).exprs) {
+						if (right_expr->type != LogicalOperatorType::LOGICAL_PROJECTION) {
+							continue;
+						}
+						Printer::Print(StringUtil::Format(
+						    "--- cascade(cascades)   projection table_index=%llu bindings=%s",
+						    (unsigned long long)right_expr->op->Cast<LogicalProjection>().table_index.index,
+						    LogicalOperator::ColumnBindingsToString(right_expr->bindings).c_str()));
+					}
 					Printer::Print(StringUtil::Format(
 					    "--- cascade(cascades)   derived bindings: %s | mark_index=%llu | match=%s",
 					    LogicalOperator::ColumnBindingsToString(derived).c_str(),
