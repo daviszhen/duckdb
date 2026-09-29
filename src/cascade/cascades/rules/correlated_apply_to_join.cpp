@@ -17,9 +17,16 @@
 //   * With the splice in place the rule did work - "spliced group 5, join SEMI in group 8",
 //     enforced 30 -> 25 - and then failed to bind:
 //         Failed to bind column reference "b" [0.0] (bindings: {#[7.0], #[7.1]})
-//     The available set is a *correlated copy* of the two-column left table at another table
-//     index, i.e. exactly what the decorrelator's ExposeRightColumns and DecrementCorrelationDepth
-//     maintain. Moving the condition is not enough; the column exposure has to be reproduced.
+//     The available set is a *correlated copy* of the left table at another table index. Moving
+//     the condition is not enough: the decorrelator's own contract says why. CollectRightColumns
+//     gathers the columns a lifted predicate references, and ExposeRightColumns requires the right
+//     sub-tree to be a projection, *appends* whatever that projection does not already expose, and
+//     reports the old -> new binding mapping so the conditions can be rewritten through it. It
+//     refuses (rather than emitting a plan) when the column is not produced by the projection's
+//     own child - the case of a column sitting below a second projection - which is the same
+//     decline this rule needs. In memo terms that is: rebuild the right-side projection with the
+//     needed columns appended, map the condition's bindings onto the new ones, and refuse when the
+//     group below the projection does not expose them.
 //   * The same rule body spliced twice in one build and not at all in another (applied=4 but
 //     ParentsOf(consumer_group) empty) is *not* nondeterminism: the splice rewrites the parents'
 //     child ids, so after the first one the consumer group has no parents left and later
