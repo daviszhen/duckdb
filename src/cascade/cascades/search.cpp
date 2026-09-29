@@ -120,6 +120,23 @@ unique_ptr<LogicalOperator> CascadesOptimizer::Optimize(unique_ptr<LogicalOperat
 		Printer::Print("--- cascade(cascades) chosen plan:\n" + result->ToString(&context));
 	}
 	if (CascadeConfig::PrintPlans()) {
+		// Minimal by design: the previous version of this dump crashed, and a diagnostic that
+		// produces no output is indistinguishable from one that fell over unless the raw output is
+		// looked at - so this prints the least it can and is run bare.
+		idx_t applies = 0;
+		for (idx_t group = 0; group < memo.GroupCount(); group++) {
+			for (auto &expr : memo.GetGroup(group).exprs) {
+				if (expr->type != LogicalOperatorType::LOGICAL_DEPENDENT_JOIN) {
+					continue;
+				}
+				applies++;
+				Printer::Print(StringUtil::Format("--- cascade(cascades) apply in group %llu: type=%s children=%llu",
+				                                  (unsigned long long)group, EnumUtil::ToString(expr->type).c_str(),
+				                                  (unsigned long long)expr->children.size()));
+			}
+		}
+		Printer::Print(StringUtil::Format("--- cascade(cascades) apply expressions in the memo: %llu",
+		                                  (unsigned long long)applies));
 		for (idx_t group = 0; group < memo.GroupCount(); group++) {
 			auto &data = memo.GetGroup(group);
 			OptimizationContext context;
