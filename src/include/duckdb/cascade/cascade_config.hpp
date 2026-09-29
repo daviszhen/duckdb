@@ -34,6 +34,13 @@ public:
 	//! instantiates the operators. Off by default, like every switch here.
 	static bool UseMemoOptimizer();
 
+	//! DUCKDB_CASCADE_MEMO_RULES=1 turns the memo's rules on. They are off by default
+	//! because they are still being made sound: the first one (section 3.1 (A)) produced a
+	//! plan with an unbound column reference as soon as the cost model started preferring
+	//! its alternative, which the test matrix caught. The skeleton with no rules is the
+	//! verified state; the rules are development work behind this flag.
+	static bool MemoRules();
+
 	//! DUCKDB_CASCADE_KEEP_APPLY=1: skip FlattenDependentJoins, so that
 	//! LogicalDependentJoin (the Apply operator) survives into the optimizer.
 	static bool KeepApply();

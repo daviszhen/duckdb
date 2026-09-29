@@ -33,6 +33,11 @@ void CascadesOptimizer::RegisterRules() {
 	//   section 3.1 (A)   predicate below the GroupBy
 	//                     -> ORCA ExfPushGbBelowJoin / ExfPushGbWithHavingBelowJoin
 	//
+	if (!CascadeConfig::MemoRules()) {
+		// The verified state is the skeleton: the memo builds, the tasks run and the plan comes
+		// back unchanged. The rules are development work - see CascadeConfig::MemoRules.
+		return;
+	}
 	// Section 3.1 (A): a predicate constant within a group moves below the GroupBy.
 	AddRule(make_uniq<PushFilterBelowGroupBy>());
 }

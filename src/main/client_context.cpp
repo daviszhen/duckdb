@@ -4,7 +4,6 @@
 #include "duckdb/cascade/apply_decorrelation.hpp"
 #include "duckdb/cascade/cascade_optimizer.hpp"
 #include "duckdb/cascade/cascades/search.hpp"
-#include "duckdb/optimizer/statistics_propagator.hpp"
 #include "duckdb/catalog/catalog_entry/scalar_function_catalog_entry.hpp"
 #include "duckdb/catalog/catalog_entry/table_catalog_entry.hpp"
 #include "duckdb/catalog/catalog_search_path.hpp"
@@ -536,17 +535,12 @@ shared_ptr<PreparedStatementData> ClientContext::CreatePreparedStatementInternal
 				ApplyDecorrelator decorrelator(*logical_planner.binder, *this);
 				logical_plan = decorrelator.Decorrelate(std::move(logical_plan));
 				logical_plan = SimplifyMarkerJoins(std::move(logical_plan));
-				// The cost model needs row counts, and the host computes them in
-				// StatisticsPropagator, which lives inside Optimizer::Optimize - the pass this
-				// mode bypasses. Without this the memo sees estimated_cardinality == 0 on every
-				// operator, every candidate costs the same, and the winner is whichever happened
-				// to be costed first. This is the pluggable-statistics half of the design: the
-				// host supplies the numbers, the cost model only weighs them.
-				{
-					Optimizer statistics(*logical_planner.binder, *this);
-					StatisticsPropagator propagator(statistics, *logical_plan);
-					propagator.PropagateStatistics(logical_plan);
-				}
+				// StatisticsPropagator was tried here and taken out again: it does compute
+				// estimates for some shapes, but it also *rewrites* the plan (it removes
+				// expressions whose statistics make them constant), and running it without the
+				// rest of the optimizer leaves a plan the passes after it never see. Two files
+				// with correlated sub-queries started failing. The memo's cost model therefore
+				// supplies its own row estimates - see CostModel::OutputRows.
 				CascadesOptimizer cascades(*this);
 				logical_plan = cascades.Optimize(std::move(logical_plan));
 			} else if (CascadeConfig::UseCascadeOptimizer()) {
