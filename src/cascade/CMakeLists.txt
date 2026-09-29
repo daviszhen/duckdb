@@ -1,5 +1,5 @@
 add_library_unity(duckdb_cascade OBJECT aggregate_pullup.cpp aggregate_pushdown.cpp apply_decorrelation.cpp
-                  cascade_bindings.cpp
+                  cascade_bindings.cpp cascade_correlation.cpp
                   apply_decorrelation_setop.cpp
                   cascade_config.cpp cascade_keys.cpp cascade_optimizer.cpp
                   groupby_reorder.cpp local_aggregate.cpp simplify_markers.cpp
