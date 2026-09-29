@@ -207,6 +207,10 @@ PhysicalOperator &PhysicalPlanGenerator::CreatePlanInternal(LogicalOperator &op)
 		return extension_op.CreatePlan(context, *this);
 	}
 	case LogicalOperatorType::LOGICAL_JOIN:
+	case LogicalOperatorType::LOGICAL_SEGMENT_APPLY:
+		return CreatePlan(op.Cast<LogicalSegmentApply>());
+	case LogicalOperatorType::LOGICAL_SEGMENT_PARAMETER_GET:
+		return CreatePlan(op.Cast<LogicalSegmentParameterGet>());
 	case LogicalOperatorType::LOGICAL_DEPENDENT_JOIN:
 	case LogicalOperatorType::LOGICAL_INVALID: {
 		throw NotImplementedException("Unimplemented logical operator type!");

@@ -3582,6 +3582,9 @@ const StringUtil::EnumStringLiteral *GetLogicalOperatorTypeValues() {
 		{ static_cast<uint32_t>(LogicalOperatorType::LOGICAL_POSITIONAL_JOIN), "LOGICAL_POSITIONAL_JOIN" },
 		{ static_cast<uint32_t>(LogicalOperatorType::LOGICAL_ASOF_JOIN), "LOGICAL_ASOF_JOIN" },
 		{ static_cast<uint32_t>(LogicalOperatorType::LOGICAL_DEPENDENT_JOIN), "LOGICAL_DEPENDENT_JOIN" },
+		{ static_cast<uint32_t>(LogicalOperatorType::LOGICAL_SEGMENT_APPLY), "LOGICAL_SEGMENT_APPLY" },
+		{ static_cast<uint32_t>(LogicalOperatorType::LOGICAL_SEGMENT_PARAMETER_GET),
+		  "LOGICAL_SEGMENT_PARAMETER_GET" },
 		{ static_cast<uint32_t>(LogicalOperatorType::LOGICAL_UNION), "LOGICAL_UNION" },
 		{ static_cast<uint32_t>(LogicalOperatorType::LOGICAL_EXCEPT), "LOGICAL_EXCEPT" },
 		{ static_cast<uint32_t>(LogicalOperatorType::LOGICAL_INTERSECT), "LOGICAL_INTERSECT" },
@@ -4618,7 +4621,10 @@ const StringUtil::EnumStringLiteral *GetPhysicalOperatorTypeValues() {
 		{ static_cast<uint32_t>(PhysicalOperatorType::CREATE_SECRET), "CREATE_SECRET" },
 		{ static_cast<uint32_t>(PhysicalOperatorType::RECURSIVE_KEY_JOIN), "RECURSIVE_KEY_JOIN" },
 		{ static_cast<uint32_t>(PhysicalOperatorType::SECURE_VIEW), "SECURE_VIEW" },
-		{ static_cast<uint32_t>(PhysicalOperatorType::MERGE_ACTION_SOURCE), "MERGE_ACTION_SOURCE" }
+		{ static_cast<uint32_t>(PhysicalOperatorType::MERGE_ACTION_SOURCE), "MERGE_ACTION_SOURCE" },
+		{ static_cast<uint32_t>(PhysicalOperatorType::SEGMENT_APPLY), "SEGMENT_APPLY" },
+		{ static_cast<uint32_t>(PhysicalOperatorType::SEGMENT_PARAMETER_SCAN), "SEGMENT_PARAMETER_SCAN" },
+		{ static_cast<uint32_t>(PhysicalOperatorType::SEGMENT_COLLECTOR), "SEGMENT_COLLECTOR" }
 	};
 	return values;
 }

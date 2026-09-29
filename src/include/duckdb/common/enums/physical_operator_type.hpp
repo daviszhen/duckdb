@@ -135,6 +135,14 @@ enum class PhysicalOperatorType : uint8_t {
 	SECURE_VIEW,
 	//! Source of a MERGE INTO action pipeline. Keep appended to preserve existing enum values.
 	MERGE_ACTION_SOURCE,
+
+	// Section 3.4 SegmentApply. Keep appended to preserve existing enum values.
+	//! The per-segment driver: partitions R, runs E once per segment, prefixes the key.
+	SEGMENT_APPLY,
+	//! Reads the segment the driver is currently on (the table-valued parameter).
+	SEGMENT_PARAMETER_SCAN,
+	//! Collects E's output for the segment that is being evaluated.
+	SEGMENT_COLLECTOR,
 };
 
 string PhysicalOperatorToString(PhysicalOperatorType type);

@@ -1464,5 +1464,47 @@
         "type": "string"
       }
     ]
+  },
+  {
+    "class": "LogicalSegmentApply",
+    "base": "LogicalOperator",
+    "enum": "LOGICAL_SEGMENT_APPLY",
+    "members": [
+      {
+        "id": 200,
+        "name": "segment_positions",
+        "type": "vector<idx_t>"
+      },
+      {
+        "id": 201,
+        "name": "segment_types",
+        "type": "vector<LogicalType>"
+      }
+    ],
+    "constructor": [
+      "segment_positions",
+      "segment_types"
+    ]
+  },
+  {
+    "class": "LogicalSegmentParameterGet",
+    "base": "LogicalOperator",
+    "enum": "LOGICAL_SEGMENT_PARAMETER_GET",
+    "members": [
+      {
+        "id": 200,
+        "name": "table_index",
+        "type": "TableIndex"
+      },
+      {
+        "id": 201,
+        "name": "chunk_types",
+        "type": "vector<LogicalType>"
+      }
+    ],
+    "constructor": [
+      "table_index",
+      "chunk_types"
+    ]
   }
 ]
