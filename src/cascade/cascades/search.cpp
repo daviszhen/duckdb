@@ -9,6 +9,7 @@
 #include "duckdb/common/types/value.hpp"
 #include "duckdb/planner/expression/bound_constant_expression.hpp"
 #include "duckdb/planner/operator/logical_dummy_scan.hpp"
+#include "duckdb/planner/expression/bound_comparison_expression.hpp"
 #include "duckdb/planner/operator/logical_dependent_join.hpp"
 #include "duckdb/planner/operator/logical_dependent_join.hpp"
 #include "duckdb/planner/operator/logical_filter.hpp"
@@ -113,12 +114,41 @@ unique_ptr<LogicalOperator> CascadesOptimizer::Optimize(unique_ptr<LogicalOperat
 						}
 					}
 				}
+				// What the correlated rule's promise would see: the left side's columns, and for each
+				// predicate of the filter under the projection, which sides it reads.
+				auto &left_probe = memo.GetGroup(expr->children[0]);
+				idx_t left_cols = left_probe.exprs.empty() ? 0 : left_probe.exprs[0]->bindings.size();
+				string predicate_probe;
+				for (auto child : expr->children) {
+					(void)child;
+				}
+				for (auto &right_expr : memo.GetGroup(expr->children[1]).exprs) {
+					if (right_expr->type != LogicalOperatorType::LOGICAL_PROJECTION || right_expr->children.empty()) {
+						continue;
+					}
+					for (auto &below : memo.GetGroup(right_expr->children[0]).exprs) {
+						if (below->type != LogicalOperatorType::LOGICAL_FILTER || below->children.empty()) {
+							continue;
+						}
+						auto &right_probe = memo.GetGroup(below->children[0]);
+						idx_t right_cols = right_probe.exprs.empty() ? 0 : right_probe.exprs[0]->bindings.size();
+						&left_probe;
+						for (auto &predicate : below->op->expressions) {
+							predicate_probe += StringUtil::Format(" [left=%llu right=%llu cmp=%s]",
+							                                      (unsigned long long)left_cols,
+							                                      (unsigned long long)right_cols,
+							                                      BoundComparisonExpression::IsComparison(*predicate) ? "y" : "n");
+						}
+					}
+				}
 				Printer::Print(StringUtil::Format(
-				    "--- cascade(cascades) apply in group %llu: children=%llu condition=%s correlated=%llu "
-				    "right=[%s] below=[%s]",
-				    (unsigned long long)group, (unsigned long long)expr->children.size(),
+				    "--- cascade(cascades) apply in group %llu: children=%llu join_type=%d condition=%s "
+				    "correlated=%llu right=[%s] below=[%s]",
+				    (unsigned long long)group, (unsigned long long)expr->children.size(), (int)apply.join_type,
 				    apply.condition ? "yes" : "no", (unsigned long long)apply.correlated_columns.size(),
 				    right_types.c_str(), right_below.c_str()));
+				Printer::Print(StringUtil::Format("--- cascade(cascades)   predicate probe:%s",
+				                                  predicate_probe.c_str()));
 			}
 		}
 	}
