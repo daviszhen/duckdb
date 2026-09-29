@@ -283,6 +283,21 @@ unique_ptr<LogicalOperator> AggregatePullup::PullNode(
 			continue;
 		}
 		PullupRewriteOperatorBindings(*op, child_exports);
+		// A join describes its output with *positions* into its children's bindings. One of
+		// those children just changed shape (the pull-up replaced a GroupBy with its input and
+		// put the new GroupBy above the join), so a map kept from before selects the wrong
+		// columns - which is how a column can go missing in the middle of a binding list
+		// (`Failed to bind "a" [15.1]`, bindings expose `[15.0]` and `[15.2]`). Dropping the
+		// maps only makes the join expose every column of both children, and every reference
+		// above it is by binding, so it stays valid.
+		if (op->type == LogicalOperatorType::LOGICAL_COMPARISON_JOIN ||
+		    op->type == LogicalOperatorType::LOGICAL_DELIM_JOIN ||
+		    op->type == LogicalOperatorType::LOGICAL_ASOF_JOIN ||
+		    op->type == LogicalOperatorType::LOGICAL_ANY_JOIN) {
+			auto &join = op->Cast<LogicalJoin>();
+			join.left_projection_map.clear();
+			join.right_projection_map.clear();
+		}
 		if (PullupPassesBindingsThrough(*op)) {
 			for (auto &entry : child_exports) {
 				exports.push_back(entry);
