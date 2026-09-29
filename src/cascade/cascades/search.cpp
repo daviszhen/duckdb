@@ -163,6 +163,15 @@ unique_ptr<LogicalOperator> CascadesOptimizer::Optimize(unique_ptr<LogicalOperat
 				// to match this exactly, and invariant 2 is what says so.
 				Printer::Print(StringUtil::Format("--- cascade(cascades)   apply bindings: %s",
 				                                  LogicalOperator::ColumnBindingsToString(expr->bindings).c_str()));
+				// Demonstrate (and check) the parent lookup the cross-level rewrite needs: the mark
+				// column this Apply exposes is read by the expression above it.
+				{
+					string used_by;
+					for (auto parent : memo.ParentsOf(group)) {
+						used_by += StringUtil::Format(" %llu", (unsigned long long)parent);
+					}
+					Printer::Print("--- cascade(cascades)   used by groups:" + used_by);
+				}
 				// The same thing derived the way MakeExpr would: left side plus the mark column.
 				{
 					vector<ColumnBinding> derived;
@@ -473,6 +482,19 @@ void CascadesOptimizer::ApplyRule(GroupId group, GroupExpr &expr, CascadesRule &
 		// Matched and applied, but produced nothing (the shape was not there after all).
 		rules_no_effect++;
 	}
+}
+
+void CascadesOptimizer::ReplaceExpression(GroupId group, const GroupExpr *old_expression,
+                                         unique_ptr<GroupExpr> replacement) {
+	if (!memo.ReplaceExpression(group, old_expression, std::move(replacement))) {
+		throw InternalException("cascade(cascades): rule asked to replace an expression that is not in group %llu",
+		                        (unsigned long long)group);
+	}
+	CascadesTask task;
+	task.kind = CascadesTaskKind::EXPLORE_GROUP;
+	task.group = group;
+	task.promise = CascadesRulePromise::MEDIUM;
+	tasks.Push(task);
 }
 
 void CascadesOptimizer::InjectSelfTestFault(idx_t which) {

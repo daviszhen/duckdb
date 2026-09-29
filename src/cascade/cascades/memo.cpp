@@ -128,6 +128,36 @@ unique_ptr<GroupExpr> Memo::MakeExpr(unique_ptr<LogicalOperator> op, vector<Grou
 	return expr;
 }
 
+vector<GroupId> Memo::ParentsOf(GroupId group) const {
+	vector<GroupId> parents;
+	for (idx_t candidate = 0; candidate < groups.size(); candidate++) {
+		for (auto &expr : groups[candidate]->exprs) {
+			for (auto child : expr->children) {
+				if (child == group) {
+					parents.push_back(candidate);
+					break;
+				}
+			}
+		}
+	}
+	return parents;
+}
+
+bool Memo::ReplaceExpression(GroupId group, const GroupExpr *old_expression, unique_ptr<GroupExpr> replacement) {
+	auto &data = *groups[group];
+	for (idx_t i = 0; i < data.exprs.size(); i++) {
+		if (data.exprs[i].get() != old_expression) {
+			continue;
+		}
+		data.exprs[i] = std::move(replacement);
+		// The replacement has to be explored and costed like any other expression, and it has to be
+		// costed *after* its children have winners.
+		data.explored = false;
+		return true;
+	}
+	return false;
+}
+
 bool Memo::Validate(string &error) const {
 	for (idx_t group = 0; group < groups.size(); group++) {
 		auto &data = *groups[group];

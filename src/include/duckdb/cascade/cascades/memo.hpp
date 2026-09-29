@@ -117,6 +117,17 @@ public:
 	//! from the operator and the children's groups, since they cannot be asked of the operator.
 	unique_ptr<GroupExpr> MakeExpr(unique_ptr<LogicalOperator> op, vector<GroupId> children);
 
+	//! The groups whose expressions use this group as a child. A rule that replaces a group's
+	//! expression - as the correlated apply rewrite has to, because the mark column it removes is
+	//! read by the expression *above* it - needs to know which parents to revisit. Derived by
+	//! scanning rather than stored, so there is no second copy of the graph to keep consistent.
+	vector<GroupId> ParentsOf(GroupId group) const;
+
+	//! Replace one expression of a group, keeping its position: the deterministic tie-break orders
+	//! candidates by that position, so a replacement that moved to the end would change which plan
+	//! wins. Returns false when the expression is not in that group.
+	bool ReplaceExpression(GroupId group, const GroupExpr *old_expression, unique_ptr<GroupExpr> replacement);
+
 	//! Check the invariants a memo has to satisfy, and say which one broke. They are the safety
 	//! net under every rule: a rule that produces a group expression with a missing child, or one
 	//! that exposes different columns than its group, is caught here rather than three passes
