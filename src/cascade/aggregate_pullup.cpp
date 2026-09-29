@@ -279,6 +279,8 @@ AggregatePullup::AggregatePullup(Binder &binder_p, ClientContext &context_p)
     : binder(binder_p), context(context_p) {
 }
 
+//! Section 3.1 pull-up:  S |>_p (G_{A,F} R) = G_{A + cols(S), F}(S |>_p R)   (S keyed).
+//! It is also the primitive section 3.4.2 executes; the file banner has the details.
 unique_ptr<LogicalOperator> AggregatePullup::PullNode(
     unique_ptr<LogicalOperator> op, vector<std::pair<ColumnBinding, ColumnBinding>> &exports) {
 	// A materialized CTE is DuckDB's common-subplan sharing: one definition, several

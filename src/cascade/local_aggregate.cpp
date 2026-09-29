@@ -230,6 +230,8 @@ LocalAggregatePusher::LocalAggregatePusher(Binder &binder_p, ClientContext &cont
     : binder(binder_p), context(context_p) {
 }
 
+//! Section 3.3:  G_{A,F} R = G_{A,F_g} LG_{A,F_l} R  - split the aggregate so the join
+//! reads its groups. The file banner lists the per-aggregate decompositions.
 unique_ptr<LogicalOperator> LocalAggregatePusher::PushNode(
     unique_ptr<LogicalOperator> op, vector<std::pair<ColumnBinding, ColumnBinding>> &exports) {
 	// A materialized CTE is DuckDB's common-subplan sharing: one definition, several

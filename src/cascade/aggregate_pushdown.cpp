@@ -233,6 +233,8 @@ AggregatePushdown::AggregatePushdown(Binder &binder_p, ClientContext &context_p)
     : binder(binder_p), context(context_p) {
 }
 
+//! Section 3.1 push-down:  G_{A,F}(S |>_p R) = S |>_p G_{A - cols(S), F}(R),  with the
+//! three conditions checked below. The file banner has the details.
 unique_ptr<LogicalOperator> AggregatePushdown::PushNode(
     unique_ptr<LogicalOperator> op, vector<std::pair<ColumnBinding, ColumnBinding>> &exports) {
 	// A materialized CTE is DuckDB's common-subplan sharing: one definition, several

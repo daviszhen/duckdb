@@ -265,6 +265,8 @@ static unique_ptr<LogicalOperator> PushSemiJoinBelow(unique_ptr<LogicalOperator>
 	return top;
 }
 
+//! Section 3.1: (A) s_p(G_{A,F} R) = G_{A,F}(s_p R), and (D) for the semijoin/antijoin
+//! form. The file banner has the conditions.
 unique_ptr<LogicalOperator> ReorderGroupBy(unique_ptr<LogicalOperator> plan, bool move_semijoins) {
 	for (auto &child : plan->children) {
 		child = ReorderGroupBy(std::move(child), move_semijoins);
