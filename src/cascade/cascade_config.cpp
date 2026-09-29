@@ -26,6 +26,11 @@ bool CascadeConfig::UseCascadeOptimizer() {
 	return enabled;
 }
 
+bool CascadeConfig::UseMemoOptimizer() {
+	static const bool enabled = EnvFlagSet("DUCKDB_CASCADE_MEMO");
+	return enabled;
+}
+
 bool CascadeConfig::KeepApply() {
 	static const bool enabled = EnvFlagSet("DUCKDB_CASCADE_KEEP_APPLY");
 	return enabled;

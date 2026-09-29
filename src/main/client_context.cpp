@@ -1,7 +1,9 @@
 #include "duckdb/main/client_context.hpp"
 
 #include "duckdb/cascade/cascade_config.hpp"
+#include "duckdb/cascade/apply_decorrelation.hpp"
 #include "duckdb/cascade/cascade_optimizer.hpp"
+#include "duckdb/cascade/cascades/search.hpp"
 #include "duckdb/catalog/catalog_entry/scalar_function_catalog_entry.hpp"
 #include "duckdb/catalog/catalog_entry/table_catalog_entry.hpp"
 #include "duckdb/catalog/catalog_search_path.hpp"
@@ -519,7 +521,23 @@ shared_ptr<PreparedStatementData> ClientContext::CreatePreparedStatementInternal
 	if (logical_plan->RequireOptimizer()) {
 		{
 			auto optimizer_timer = profiler.StartTimer<MetricOptimizerTotalTime>();
-			if (CascadeConfig::UseCascadeOptimizer()) {
+			if (CascadeConfig::UseMemoOptimizer()) {
+				// The cascade optimizer proper: memo + rules + cost, stage 1 (design A) - it
+				// decides the logical plan, the host still instantiates the physical ones.
+				// The mandatory rewrites come first for the same reason as in the cascade-only
+				// path below: without them the physical planner rejects some aggregates.
+				Optimizer mandatory(*logical_planner.binder, *this);
+				logical_plan = mandatory.LowerMandatoryAggregateRewrites(std::move(logical_plan));
+				// Apply elimination stays a pre-pass for now: it is verified, and turning it
+				// into memo rules is exactly what the next commits do (identity (3)/(4) first).
+				// A plan without Apply nodes - the usual case when DUCKDB_CASCADE_KEEP_APPLY is
+				// not set, because the host already flattened them - passes through unchanged.
+				ApplyDecorrelator decorrelator(*logical_planner.binder, *this);
+				logical_plan = decorrelator.Decorrelate(std::move(logical_plan));
+				logical_plan = SimplifyMarkerJoins(std::move(logical_plan));
+				CascadesOptimizer cascades(*this);
+				logical_plan = cascades.Optimize(std::move(logical_plan));
+			} else if (CascadeConfig::UseCascadeOptimizer()) {
 				CascadeOptimizer cascade(*logical_planner.binder, *this);
 				logical_plan = cascade.Optimize(std::move(logical_plan));
 			} else {

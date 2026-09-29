@@ -27,6 +27,13 @@ public:
 	//! of duckdb::Optimizer.
 	static bool UseCascadeOptimizer();
 
+	//! DUCKDB_CASCADE_MEMO=1: hand the bound logical plan to the cascade optimizer
+	//! proper (memo + rules + cost) instead of the rule pipeline below. It is the
+	//! stage-1 form described in CASCADE_OPTIMIZER_REFS.md section 8 (design A): the
+	//! memo covers the logical layer, and the host's physical planner still
+	//! instantiates the operators. Off by default, like every switch here.
+	static bool UseMemoOptimizer();
+
 	//! DUCKDB_CASCADE_KEEP_APPLY=1: skip FlattenDependentJoins, so that
 	//! LogicalDependentJoin (the Apply operator) survives into the optimizer.
 	static bool KeepApply();

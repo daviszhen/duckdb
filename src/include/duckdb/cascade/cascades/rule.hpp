@@ -1,0 +1,76 @@
+//===----------------------------------------------------------------------===//
+//                         DuckDB
+//
+// duckdb/cascade/cascades/rule.hpp
+//
+// One expression of the paper's rewrites, as a memo rule.
+//
+// ORCA's CXform is the model (see CXform.h), and it is *three* kinds, not two:
+//
+//   Substitution    replace an expression with a simpler equivalent
+//                   (ORCA: Project2ComputeScalar, Select2Filter)
+//   Exploration     produce a peer alternative for the same group
+//                   (ORCA: JoinCommutativity, PushGbBelowJoin, SplitGbAgg)
+//   Implementation  logical -> physical
+//                   (ORCA: GbAgg2HashAgg, LeftOuterJoin2HashJoin)
+//
+// Two mechanisms from ORCA come with it, because without them a rule set of any
+// size is unusable:
+//
+//   promise      how promising the rule is on a given expression. `None` means
+//                "the precondition does not hold - do not apply it", which is how
+//                ORCA avoids matching rules it would then throw away. The rest
+//                orders the task queue.
+//   apply once   some rules may only be applied once per expression: on a deep
+//                pattern tree the number of generated expressions explodes
+//                otherwise (ORCA's IsApplyOnce).
+//
+// The rules themselves live in cascades/rules/, one file each, named after the
+// paper rule they implement.
+//===----------------------------------------------------------------------===//
+
+#pragma once
+
+#include "duckdb/common/common.hpp"
+
+namespace duckdb {
+
+class GroupExpr;
+class Memo;
+class CascadesOptimizer;
+
+enum class CascadesRuleKind : uint8_t { SUBSTITUTION, EXPLORATION, IMPLEMENTATION };
+
+//! ORCA's CXform::EXformPromise.
+enum class CascadesRulePromise : uint8_t { NONE, LOW, MEDIUM, HIGH };
+
+class CascadesRule {
+public:
+	CascadesRule(CascadesRuleKind kind, const char *name) : kind(kind), name(name) {
+	}
+	virtual ~CascadesRule() = default;
+
+	//! Does this rule's pattern match the expression at all? Cheapest check first.
+	virtual bool Matches(GroupExpr &expr) = 0;
+	//! ORCA's Exfp(): NONE when the precondition does not hold on this expression.
+	virtual CascadesRulePromise Promise(GroupExpr &expr) = 0;
+	//! ORCA's IsApplyOnce().
+	virtual bool ApplyOnce() const {
+		return false;
+	}
+	//! Produce the replacements; each is added to the memo by the caller.
+	virtual void Apply(CascadesOptimizer &optimizer, GroupId group, GroupExpr &expr) = 0;
+
+	CascadesRuleKind Kind() const {
+		return kind;
+	}
+	const char *Name() const {
+		return name;
+	}
+
+private:
+	CascadesRuleKind kind;
+	const char *name;
+};
+
+} // namespace duckdb
