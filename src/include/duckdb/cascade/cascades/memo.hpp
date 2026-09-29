@@ -39,14 +39,19 @@ static constexpr GroupId INVALID_GROUP_ID = DConstants::INVALID_INDEX;
 //! skeleton has no physical rules, so nothing can be required beyond "a plan for this group".
 //! Physical properties (order, and the build/probe choice) land here in the next stage.
 struct RequiredProperties {
+	//! The plan must be executable by the host's physical planner, which has no physical
+	//! operator for the Apply (LogicalDependentJoin) the binder produces: the decorrelation has to
+	//! happen somewhere. This is what the memo is asked for, and it is the first property the
+	//! optimizer has that a rule can *fail* to provide - which is what an enforcer is for.
+	bool decorrelated = false;
 	bool operator==(const RequiredProperties &other) const {
-		return true;
+		return decorrelated == other.decorrelated;
 	}
 	bool operator!=(const RequiredProperties &other) const {
 		return !(*this == other);
 	}
 	string ToString() const {
-		return "<any>";
+		return decorrelated ? "decorrelated" : "<any>";
 	}
 };
 
@@ -75,6 +80,10 @@ struct GroupExpr {
 	//! Estimated output rows, also filled when the expression is optimised: a parent's cost is
 	//! charged on the rows that reach it, so every expression has to report what it emits.
 	double rows = 0;
+	//! Whether this expression's subtree can be executed without an Apply. Derived bottom-up,
+	//! like every Cascades property: an expression is decorrelated when it is not itself an Apply
+	//! and all of its children are.
+	bool decorrelated = false;
 	//! Which rule produced it (0 = came from the input plan). For the stats printout.
 	idx_t rule_id = 0;
 };

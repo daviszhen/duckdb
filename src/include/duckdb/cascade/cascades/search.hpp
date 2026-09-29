@@ -15,6 +15,7 @@
 
 #pragma once
 
+#include "duckdb/cascade/apply_decorrelation.hpp"
 #include "duckdb/cascade/cascades/cost.hpp"
 #include "duckdb/cascade/cascades/memo.hpp"
 #include "duckdb/cascade/cascades/rule.hpp"
@@ -23,10 +24,13 @@
 namespace duckdb {
 
 class ClientContext;
+class Binder;
 
 class CascadesOptimizer {
 public:
-	explicit CascadesOptimizer(ClientContext &context) : context(context), memo(context) {
+	//! The binder is needed by the enforcer, which reuses the decorrelator.
+	explicit CascadesOptimizer(Binder &binder, ClientContext &context)
+	    : optimizer_binder(binder), context(context), memo(context) {
 	}
 
 	//! Optimize `plan` and return the chosen plan.
@@ -63,6 +67,9 @@ public:
 	idx_t RulesSkipped() const {
 		return rules_skipped;
 	}
+	idx_t Enforced() const {
+		return enforced;
+	}
 
 private:
 	void RegisterRules();
@@ -79,6 +86,7 @@ private:
 	//! Cost an expression from its children's winners (they are already chosen).
 	double CostOf(GroupExpr &expr);
 
+	Binder &optimizer_binder;
 	ClientContext &context;
 	Memo memo;
 	vector<unique_ptr<CascadesRule>> rules;
@@ -94,6 +102,9 @@ private:
 	idx_t rules_no_effect = 0;
 	//! Rules whose ApplyOnce() refused a second application on the same expression.
 	idx_t rules_skipped = 0;
+	//! How often the required property had to be enforced after the search instead of being
+	//! provided by a rule. The smaller this gets, the more of the decorrelation lives in rules.
+	idx_t enforced = 0;
 	idx_t rules_rejected = 0;
 };
 

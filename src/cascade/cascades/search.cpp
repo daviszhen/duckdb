@@ -47,6 +47,20 @@ void CascadesOptimizer::RegisterRules() {
 	AddRule(make_uniq<PushFilterBelowGroupBy>());
 }
 
+//! Does this plan still contain an Apply? The host has no physical operator for one, so this is
+//! what the required property amounts to in practice.
+static bool PlanHasApply(LogicalOperator &op) {
+	if (op.type == LogicalOperatorType::LOGICAL_DEPENDENT_JOIN) {
+		return true;
+	}
+	for (auto &child : op.children) {
+		if (PlanHasApply(*child)) {
+			return true;
+		}
+	}
+	return false;
+}
+
 unique_ptr<LogicalOperator> CascadesOptimizer::Optimize(unique_ptr<LogicalOperator> plan) {
 	if (!plan) {
 		return plan;
@@ -70,6 +84,17 @@ unique_ptr<LogicalOperator> CascadesOptimizer::Optimize(unique_ptr<LogicalOperat
 		throw InternalException("cascade(cascades): memo invariant broken: " + violation);
 	}
 	auto result = memo.ExtractPlan(root);
+	// The enforcer: the memo was asked for a decorrelated plan, and if the rules could not provide
+	// one, the decorrelation that used to be a pre-pass is applied here instead. This is ORCA's
+	// enforcer pattern - a required property no rule satisfies is enforced physically rather than
+	// declared impossible - and the counter is the scoreboard for moving the job into rules: every
+	// Apply the rules remove makes this number smaller.
+	if (PlanHasApply(*result)) {
+		enforced++;
+		ApplyDecorrelator decorrelator(optimizer_binder, context);
+		result = decorrelator.Decorrelate(std::move(result));
+		result = SimplifyMarkerJoins(std::move(result));
+	}
 	result->ResolveOperatorTypes();
 	if (auto self_test = CascadeConfig::MemoSelfTest()) {
 		// The plan is reconstructed first, so the injected corruption cannot affect the answer -
@@ -101,13 +126,14 @@ unique_ptr<LogicalOperator> CascadesOptimizer::Optimize(unique_ptr<LogicalOperat
 			                                  winner ? winner->cost : 0.0));
 		}
 		Printer::Print(StringUtil::Format("--- cascade(cascades): groups=%llu exprs=%llu physical=%llu | "
-		                                  "explored=%llu rules applied=%llu no-effect=%llu rejected=%llu alternatives=%llu",
+		                                  "explored=%llu rules applied=%llu no-effect=%llu rejected=%llu alternatives=%llu enforced=%llu",
 		                                  (unsigned long long)memo.GroupCount(), (unsigned long long)memo.ExprCount(),
 		                                  (unsigned long long)memo.PhysicalCount(),
 		                                  (unsigned long long)groups_explored, (unsigned long long)rules_applied,
 		                                  (unsigned long long)rules_no_effect,
 		                                  (unsigned long long)rules_rejected,
-		                                  (unsigned long long)expressions_added));
+		                                  (unsigned long long)expressions_added,
+		                                  (unsigned long long)enforced));
 	}
 	return result;
 }
@@ -251,6 +277,17 @@ double CascadesOptimizer::CostOf(GroupExpr &expr) {
 	}
 	// Every expression has to report its own output rows too, or its parent cannot be costed.
 	expr.rows = CostModel::OutputRows(expr, child_rows);
+	// The property is derived the same way, bottom-up: no Apply here, and none below.
+	expr.decorrelated = expr.type != LogicalOperatorType::LOGICAL_DEPENDENT_JOIN;
+	for (auto child : expr.children) {
+		OptimizationContext context;
+		context.group = child;
+		auto winner = memo.WinnerOf(context);
+		if (!winner || !winner->decorrelated) {
+			expr.decorrelated = false;
+			break;
+		}
+	}
 	return CostModel::Cost(expr, child_costs, child_rows);
 }
 

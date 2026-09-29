@@ -528,20 +528,18 @@ shared_ptr<PreparedStatementData> ClientContext::CreatePreparedStatementInternal
 				// path below: without them the physical planner rejects some aggregates.
 				Optimizer mandatory(*logical_planner.binder, *this);
 				logical_plan = mandatory.LowerMandatoryAggregateRewrites(std::move(logical_plan));
-				// Apply elimination stays a pre-pass for now: it is verified, and turning it
-				// into memo rules is exactly what the next commits do (identity (3)/(4) first).
-				// A plan without Apply nodes - the usual case when DUCKDB_CASCADE_KEEP_APPLY is
-				// not set, because the host already flattened them - passes through unchanged.
-				ApplyDecorrelator decorrelator(*logical_planner.binder, *this);
-				logical_plan = decorrelator.Decorrelate(std::move(logical_plan));
-				logical_plan = SimplifyMarkerJoins(std::move(logical_plan));
+				// Apply elimination is no longer a pre-pass: the memo is asked for a decorrelated
+				// plan, and the decorrelator runs as the *enforcer* when the rules could not
+				// provide one (see CascadesOptimizer::Optimize). That is what makes it possible
+				// to move the decorrelation into rules one identity at a time and watch the
+				// enforced counter fall.
 				// StatisticsPropagator was tried here and taken out again: it does compute
 				// estimates for some shapes, but it also *rewrites* the plan (it removes
 				// expressions whose statistics make them constant), and running it without the
 				// rest of the optimizer leaves a plan the passes after it never see. Two files
 				// with correlated sub-queries started failing. The memo's cost model therefore
 				// supplies its own row estimates - see CostModel::OutputRows.
-				CascadesOptimizer cascades(*this);
+				CascadesOptimizer cascades(*logical_planner.binder, *this);
 				logical_plan = cascades.Optimize(std::move(logical_plan));
 			} else if (CascadeConfig::UseCascadeOptimizer()) {
 				CascadeOptimizer cascade(*logical_planner.binder, *this);
