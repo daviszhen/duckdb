@@ -41,6 +41,11 @@ public:
 	//! verified state; the rules are development work behind this flag.
 	static bool MemoRules();
 
+	//! DUCKDB_CASCADE_MEMO_SELFTEST=<n> corrupts the memo in the way invariant n is meant to
+	//! catch, and expects Memo::Validate to reject it. A check that has never rejected anything
+	//! is not yet a safety net, and the only way to know is to make it fail on purpose.
+	static idx_t MemoSelfTest();
+
 	//! DUCKDB_CASCADE_KEEP_APPLY=1: skip FlattenDependentJoins, so that
 	//! LogicalDependentJoin (the Apply operator) survives into the optimizer.
 	static bool KeepApply();

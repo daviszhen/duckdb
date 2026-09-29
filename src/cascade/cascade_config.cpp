@@ -36,6 +36,15 @@ bool CascadeConfig::MemoRules() {
 	return enabled;
 }
 
+idx_t CascadeConfig::MemoSelfTest() {
+	auto value = std::getenv("DUCKDB_CASCADE_MEMO_SELFTEST");
+	if (!value || value[0] == '\0') {
+		return 0;
+	}
+	auto parsed = std::strtoull(value, nullptr, 10);
+	return static_cast<idx_t>(parsed);
+}
+
 bool CascadeConfig::KeepApply() {
 	static const bool enabled = EnvFlagSet("DUCKDB_CASCADE_KEEP_APPLY");
 	return enabled;

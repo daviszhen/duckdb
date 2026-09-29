@@ -52,10 +52,14 @@ unique_ptr<GroupExpr> Memo::MakeExpr(unique_ptr<LogicalOperator> op, vector<Grou
 	case LogicalOperatorType::LOGICAL_LIMIT:
 	case LogicalOperatorType::LOGICAL_TOP_N:
 	case LogicalOperatorType::LOGICAL_DISTINCT:
-		if (expr->children.size() == 1) {
-			expr->bindings = groups[expr->children[0]]->exprs.empty()
-			                     ? vector<ColumnBinding>()
-			                     : groups[expr->children[0]]->exprs[0]->bindings;
+		// A child id that is not a group is left alone here on purpose: deriving bindings must not
+		// be the thing that fails first, or the invariant check never gets to report it - it would
+		// be an out-of-range read instead. Validate is what rejects it.
+		if (expr->children.size() == 1 && expr->children[0] < groups.size()) {
+			auto &child_group = *groups[expr->children[0]];
+			if (!child_group.exprs.empty()) {
+				expr->bindings = child_group.exprs[0]->bindings;
+			}
 		}
 		break;
 	case LogicalOperatorType::LOGICAL_PROJECTION: {

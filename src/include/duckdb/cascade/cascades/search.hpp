@@ -63,6 +63,9 @@ public:
 
 private:
 	void RegisterRules();
+	//! Test hook behind DUCKDB_CASCADE_MEMO_SELFTEST: break the memo the way invariant `which`
+	//! is supposed to catch, so that Validate has something to reject.
+	void InjectSelfTestFault(idx_t which);
 	void RunTasks();
 	void ExploreGroup(GroupId group);
 	void OptimizeExpr(GroupId group, GroupExpr &expr);

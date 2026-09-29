@@ -4,6 +4,11 @@
 #include "duckdb/cascade/cascades/rules/push_filter_below_groupby.hpp"
 #include "duckdb/common/exception.hpp"
 #include "duckdb/common/enums/logical_operator_type.hpp"
+#include "duckdb/common/types/value.hpp"
+#include "duckdb/planner/expression/bound_constant_expression.hpp"
+#include "duckdb/planner/operator/logical_dummy_scan.hpp"
+#include "duckdb/planner/operator/logical_filter.hpp"
+#include "duckdb/planner/operator/logical_projection.hpp"
 #include "duckdb/common/printer.hpp"
 #include "duckdb/common/string_util.hpp"
 #include "duckdb/main/client_context.hpp"
@@ -66,6 +71,18 @@ unique_ptr<LogicalOperator> CascadesOptimizer::Optimize(unique_ptr<LogicalOperat
 	}
 	auto result = memo.ExtractPlan(root);
 	result->ResolveOperatorTypes();
+	if (auto self_test = CascadeConfig::MemoSelfTest()) {
+		// The plan is reconstructed first, so the injected corruption cannot affect the answer -
+		// what is being tested is the validator, not the query.
+		InjectSelfTestFault(self_test);
+		string selftest_violation;
+		if (memo.Validate(selftest_violation)) {
+			throw InternalException("cascade(cascades): selftest injected violation %llu and the memo still validated",
+			                        (unsigned long long)self_test);
+		}
+		Printer::Print(StringUtil::Format("--- cascade(cascades) selftest: invariant %llu rejected as expected: %s",
+		                                  (unsigned long long)self_test, selftest_violation));
+	}
 	if (CascadeConfig::PrintPlans()) {
 		Printer::Print("--- cascade(cascades) chosen plan:\n" + result->ToString(&context));
 	}
@@ -245,6 +262,48 @@ void CascadesOptimizer::ApplyRule(GroupId group, GroupExpr &expr, CascadesRule &
 	} else {
 		// Matched and applied, but produced nothing (the shape was not there after all).
 		rules_no_effect++;
+	}
+}
+
+void CascadesOptimizer::InjectSelfTestFault(idx_t which) {
+	if (memo.GroupCount() == 0) {
+		return;
+	}
+	auto root = memo.GroupCount() - 1;
+	switch (which) {
+	case 1: {
+		// 1. a child that is not a group: an id past the end of the memo.
+		auto op = make_uniq<LogicalFilter>();
+		op->estimated_cardinality = 1;
+		AddExpression(root, memo.MakeExpr(std::move(op), {memo.GroupCount() + 10}));
+		break;
+	}
+	case 2: {
+		// 2. an expression that exposes different columns than the rest of its group.
+		vector<unique_ptr<Expression>> select_list;
+		select_list.push_back(make_uniq<BoundConstantExpression>(Value::INTEGER(1)));
+		auto op = make_uniq<LogicalProjection>(TableIndex(999), std::move(select_list));
+		op->estimated_cardinality = 1;
+		AddExpression(root, memo.MakeExpr(std::move(op), {root}));
+		break;
+	}
+	case 3: {
+		// 3. a physical expression whose children do not match the operator's.
+		auto op = make_uniq<LogicalFilter>();
+		op->estimated_cardinality = 1;
+		auto expr = memo.MakeExpr(std::move(op), {root});
+		expr->physical = true;
+		AddExpression(root, std::move(expr));
+		break;
+	}
+	default: {
+		// 4. a costed expression cheaper than the winner, in the winner's own group.
+		auto cheaper = memo.MakeExpr(make_uniq<LogicalDummyScan>(TableIndex(0)), {});
+		cheaper->rows = 1;
+		cheaper->cost = -1;
+		AddExpression(root, std::move(cheaper));
+		break;
+	}
 	}
 }
 
