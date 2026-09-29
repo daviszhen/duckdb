@@ -66,8 +66,21 @@ unique_ptr<GroupExpr> Memo::MakeExpr(unique_ptr<LogicalOperator> op, vector<Grou
 	case LogicalOperatorType::LOGICAL_COMPARISON_JOIN:
 		// Only an inner join exposes both sides; a semi or anti join exposes the left one, and
 		// deriving the wrong columns there would be worse than not deriving any.
-		if (expr->op->Cast<LogicalComparisonJoin>().join_type != JoinType::INNER) {
-			break;
+	{
+			auto join_type = expr->op->Cast<LogicalComparisonJoin>().join_type;
+			if (join_type == JoinType::SEMI || join_type == JoinType::ANTI) {
+				// A semi or anti join keeps the left side's columns and nothing else; deriving that
+				// is worth it, because the second invariant then has something to check instead of
+				// treating these expressions as unknown.
+				if (!expr->children.empty() && expr->children[0] < groups.size() &&
+				    !groups[expr->children[0]]->exprs.empty()) {
+					expr->bindings = groups[expr->children[0]]->exprs[0]->bindings;
+				}
+				break;
+			}
+			if (join_type != JoinType::INNER) {
+				break;
+			}
 		}
 		[[fallthrough]];
 	case LogicalOperatorType::LOGICAL_CROSS_PRODUCT:
