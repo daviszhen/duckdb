@@ -153,6 +153,24 @@ unique_ptr<LogicalOperator> CascadesOptimizer::Optimize(unique_ptr<LogicalOperat
 				    right_types.c_str(), right_below.c_str()));
 				Printer::Print(StringUtil::Format("--- cascade(cascades)   predicate probe:%s",
 				                                  predicate_probe.c_str()));
+				// What the Apply itself exposes, captured when the memo was built: the replacement has
+				// to match this exactly, and invariant 2 is what says so.
+				Printer::Print(StringUtil::Format("--- cascade(cascades)   apply bindings: %s",
+				                                  LogicalOperator::ColumnBindingsToString(expr->bindings).c_str()));
+				// The same thing derived the way MakeExpr would: left side plus the mark column.
+				{
+					vector<ColumnBinding> derived;
+					auto &left_probe_group = memo.GetGroup(expr->children[0]);
+					if (!left_probe_group.exprs.empty()) {
+						derived = left_probe_group.exprs[0]->bindings;
+					}
+					derived.emplace_back(apply.mark_index, ProjectionIndex(0));
+					Printer::Print(StringUtil::Format(
+					    "--- cascade(cascades)   derived bindings: %s | mark_index=%llu | match=%s",
+					    LogicalOperator::ColumnBindingsToString(derived).c_str(),
+					    (unsigned long long)apply.mark_index.index,
+					    derived == expr->bindings ? "yes" : "NO"));
+				}
 			}
 		}
 	}
