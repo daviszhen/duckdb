@@ -358,13 +358,12 @@ CascadesRulePromise CorrelatedApplyToJoin::Promise(CascadesOptimizer &optimizer,
 						    negated = true;
 					    }
 				    });
-				if (negated) {
-					if (CascadeConfig::PrintPlans()) {
-						Printer::Print("--- cascade(cascades) rule " + string(Name()) +
-						               " refused: the plan negates the mark consumer");
-					}
-					return CascadesRulePromise::NONE;
-				}
+				// A negated consumer is no longer a refusal: Memo::FindMarkConsumer reports the
+				// negation and the replacement becomes an anti join, which is what NOT EXISTS means -
+				// a row with no matching row, NULL comparisons included. The refusal that used to
+				// stand here belonged to the MARK-join version, which kept the consumer in place and
+				// therefore got the NULL case wrong.
+				(void)negated;
 			}
 		}
 	}
