@@ -458,7 +458,7 @@ void CascadesOptimizer::OptimizeExpr(GroupId group, GroupExpr &expr) {
 
 void CascadesOptimizer::FinishExpr(GroupId group, GroupExpr &expr, const RequiredProperties &required) {
 	// Not consulted yet: the properties arrive here, the lookup and the winner filing use them next.
-	(void)required;
+	
 	auto cost = CostOf(expr);
 	// The required side is derived per expression and filed with the winner (see CostOf and the
 	// SetWinner below), but it does not yet *travel*: this entry point takes only a group id, so the
@@ -469,6 +469,10 @@ void CascadesOptimizer::FinishExpr(GroupId group, GroupExpr &expr, const Require
 	// unnesting family, ExfInnerApply2InnerJoin first) are what move the sub-query tests.
 	OptimizationContext context;
 	context.group = group;
+	// The properties now come from the task that reached this group (ORCA's optimization context), and
+	// the same value is filed with the winner below, so the key a lookup uses and the key a winner was
+	// stored under are the same one.
+	context.props = required;
 	auto current = memo.WinnerOf(context);
 	// Deterministic tie-break. "The first one costed wins a tie" makes the winner depend on the
 	// order the task queue happened to reach the expressions in, and the same binary then picks
