@@ -539,6 +539,14 @@ shared_ptr<PreparedStatementData> ClientContext::CreatePreparedStatementInternal
 				// rest of the optimizer leaves a plan the passes after it never see. Two files
 				// with correlated sub-queries started failing. The memo's cost model therefore
 				// supplies its own row estimates - see CostModel::OutputRows.
+				// A fallback to the host pipeline for the shapes the rules cannot express yet was tried here and
+				// measured: keeping a copy of the plan (Optimize takes ownership, so a throw would lose it) and
+				// catching NotImplementedException to re-optimise with the host. It is the right idea - about 35 of
+				// the 55 failing files only read the correlated column and need the delim/CTE machinery the host
+				// builds while planning - but the catch is far too wide: it also swallows the refusals that the
+				// cascade path is supposed to make, and the matrix went unstable while the sweep dropped to 25/88.
+				// Narrowing it is the next step: either throw a dedicated type from the Apply-with-read-only-
+				// correlation guards and catch only that, or decide from the plan before calling in.
 				CascadesOptimizer cascades(*logical_planner.binder, *this);
 				logical_plan = cascades.Optimize(std::move(logical_plan));
 			} else if (CascadeConfig::UseCascadeOptimizer()) {
