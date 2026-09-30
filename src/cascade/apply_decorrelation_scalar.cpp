@@ -295,6 +295,17 @@ unique_ptr<LogicalOperator> ApplyDecorrelator::DecorrelateScalar(unique_ptr<Logi
 		projections.push_back(node);
 		node = node->children[0].get();
 	}
+		// This is the largest single bucket of the remaining failures (19 of 55 files, measured): a
+		// scalar sub-query whose root is not an aggregate. ORCA has a separate transformation for it
+		// (ExfScalarSubquery), and it is the easier of the two: there is no grouping to add, only a left
+		// outer join - the correlated predicate becomes the join condition, so an outer row with no
+		// match gets NULL, which is exactly what a scalar sub-query returns. The pieces are all here:
+		// the projections above were collected already, ExtractCorrelatedPredicates fills `extracted`
+		// (as the aggregate branch below does), and the orientation helpers are the ones the rule uses.
+		// What must not be done is deleting this guard: the code after it assumes the node is an
+		// aggregate and casts it. The new path has to build the join, hang it under `projections`,
+		// return that as the new right side, and check that what it exposes is what the apply exposed
+		// before returning - otherwise keep refusing.
 	if (node->type != LogicalOperatorType::LOGICAL_AGGREGATE_AND_GROUP_BY || node->children.size() != 1) {
 		throw NotImplementedException(
 		    "cascade: a correlated scalar subquery is only decorrelated when it aggregates");
