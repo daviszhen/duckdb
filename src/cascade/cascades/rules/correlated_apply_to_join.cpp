@@ -48,6 +48,16 @@
 //     carrying duplicate_eliminated_columns was also tried and is not enough on its own: the
 //     columns have to be exposed by the right side's projection, which is the part that needs the
 //     types.
+//   * The furthest attempt so far, and where it stops: building the right side as a projection that
+//     passes the inner columns through and appends the correlated ones, with a DELIM join carrying
+//     duplicate_eliminated_columns, brought the enforcer down to *zero* on decorrelation.test
+//     (`enforced=0`, where the pre-pass used to be needed for 30 statements). It then failed to
+//     bind: `Failed to bind column reference "a" [0.0] (bindings: {#[7.0]})` - the appended
+//     correlated references were written with the *outer* binding, while the projection's child
+//     exposes only its own columns. So the appended references need a table index of their own,
+//     assigned by the delim machinery (`LogicalDelimJoin`'s delim_types in DuckDB's own flattening),
+//     rather than the outer binding. That is the one thing left: how the right side names the
+//     columns the join carries to it.
 //   * The same rule body spliced twice in one build and not at all in another (applied=4 but
 //     ParentsOf(consumer_group) empty) is *not* nondeterminism: the splice rewrites the parents'
 //     child ids, so after the first one the consumer group has no parents left and later
