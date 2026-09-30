@@ -331,6 +331,13 @@ unique_ptr<LogicalOperator> ApplyDecorrelator::DecorrelateScalar(unique_ptr<Logi
 		// plus its input) into the join at all. Join `left` with the node below the projections, then hang
 		// the collected `projections` back on top - that is exactly the tree the apply had, with the join in
 		// place of the apply, so the columns above bind for the same reason they did before.
+		// Three repairs have been ruled out by measurement, so the next attempt should start by locating the
+		// operator that still fails to bind rather than by guessing again: (1) moving the whole right side
+		// into the join, (2) rebuilding the output columns on top of it, (3) joining with the node below
+		// the projections, hanging them back and rewriting their references. All three compile and keep the
+		// sweep at 34/88, and the probe confirms this branch is the one taken, yet the statement still
+		// fails with "Failed to bind column reference i [7.0] (bindings: {#[8.0]})". So the reference
+		// belongs to an operator outside what this branch rewrites - print the plan and find it first.
 		auto non_agg_join = make_uniq<LogicalComparisonJoin>(JoinType::LEFT);
 		non_agg_join->children.push_back(std::move(left));
 		non_agg_join->children.push_back(std::move(right));
