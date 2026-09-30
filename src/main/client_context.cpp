@@ -1,3 +1,4 @@
+#include "duckdb/optimizer/join_order/join_order_optimizer.hpp"
 #include "duckdb/optimizer/cte_inlining.hpp"
 #include "duckdb/optimizer/empty_result_pullup.hpp"
 #include "duckdb/optimizer/constant_or_null_simplification.hpp"
@@ -557,6 +558,15 @@ shared_ptr<PreparedStatementData> ClientContext::CreatePreparedStatementInternal
 				// correlation guards and catch only that, or decide from the plan before calling in.
 				CascadesOptimizer cascades(*logical_planner.binder, *this);
 				logical_plan = cascades.Optimize(std::move(logical_plan));
+		// The join ordering phase is not just ordering: as its own comment in the host says, it rewrites
+		// cross products plus filters into joins and pushes filters down. Without it the plan keeps the
+		// binder's cross products - measured on the join-heavy TPC-H queries, where the host produced two
+		// hash joins and this path two cross products, with wrong results. The acceptance criteria forbid
+		// cross products outright.
+		{
+			JoinOrderOptimizer join_order_optimizer(*this);
+			logical_plan = join_order_optimizer.Optimize(std::move(logical_plan));
+		}
 		// A materialised CTE cannot be stopped by the limit above it: the recursion runs to completion before
 		// the limit sees a row, which is why a recursive CTE with a selective filter never finished here
 		// while the host answers immediately. Inlining it removes the materialisation.
