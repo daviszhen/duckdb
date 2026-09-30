@@ -39,13 +39,18 @@ static constexpr GroupId INVALID_GROUP_ID = DConstants::INVALID_INDEX;
 //! skeleton has no physical rules, so nothing can be required beyond "a plan for this group".
 //! Physical properties (order, and the build/probe choice) land here in the next stage.
 struct RequiredProperties {
+	//! The outer references this group's plan has to consume. ORCA carries these in the required
+	//! properties; without them a rule can only guess from the shape whether a correlated column is
+	//! in play, which is what made every local change to the unnesting rules either do nothing or
+	//! cost matrix files (measured, repeatedly).
+	vector<ColumnBinding> outer_refs;
 	//! The plan must be executable by the host's physical planner, which has no physical
 	//! operator for the Apply (LogicalDependentJoin) the binder produces: the decorrelation has to
 	//! happen somewhere. This is what the memo is asked for, and it is the first property the
 	//! optimizer has that a rule can *fail* to provide - which is what an enforcer is for.
 	bool decorrelated = false;
 	bool operator==(const RequiredProperties &other) const {
-		return decorrelated == other.decorrelated;
+		return decorrelated == other.decorrelated && outer_refs == other.outer_refs;
 	}
 	bool operator!=(const RequiredProperties &other) const {
 		return !(*this == other);
@@ -63,6 +68,8 @@ struct OptimizationContext {
 
 //! One expression of a group: the operator with its children detached, recorded as group ids.
 struct GroupExpr {
+	//! The outer references this expression resolves inside itself (ORCA's derived property).
+	vector<ColumnBinding> provides;
 	LogicalOperatorType type = LogicalOperatorType::LOGICAL_INVALID;
 	//! The operator itself, with `children` empty - they live in `children` below.
 	unique_ptr<LogicalOperator> op;
