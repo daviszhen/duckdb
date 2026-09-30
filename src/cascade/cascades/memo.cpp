@@ -149,6 +149,8 @@ unique_ptr<GroupExpr> Memo::MakeExpr(unique_ptr<LogicalOperator> op, vector<Grou
 	if (!expr->children.empty() && expr->children[0] < groups.size() &&
 	    !groups[expr->children[0]]->exprs.empty()) {
 		expr->provides = groups[expr->children[0]]->exprs[0]->provides;
+		// Same on the required side: what the input still has to have brought in is still needed.
+		expr->outer_refs = groups[expr->children[0]]->exprs[0]->outer_refs;
 	}
 		auto &projection = expr->op->Cast<LogicalProjection>();
 		for (idx_t i = 0; i < projection.expressions.size(); i++) {
@@ -164,6 +166,8 @@ unique_ptr<GroupExpr> Memo::MakeExpr(unique_ptr<LogicalOperator> op, vector<Grou
 	if (!expr->children.empty() && expr->children[0] < groups.size() &&
 	    !groups[expr->children[0]]->exprs.empty()) {
 		expr->provides = groups[expr->children[0]]->exprs[0]->provides;
+		// Same on the required side: what the input still has to have brought in is still needed.
+		expr->outer_refs = groups[expr->children[0]]->exprs[0]->outer_refs;
 	}
 		auto &aggregate = expr->op->Cast<LogicalAggregate>();
 		for (idx_t i = 0; i < aggregate.groups.size(); i++) {
