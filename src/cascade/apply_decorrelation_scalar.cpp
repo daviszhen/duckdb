@@ -338,6 +338,12 @@ unique_ptr<LogicalOperator> ApplyDecorrelator::DecorrelateScalar(unique_ptr<Logi
 		// sweep at 34/88, and the probe confirms this branch is the one taken, yet the statement still
 		// fails with "Failed to bind column reference i [7.0] (bindings: {#[8.0]})". So the reference
 		// belongs to an operator outside what this branch rewrites - print the plan and find it first.
+		// Disabled by measurement: with the branch below enabled the sweep reads 34/88, one file better,
+		// but sixteen of the eighty-eight files report INTERNAL Error where one did before. Fifteen clean
+		// failures turned into internal errors is the wrong direction, so the original refusal stands until
+		// the binding failure recorded below is understood.
+		throw NotImplementedException(
+		    "cascade: a correlated scalar subquery is only decorrelated when it aggregates");
 		auto non_agg_join = make_uniq<LogicalComparisonJoin>(JoinType::LEFT);
 		non_agg_join->children.push_back(std::move(left));
 		non_agg_join->children.push_back(std::move(right));
