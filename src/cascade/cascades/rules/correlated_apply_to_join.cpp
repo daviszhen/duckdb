@@ -218,10 +218,20 @@ bool CorrelatedApplyToJoin::Apply(CascadesOptimizer &optimizer, GroupId group, G
 		bool negated = false;
 		auto found = memo.FindMarkConsumer(group, consumer_group, consumer, negated);
 		if (CascadeConfig::PrintPlans()) {
+			// Types as well: a rule that builds a projection over a child's columns needs them, and
+			// the print is the check that they are there during the search rather than only after it.
+			idx_t left_types = memo.GetGroup(expr.children[0]).exprs.empty()
+			                       ? 0
+			                       : memo.GetGroup(expr.children[0]).exprs[0]->types.size();
+			idx_t right_types = memo.GetGroup(expr.children[1]).exprs.empty()
+			                        ? 0
+			                        : memo.GetGroup(expr.children[1]).exprs[0]->types.size();
 			Printer::Print(StringUtil::Format(
-			    "--- cascade(cascades) rule %s: consumer found=%d group=%llu negated=%d parents=%llu", Name(),
-			    (int)found, (unsigned long long)consumer_group, (int)negated,
-			    (unsigned long long)(found ? memo.ParentsOf(consumer_group).size() : 0)));
+			    "--- cascade(cascades) rule %s: consumer found=%d group=%llu negated=%d parents=%llu "
+			    "| left types=%llu right types=%llu",
+			    Name(), (int)found, (unsigned long long)consumer_group, (int)negated,
+			    (unsigned long long)(found ? memo.ParentsOf(consumer_group).size() : 0),
+			    (unsigned long long)left_types, (unsigned long long)right_types));
 		}
 	}
 	auto join = make_uniq<LogicalComparisonJoin>(apply.join_type);

@@ -86,6 +86,10 @@ unique_ptr<LogicalOperator> CascadesOptimizer::Optimize(unique_ptr<LogicalOperat
 		return plan;
 	}
 	RegisterRules();
+	// Types are resolved before the memo is built rather than only after it is taken apart: a rule
+	// that builds a projection over a child's columns needs to know their types, and deciding
+	// whether two expressions in one group agree on their columns wants them too.
+	plan->ResolveOperatorTypes();
 	// Children are added before their parents, so the root is the last group and a group id is
 	// always greater than the ids of its children.
 	auto root = memo.Add(std::move(plan));

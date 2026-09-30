@@ -22,6 +22,9 @@ GroupId Memo::Add(unique_ptr<LogicalOperator> op) {
 	expr->op = std::move(op);
 	// Ask the operator for its columns while it still has children to walk.
 	expr->bindings = expr->op->GetColumnBindings();
+	// The operator's own resolved types; the host computes them while optimizing, so the plan is
+	// resolved before the memo is built (Optimize does that) and they are available here.
+	expr->types = expr->op->types;
 	// The children are memoised bottom-up and taken out of the operator: inside the memo a
 	// group expression refers to its children by group id, which is what lets a rule splice an
 	// alternative child in without touching the operator above it.
@@ -66,6 +69,7 @@ unique_ptr<GroupExpr> Memo::MakeExpr(unique_ptr<LogicalOperator> op, vector<Grou
 			auto &child_group = *groups[expr->children[0]];
 			if (!child_group.exprs.empty()) {
 				expr->bindings = child_group.exprs[0]->bindings;
+				expr->types = child_group.exprs[0]->types;
 			}
 		}
 		break;
@@ -115,6 +119,7 @@ unique_ptr<GroupExpr> Memo::MakeExpr(unique_ptr<LogicalOperator> op, vector<Grou
 		auto &projection = expr->op->Cast<LogicalProjection>();
 		for (idx_t i = 0; i < projection.expressions.size(); i++) {
 			expr->bindings.emplace_back(projection.table_index, ProjectionIndex(i));
+			expr->types.push_back(projection.expressions[i]->GetReturnType());
 		}
 		break;
 	}
@@ -122,9 +127,11 @@ unique_ptr<GroupExpr> Memo::MakeExpr(unique_ptr<LogicalOperator> op, vector<Grou
 		auto &aggregate = expr->op->Cast<LogicalAggregate>();
 		for (idx_t i = 0; i < aggregate.groups.size(); i++) {
 			expr->bindings.emplace_back(aggregate.group_index, ProjectionIndex(i));
+			expr->types.push_back(aggregate.groups[i]->GetReturnType());
 		}
 		for (idx_t i = 0; i < aggregate.expressions.size(); i++) {
 			expr->bindings.emplace_back(aggregate.aggregate_index, ProjectionIndex(i));
+			expr->types.push_back(aggregate.expressions[i]->GetReturnType());
 		}
 		break;
 	}

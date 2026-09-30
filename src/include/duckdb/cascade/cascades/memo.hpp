@@ -72,6 +72,10 @@ struct GroupExpr {
 	//! GetColumnBindings() walks them, and in the memo they are gone - so that invariant 2 can be
 	//! checked at all: two expressions of one group have to expose the same columns.
 	vector<ColumnBinding> bindings;
+	//! The types of those columns. A rule that has to build a projection passing a child's columns
+	//! through - the correlated rewrite does, to expose the columns its conditions read - needs
+	//! them, and bindings alone are not enough to construct a column reference.
+	vector<LogicalType> types;
 	//! Set once an implementation rule produced it; the skeleton has none, so a logical
 	//! expression is also its own chosen plan (that is what "no physical rules" means).
 	bool physical = false;
