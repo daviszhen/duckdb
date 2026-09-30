@@ -155,6 +155,13 @@ unique_ptr<LogicalOperator> ApplyDecorrelator::DecorrelateNestedScalar(
 	for (auto &predicate : extracted) {
 		RewriteExpressionBindings(predicate, mapping);
 	}
+		// The template for the missing rewrite is three lines up: `dedup`, an aggregate whose groups
+		// are the outer columns, plus `dedup_export`, the mapping from them to the columns it exposes.
+		// That is ORCA's identity (8) - the correlated columns become a group key. What is missing here
+		// is doing the same to `inner` when the correlation sits inside it, instead of giving up: wrap
+		// the inner side in an aggregate grouped by the correlated columns, rewrite every reference
+		// inside it through the export mapping (join conditions included), left-outer-join the result,
+		// and assert that what comes out exposes exactly what the apply exposed before returning it.
 	if (SubtreeReferencesCorrelation(*inner, correlated)) {
 		throw NotImplementedException("cascade: identity (8) does not handle this correlated subquery shape yet "
 		                              "(correlated column used below a non row-preserving operator)");
