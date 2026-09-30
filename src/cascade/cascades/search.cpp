@@ -440,6 +440,16 @@ void CascadesOptimizer::OptimizeExpr(GroupId group, GroupExpr &expr) {
 		task.expr = &expr;
 		task.input = 0;
 		task.promise = CascadesRulePromise::HIGH;
+		// The child task also carries what this expression still needs from outside: its own outstanding
+		// outer references, minus whatever it resolves itself. Filling it here is what makes the field on
+		// the task meaningful; using it as the context properties in FinishExpr and CostOf is the next
+		// step, and that is when a group can hold a winner per context (ORCA's optimization context).
+		task.required.outer_refs = expr.outer_refs;
+		for (auto &provided : expr.provides) {
+			task.required.outer_refs.erase(
+			    std::remove(task.required.outer_refs.begin(), task.required.outer_refs.end(), provided),
+			    task.required.outer_refs.end());
+		}
 		tasks.Push(task);
 		return;
 	}
