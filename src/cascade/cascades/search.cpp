@@ -269,6 +269,17 @@ unique_ptr<LogicalOperator> CascadesOptimizer::Optimize(unique_ptr<LogicalOperat
 	// Apply the rules remove makes this number smaller.
 	if (PlanHasApply(*result)) {
 		enforced++;
+// Reusing the host's dependent-join flattening here was measured and does not work: calling
+// FlattenDependentJoins::DecorrelateIndependent at this point produced INTERNAL errors in 51 of
+// the 88 sub-query files. The component expects the plan it is given to be untouched - it walks
+// LogicalDependentJoins and the bindings around them - and by the time the enforcer runs the
+// decorrelator and the rules have already rewritten parts of it. In effect it is a pre-pass
+// component, and running it as a pre-pass was measured earlier and rejected as well (5/8 with the
+// rules off). Falling back to the whole host optimizer is not an option either: it breaks the plan
+// contract the cascade matrix asserts on (3/8 and 25/88 measured).
+// What remains is to build the delimited-join capability inside this pipeline, on our own bindings
+// and properties - the outer_refs/provides derivation added earlier is what that needs, and ORCA's
+// correlated-columns-as-parameters is the model.
 		ApplyDecorrelator decorrelator(optimizer_binder, context);
 		result = decorrelator.Decorrelate(std::move(result));
 		result = SimplifyMarkerJoins(std::move(result));
