@@ -485,6 +485,22 @@ void CascadesOptimizer::FinishExpr(GroupId group, GroupExpr &expr) {
 	if (wins) {
 		expr.cost = cost;
 		memo.SetWinner(context, &expr);
+		// File the same winner under the required side as well, so the lookup in CostOf - which now asks
+		// with it - finds it. Nothing about which plan is chosen changes: it is one winner recorded under
+		// a second key, and only once the required side is actually carried through the search will that
+		// key start to differ between contexts.
+		{
+			OptimizationContext required_context = context;
+			required_context.props.outer_refs = expr.outer_refs;
+			for (auto &provided : expr.provides) {
+				required_context.props.outer_refs.erase(
+				    std::remove(required_context.props.outer_refs.begin(), required_context.props.outer_refs.end(), provided),
+				    required_context.props.outer_refs.end());
+			}
+			if (required_context.props.outer_refs != context.props.outer_refs) {
+				memo.SetWinner(required_context, &expr);
+			}
+		}
 	}
 }
 
