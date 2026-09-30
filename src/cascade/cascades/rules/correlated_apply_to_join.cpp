@@ -118,6 +118,30 @@
 
 namespace duckdb {
 
+// What has been measured on this rule's remaining shapes, so it does not have to be rediscovered.
+//
+// test/sql/subquery/exists/test_correlated_exists.test: the rule declines, the enforcer produces the
+// plan, and the answer is wrong. The chain, each step measured: the promise's old "one child per
+// side" predicate heuristic declined it (removing that check is safe - the apply path orients every
+// condition against the bindings the inputs expose and refuses when it cannot); with the check gone
+// the rule enters Apply and leaves at FindMarkConsumer, which only recognises a mark read by a
+// FILTER - this statement reads it in the select list, i.e. through a PROJECTION.
+//
+// "Consumer B" - replacing the apply in its own group with a MARK join that keeps the mark index, so
+// the projection above still resolves - compiles and takes over from the enforcer, but regresses one
+// cascade matrix file deterministically (7/8 three times over; an earlier single run showed 8/8, so
+// that reading was false). Next step there: find that file and narrow the condition, for instance by
+// requiring the projected mark to be the only consumer, or by excluding the any/delim shapes.
+//
+// The other route - exposing the correlated columns in the decorrelator (apply_decorrelation.cpp,
+// before the "cannot lift this correlation" guard) - was tried three times: on its own, with
+// RewriteEveryBinding over the sub-tree's expressions, and with the join conditions rewritten too.
+// All three gave 5/8 (and one run of the first gave 8/8: a false green). Conclusion: widening a
+// sub-tree's output needs exposure + a rewrite of every reference + a rebinding of the parents, or it
+// belongs in the memo layer instead, the way identity (4) was done.
+//
+// Gate: the cascade matrix takes about a second, and single runs have produced false greens twice.
+// Run it three times and require the same result.
 bool CorrelatedApplyToJoin::Matches(GroupExpr &expr) {
 	return expr.type == LogicalOperatorType::LOGICAL_DEPENDENT_JOIN && expr.children.size() == 2;
 }
