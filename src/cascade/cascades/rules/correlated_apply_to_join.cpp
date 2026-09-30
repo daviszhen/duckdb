@@ -144,6 +144,32 @@ namespace duckdb {
 //
 // Gate: the cascade matrix takes about a second, and single runs have produced false greens twice.
 // Run it three times and require the same result.
+// Where the remaining failures live and which layer has to fix them (all measured):
+//
+// The subquery suite fails in 55 of 88 files. Of those, 50 report "Not implemented", and running one
+// with DUCKDB_CASCADE_PRINT shows the error is raised AFTER the memo's summary line - so the memo's
+// rules declined the shape, an Apply was still in the chosen plan, and the ENFORCER threw. The layer
+// that can fix them is therefore this one, not the decorrelator: exposing columns in the decorrelator
+// was tried in three local forms (Rule 2 unconditionally, and the scalar path with and without the
+// projection-only guard) and every one either changed nothing in the sweep or cost a matrix file -
+// the wrong layer cannot help, because it only changes what the enforcer does.
+//
+// The shapes, counted over the failing files (the line the probe prints is `right=[...] below=[...]`):
+//
+//   15  right=[LOGICAL_PROJECTION] below=[LOGICAL_AGGREGATE_AND_GROUP_BY]   correlated column under
+//                                                                          an aggregate - ORCA's
+//                                                                          ExfScalarAggSubquery family,
+//                                                                          paper identity (8)
+//   14  right=[LOGICAL_PROJECTION] below=[LOGICAL_DUMMY_SCAN]              a sub-query with no table
+//                                                                          at all: nothing to lift,
+//                                                                          only the column itself
+//    6  right=[LOGICAL_MATERIALIZED_CTE] below=[...]                       CTE / recursive CTE
+//    4  right=[LOGICAL_PROJECTION] below=[LOGICAL_FILTER]
+//    3  right=[LOGICAL_PROJECTION] below=[LOGICAL_UNNEST]
+//    2  right=[LOGICAL_PROJECTION] below=[LOGICAL_WINDOW]
+//    2  right=[LOGICAL_PROJECTION] below=[LOGICAL_PROJECTION]
+//
+// The first two classes are 29 of the 50 and are where to start.
 bool CorrelatedApplyToJoin::Matches(GroupExpr &expr) {
 	return expr.type == LogicalOperatorType::LOGICAL_DEPENDENT_JOIN && expr.children.size() == 2;
 }
