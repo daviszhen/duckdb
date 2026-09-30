@@ -46,6 +46,14 @@ idx_t CascadeConfig::MemoSelfTest() {
 }
 
 bool CascadeConfig::KeepApply() {
+	// Off unless asked for, which makes it the matrix's configuration rather than the default
+	// path's. Measured both ways over the 88 sub-query files: with it off (the default) 84/88 pass
+	// with no internal errors, because the host then decorrelates the sub-queries while planning -
+	// the same thing it does for the default path, which gets 87/88. With it on the count is 33/88:
+	// the applies survive into this pipeline, where the rules can only express part of them. Both
+	// numbers are real; they answer different questions. The matrix asserts on this pipeline's own
+	// handling, so it runs with the flag on, and the sweep is the default-path number, so it runs
+	// with the flag off. Every rule added moves one file from the first group to the second.
 	static const bool enabled = EnvFlagSet("DUCKDB_CASCADE_KEEP_APPLY");
 	return enabled;
 }
