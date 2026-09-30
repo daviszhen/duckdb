@@ -1,3 +1,5 @@
+#include "duckdb/optimizer/empty_result_pullup.hpp"
+#include "duckdb/optimizer/constant_or_null_simplification.hpp"
 #include "duckdb/planner/operator/logical_empty_result.hpp"
 #include "duckdb/planner/operator/logical_limit.hpp"
 #include "duckdb/optimizer/remove_unused_columns.hpp"
@@ -554,6 +556,15 @@ shared_ptr<PreparedStatementData> ClientContext::CreatePreparedStatementInternal
 				// correlation guards and catch only that, or decide from the plan before calling in.
 				CascadesOptimizer cascades(*logical_planner.binder, *this);
 				logical_plan = cascades.Optimize(std::move(logical_plan));
+		// The companion case: a filter that is constant false means the same thing as a limit of zero, and
+		// the same test file asserts it. Measured, it also scanned a hundred-billion-row range instead of
+		// answering immediately; these passes turn it into an empty result and lift that up.
+		{
+			ConstantOrNullSimplification constant_or_null_simplification(*this);
+			logical_plan = constant_or_null_simplification.Optimize(std::move(logical_plan));
+			EmptyResultPullup empty_result_pullup;
+			logical_plan = empty_result_pullup.Optimize(std::move(logical_plan));
+		}
 		// A limit of zero does not need its input at all, and without this the plan was executed in full:
 		// measured, a limit of zero over an aggregate of a hundred-billion-row range scanned the range and
 		// hit the timeout, while the host answers immediately. An empty result is the plan it means. This
