@@ -272,6 +272,17 @@ unique_ptr<LogicalOperator> CascadesOptimizer::Optimize(unique_ptr<LogicalOperat
 		result = decorrelator.Decorrelate(std::move(result));
 		result = SimplifyMarkerJoins(std::move(result));
 	}
+	// Measured limit of the normalization above, recorded here so the next step does not have to
+	// rediscover it: the single-expression condition can be the outer predicate of an EXISTS
+	// (`i1.i > 2`), and replacing it with a constant drops that filter - the default path answers
+	// `1|false 2|false 3|true NULL|false` for test_correlated_exists and this answers true for every
+	// row. The predicate cannot be recovered at this point (JoinCondition's members are private, the
+	// single-expression form has no accessor - a compile error settled that). The host keeps the
+	// semantics because its own optimizer turns this shape into CTE/delim machinery (`CTE / CTE N /
+	// CTE S / CTE I` in its plan), which does not run here: this path replaces the host optimizer.
+	// So the normalization is the backstop that turns an unbuildable plan into a plan, and the real
+	// fix is earlier - rewrite the no-correlation MARK apply (ORCA's ExfLeftSemiApply2LeftSemiJoin
+	// without correlations) while the predicate is still readable.
 	NormalizeMarkJoinConditions(*result);
 	result->ResolveOperatorTypes();
 	if (auto self_test = CascadeConfig::MemoSelfTest()) {
