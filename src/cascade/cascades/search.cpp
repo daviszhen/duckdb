@@ -448,6 +448,13 @@ void CascadesOptimizer::OptimizeExpr(GroupId group, GroupExpr &expr) {
 
 void CascadesOptimizer::FinishExpr(GroupId group, GroupExpr &expr) {
 	auto cost = CostOf(expr);
+	// The required side is derived per expression and filed with the winner (see CostOf and the
+	// SetWinner below), but it does not yet *travel*: this entry point takes only a group id, so the
+	// same group is optimised once with whatever its own expressions need. Making it a parameter -
+	// OptimizeGroup(group, required), with the recursion passing required.outer_refs = expr.outer_refs
+	// minus expr.provides - is what turns it into ORCA's optimization context: one group, several
+	// contexts, a winner per context. That is the next step, and the rules that consume it (the
+	// unnesting family, ExfInnerApply2InnerJoin first) are what move the sub-query tests.
 	OptimizationContext context;
 	context.group = group;
 	auto current = memo.WinnerOf(context);
