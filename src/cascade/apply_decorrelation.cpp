@@ -124,9 +124,14 @@ unique_ptr<LogicalOperator> ApplyDecorrelator::DecorrelateApply(unique_ptr<Logic
 	}
 
 	if (extracted.empty()) {
+		// The correlation is not in a predicate that can be lifted into a join condition - it is used
+		// somewhere else in the sub-query (an aggregate key, a projection, below a non row-preserving
+		// operator). The earlier wording here said "uncorrelated", which sent more than one diagnosis
+		// down the wrong path: an uncorrelated semi/anti/mark apply is handled above, and this branch
+		// means the opposite - there *is* a correlation and it cannot be lifted.
 		throw NotImplementedException(
-		    "cascade: Apply elimination without a correlation predicate is not implemented yet "
-		    "(uncorrelated semi/anti/mark subquery)");
+		    "cascade: Apply elimination cannot lift this correlation into a join condition "
+		    "(the correlated column is used where a predicate cannot be lifted from)");
 	}
 
 	if (join_type == JoinType::INNER) {
