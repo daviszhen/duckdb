@@ -105,6 +105,8 @@
 #include "duckdb/cascade/cascades/memo.hpp"
 #include "duckdb/cascade/cascades/search.hpp"
 #include "duckdb/common/printer.hpp"
+#include "duckdb/common/unordered_set.hpp"
+#include "duckdb/planner/expression/bound_columnref_expression.hpp"
 #include "duckdb/planner/expression/bound_comparison_expression.hpp"
 #include "duckdb/planner/expression/bound_function_expression.hpp"
 #include "duckdb/planner/expression/bound_operator_expression.hpp"
@@ -164,6 +166,42 @@ bool PredicatesPairBothSides(GroupExpr &filter, const vector<ColumnBinding> &lef
 		}
 	}
 	return true;
+}
+
+//! Does anything in this sub-tree read one of the correlated columns? The predicates that move into
+//! the join condition are read from the filter itself, not from its child, so a reference below the
+//! filter is one the condition cannot account for - and carrying it to the right side needs the
+//! delim machinery, which a rule cannot construct (measured: a hand-built delim join segfaults).
+bool SubtreeReadsCorrelated(Memo &memo, GroupId group, const CorrelatedColumns &correlated,
+                            unordered_set<GroupId> &visited) {
+	if (!visited.insert(group).second) {
+		return false;
+	}
+	for (auto &expr : memo.GetGroup(group).exprs) {
+		if (!expr->op) {
+			continue;
+		}
+		for (auto &expression : expr->op->expressions) {
+			bool reads = false;
+			ExpressionIterator::VisitExpression<BoundColumnRefExpression>(
+			    *expression, [&](const BoundColumnRefExpression &colref) {
+				    for (auto &entry : correlated) {
+					    if (entry.binding == colref.Binding()) {
+						    reads = true;
+					    }
+				    }
+			    });
+			if (reads) {
+				return true;
+			}
+		}
+		for (auto child : expr->children) {
+			if (SubtreeReadsCorrelated(memo, child, correlated, visited)) {
+				return true;
+			}
+		}
+	}
+	return false;
 }
 
 } // namespace
@@ -229,86 +267,65 @@ bool CorrelatedApplyToJoin::Apply(CascadesOptimizer &optimizer, GroupId group, G
 		return false;
 	}
 	auto &memo = optimizer.GetMemo();
-	auto &apply = expr.op->Cast<LogicalDependentJoin>();
-	auto &left_group = memo.GetGroup(expr.children[0]);
-	auto &right_group = memo.GetGroup(filter->children[0]);
-	if (left_group.exprs.empty() || right_group.exprs.empty()) {
+	auto &dependent = expr.op->Cast<LogicalDependentJoin>();
+	GroupId consumer_group = INVALID_GROUP_ID;
+	GroupExpr *consumer = nullptr;
+	bool negated = false;
+	if (!memo.FindMarkConsumer(group, consumer_group, consumer, negated)) {
 		return false;
 	}
+	auto consumers = memo.ParentsOf(consumer_group);
+	if (consumers.empty()) {
+		return false;
+	}
+	// Everything the correlation needs has to live in the predicates that move into the condition. A
+	// reference below the filter would have to be carried to the right side, and carrying it needs
+	// the delim machinery a rule cannot build - so such a shape keeps the Apply and the enforcer,
+	// which is the safe answer rather than a plan that cannot bind.
+	{
+		unordered_set<GroupId> visited;
+		if (SubtreeReadsCorrelated(memo, filter->children[0], dependent.correlated_columns, visited)) {
+			if (CascadeConfig::PrintPlans()) {
+				Printer::Print("--- cascade(cascades) rule " + string(Name()) +
+				               ": declined, the sub-query reads the correlation below the lifted predicates");
+			}
+			return false;
+		}
+	}
 
-	{
-		// The consumer decides SEMI versus ANTI: the two Apply nodes are identical, the negation
-		// lives above them. Printed (and thus checked) here because this is where the group id is
-		// known, and because the rewrite that follows has to take the consumer with it.
-		GroupId consumer_group = INVALID_GROUP_ID;
-		GroupExpr *consumer = nullptr;
-		bool negated = false;
-		if (memo.FindMarkConsumer(group, consumer_group, consumer, negated) && CascadeConfig::PrintPlans()) {
-			Printer::Print(StringUtil::Format(
-			    "--- cascade(cascades)   mark consumer: filter in group %llu negated=%d -> would become %s",
-			    (unsigned long long)consumer_group, (int)negated, negated ? "ANTI" : "SEMI"));
-		}
-	}
-	{
-		// Live check of the two inputs the correct rewrite needs, printed where the group id is
-		// known. It is here rather than in the note because a print that never runs tells nothing:
-		// this one runs whenever the rule is applicable.
-		GroupId consumer_group = INVALID_GROUP_ID;
-		GroupExpr *consumer = nullptr;
-		bool negated = false;
-		auto found = memo.FindMarkConsumer(group, consumer_group, consumer, negated);
-		if (CascadeConfig::PrintPlans()) {
-			// Types as well: a rule that builds a projection over a child's columns needs them, and
-			// the print is the check that they are there during the search rather than only after it.
-			idx_t left_types = memo.GetGroup(expr.children[0]).exprs.empty()
-			                       ? 0
-			                       : memo.GetGroup(expr.children[0]).exprs[0]->types.size();
-			idx_t right_types = memo.GetGroup(expr.children[1]).exprs.empty()
-			                        ? 0
-			                        : memo.GetGroup(expr.children[1]).exprs[0]->types.size();
-			Printer::Print(StringUtil::Format(
-			    "--- cascade(cascades) rule %s: consumer found=%d group=%llu negated=%d parents=%llu "
-			    "| left types=%llu right types=%llu",
-			    Name(), (int)found, (unsigned long long)consumer_group, (int)negated,
-			    (unsigned long long)(found ? memo.ParentsOf(consumer_group).size() : 0),
-			    (unsigned long long)left_types, (unsigned long long)right_types));
-		}
-	}
-	auto join = make_uniq<LogicalComparisonJoin>(apply.join_type);
-	if (apply.join_type == JoinType::MARK) {
-		join->mark_index = apply.mark_index;
-	}
+	// A plain semi or anti join is enough then: the correlation lives entirely in the condition,
+	// which is evaluated over both of the join's children.
+	auto join = make_uniq<LogicalComparisonJoin>(negated ? JoinType::ANTI : JoinType::SEMI);
 	for (auto &predicate : filter->op->expressions) {
-		auto copy = predicate->Copy();
-		auto &comparison = copy->Cast<BoundFunctionExpression>();
-		auto &lhs = BoundComparisonExpression::LeftMutable(comparison);
-		auto &rhs = BoundComparisonExpression::RightMutable(comparison);
-		bool lhs_left = ApplyReadsBindings(*lhs, left_group.exprs[0]->bindings);
-		bool lhs_right = ApplyReadsBindings(*lhs, right_group.exprs[0]->bindings);
-		bool rhs_right = ApplyReadsBindings(*rhs, right_group.exprs[0]->bindings);
-		if (lhs_right && !lhs_left && !rhs_right) {
-			auto moved = std::move(lhs);
-			lhs = std::move(rhs);
-			rhs = std::move(moved);
-			BoundComparisonExpression::FlipType(comparison);
-		}
-		join->conditions.emplace_back(std::move(lhs), std::move(rhs), comparison.GetExpressionType());
+		AddJoinCondition(*join, predicate->Copy(), dependent.correlated_columns, false);
 	}
 	join->estimated_cardinality = expr.op->estimated_cardinality;
 	join->has_estimated_cardinality = expr.op->has_estimated_cardinality;
 
-	auto &projection_op = projection->op->Cast<LogicalProjection>();
-	vector<unique_ptr<Expression>> select_list;
-	for (auto &projection_expression : projection_op.expressions) {
-		select_list.push_back(projection_expression->Copy());
-	}
-	auto rebuilt = make_uniq<LogicalProjection>(projection_op.table_index, std::move(select_list));
-	rebuilt->estimated_cardinality = projection_op.estimated_cardinality;
-	rebuilt->has_estimated_cardinality = projection_op.has_estimated_cardinality;
+	auto join_group = memo.AddGroup();
+	optimizer.AddExpression(join_group, memo.MakeExpr(std::move(join), {expr.children[0], filter->children[0]}));
 
-	auto right_without_filter = memo.AddGroup();
-	optimizer.AddExpression(right_without_filter, memo.MakeExpr(std::move(rebuilt), {filter->children[0]}));
-	optimizer.AddExpression(group, memo.MakeExpr(std::move(join), {expr.children[0], right_without_filter}));
+	// Splice the absorbed pair out: whoever read the mark filter's columns now reads the join, and
+	// the mark column disappears with the expression that read it.
+	for (auto parent : consumers) {
+		bool touched = false;
+		for (auto &candidate : memo.GetGroup(parent).exprs) {
+			for (auto &child : candidate->children) {
+				if (child == consumer_group) {
+					child = join_group;
+					touched = true;
+				}
+			}
+		}
+		if (touched) {
+			optimizer.Reschedule(parent);
+		}
+	}
+	if (CascadeConfig::PrintPlans()) {
+		Printer::Print(StringUtil::Format("--- cascade(cascades) rule %s: spliced group %llu, %s join in group %llu",
+		                                  Name(), (unsigned long long)consumer_group, negated ? "ANTI" : "SEMI",
+		                                  (unsigned long long)join_group));
+	}
 	return true;
 }
 

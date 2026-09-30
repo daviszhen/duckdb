@@ -16,6 +16,8 @@ double CostModel::RowCost(LogicalOperatorType type) {
 		// Grouping and aggregating is what costs; this is the coefficient the pushdown has to
 		// earn its extra filter against.
 		return 10.0;
+	case LogicalOperatorType::LOGICAL_DEPENDENT_JOIN:
+		return 25.0;
 	case LogicalOperatorType::LOGICAL_COMPARISON_JOIN:
 	case LogicalOperatorType::LOGICAL_DELIM_JOIN:
 	case LogicalOperatorType::LOGICAL_ASOF_JOIN:

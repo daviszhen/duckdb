@@ -52,6 +52,8 @@ public:
 	//! Replace an expression of a group in place, for the rules that have to rewrite what the parent
 	//! reads as well as the expression itself (see Memo::ReplaceExpression), then re-schedule it.
 	void ReplaceExpression(GroupId group, const GroupExpr *old_expression, unique_ptr<GroupExpr> replacement);
+	//! Re-explore a group whose expressions a rule changed in place.
+	void Reschedule(GroupId group);
 
 	idx_t GroupsExplored() const {
 		return groups_explored;

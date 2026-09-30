@@ -501,6 +501,15 @@ void CascadesOptimizer::ReplaceExpression(GroupId group, const GroupExpr *old_ex
 	tasks.Push(task);
 }
 
+void CascadesOptimizer::Reschedule(GroupId group) {
+	memo.GetGroup(group).explored = false;
+	CascadesTask task;
+	task.kind = CascadesTaskKind::EXPLORE_GROUP;
+	task.group = group;
+	task.promise = CascadesRulePromise::MEDIUM;
+	tasks.Push(task);
+}
+
 void CascadesOptimizer::InjectSelfTestFault(idx_t which) {
 	if (memo.GroupCount() == 0) {
 		return;
