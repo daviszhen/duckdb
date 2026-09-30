@@ -90,6 +90,16 @@ unique_ptr<GroupExpr> Memo::MakeExpr(unique_ptr<LogicalOperator> op, vector<Grou
 		}
 		break;
 	case LogicalOperatorType::LOGICAL_COMPARISON_JOIN:
+	// A join resolves nothing either: what either side still needs from outside is still needed.
+	for (auto child : expr->children) {
+		if (child < groups.size() && !groups[child]->exprs.empty()) {
+			for (auto &pending : groups[child]->exprs[0]->outer_refs) {
+				if (std::find(expr->outer_refs.begin(), expr->outer_refs.end(), pending) == expr->outer_refs.end()) {
+					expr->outer_refs.push_back(pending);
+				}
+			}
+		}
+	}
 	// A join resolves no outer reference itself: it carries what both inputs provide, and that is
 	// what a rule above it may rely on. Duplicates are dropped so the property stays canonical.
 	for (auto child : expr->children) {
