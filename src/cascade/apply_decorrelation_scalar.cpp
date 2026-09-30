@@ -53,6 +53,23 @@
 #include "duckdb/planner/operator/logical_set_operation.hpp"
 
 namespace duckdb {
+//! An ANY / ALL sub-query looks scalar from the outside but its semantics are a semi-join: with no
+//! match the result is false or an empty row, not NULL. The left outer join in the non-aggregate
+//! branch answered NULL - measured on test_correlated_any_all, which printed "NULL <> 0" - so those
+//! shapes are kept out. The marker is a LogicalAnyJoin in the sub-tree (the apply's own any_join flag
+//! is not visible from here).
+static bool SubtreeHasAnyJoin(LogicalOperator &op) {
+	if (op.type == LogicalOperatorType::LOGICAL_ANY_JOIN) {
+		return true;
+	}
+	for (auto &child : op.children) {
+		if (SubtreeHasAnyJoin(*child)) {
+			return true;
+		}
+	}
+	return false;
+}
+
 
 //! A column of the sub-tree together with the binding the join can reach it by.
 struct ExposedColumn {
@@ -312,6 +329,10 @@ unique_ptr<LogicalOperator> ApplyDecorrelator::DecorrelateScalar(unique_ptr<Logi
 		// yields NULL, which is what a scalar sub-query returns. The largest remaining bucket (19/55).
 		// `extracted` is declared below this guard, so this branch keeps its own.
 		vector<unique_ptr<Expression>> extracted;
+	if (SubtreeHasAnyJoin(*right)) {
+		throw NotImplementedException(
+		    "cascade: a correlated scalar subquery over an ANY join is not implemented yet");
+	}
 		if (node->type == LogicalOperatorType::LOGICAL_FILTER) {
 			right = ExtractCorrelatedPredicates(std::move(right), correlated, extracted);
 		}
