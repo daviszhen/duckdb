@@ -307,8 +307,21 @@ unique_ptr<LogicalOperator> ApplyDecorrelator::DecorrelateScalar(unique_ptr<Logi
 		// return that as the new right side, and check that what it exposes is what the apply exposed
 		// before returning - otherwise keep refusing.
 	if (node->type != LogicalOperatorType::LOGICAL_AGGREGATE_AND_GROUP_BY || node->children.size() != 1) {
-		throw NotImplementedException(
-		    "cascade: a correlated scalar subquery is only decorrelated when it aggregates");
+		// ExfScalarSubquery: a scalar sub-query that does not aggregate needs no grouping - only a
+		// left outer join whose condition is the correlated predicate, so an outer row with no match
+		// yields NULL, which is what a scalar sub-query returns. The largest remaining bucket (19/55).
+		// `extracted` is declared below this guard, so this branch keeps its own.
+		vector<unique_ptr<Expression>> extracted;
+		if (node->type == LogicalOperatorType::LOGICAL_FILTER) {
+			right = ExtractCorrelatedPredicates(std::move(right), correlated, extracted);
+		}
+		auto non_agg_join = make_uniq<LogicalComparisonJoin>(JoinType::LEFT);
+		non_agg_join->children.push_back(std::move(left));
+		non_agg_join->children.push_back(std::move(right));
+		for (auto &predicate : extracted) {
+			AddJoinCondition(*non_agg_join, std::move(predicate), correlated, false);
+		}
+		return std::move(non_agg_join);
 	}
 	auto &aggregate = node->Cast<LogicalAggregate>();
 	if (!aggregate.groups.empty()) {
