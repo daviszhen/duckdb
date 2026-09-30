@@ -58,6 +58,19 @@
 //     assigned by the delim machinery (`LogicalDelimJoin`'s delim_types in DuckDB's own flattening),
 //     rather than the outer binding. That is the one thing left: how the right side names the
 //     columns the join carries to it.
+//   * The delim-get form is the right machinery and nearly binds. Following DuckDB's own
+//     flattening (flatten_dependent_join.cpp): the correlated columns are carried by a
+//     LogicalDelimGet at a table index of its own, cross-producted with the left input, with
+//     duplicate_eliminated_columns describing what to de-duplicate from the left; the conditions
+//     read the carried columns at that index. Measured: the enforcer goes to zero on
+//     decorrelation.test (`enforced=0`) and the generated index shows up in the plan - and then
+//         Failed to bind column reference "a" [7.0] (bindings: {#[0.0], #[15.0]})
+//     i.e. an *inner* column is read where only the left input plus the carried columns are
+//     available. So what is left is the orientation of the conditions: with the mapping applied the
+//     correlated references sit at (delim_index, i) and the inner ones at the inner table's index,
+//     and AddJoinCondition's correlation-list heuristic puts one of them on the wrong side. The two
+//     children's bindings are known (the cross product's and the filter's), so the split can be done
+//     directly instead of heuristically - that is the next step, not a new structure.
 //   * The same rule body spliced twice in one build and not at all in another (applied=4 but
 //     ParentsOf(consumer_group) empty) is *not* nondeterminism: the splice rewrites the parents'
 //     child ids, so after the first one the consumer group has no parents left and later
