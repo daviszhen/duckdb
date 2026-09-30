@@ -83,6 +83,9 @@ unique_ptr<GroupExpr> Memo::MakeExpr(unique_ptr<LogicalOperator> op, vector<Grou
 				expr->types = child_group.exprs[0]->types;
 				// A pass-through operator resolves nothing by itself, so what its child provides it provides.
 				expr->provides = child_group.exprs[0]->provides;
+				// A pass-through operator resolves nothing, so whatever its input still has to have brought in
+				// from outside is still outstanding above it.
+				expr->outer_refs = child_group.exprs[0]->outer_refs;
 			}
 		}
 		break;
