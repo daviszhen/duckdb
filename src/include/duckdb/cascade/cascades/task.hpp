@@ -38,6 +38,10 @@ struct CascadesTask {
 	CascadesRule *rule = nullptr;
 	//! Promise of the rule that produced this task; the queue pops the highest first.
 	CascadesRulePromise promise = CascadesRulePromise::MEDIUM;
+	//! The properties this group has to satisfy for whoever scheduled it - ORCA's optimization
+	//! context, carried by the job rather than passed as an argument, because the search descends by
+	//! scheduling tasks. A group optimised under two different contexts can have two winners.
+	RequiredProperties required;
 };
 
 //! A stack, ordered by rule promise. ORCA's CJobQueue is the full version (FIFO/LIFO per
