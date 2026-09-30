@@ -318,26 +318,39 @@ bool SubtreeReadsCorrelated(Memo &memo, GroupId group, const CorrelatedColumns &
 } // namespace
 
 CascadesRulePromise CorrelatedApplyToJoin::Promise(CascadesOptimizer &optimizer, GroupExpr &expr) {
-	auto &apply = expr.op->Cast<LogicalDependentJoin>();
-	if (apply.condition || apply.correlated_columns.empty()) {
+	auto decline = [](int line) -> CascadesRulePromise {
+		if (CascadeConfig::PrintPlans()) {
+			Printer::Print(StringUtil::Format(
+			    "--- cascade(cascades) rule correlated_apply_to_join declined at line %d", line));
+		}
 		return CascadesRulePromise::NONE;
+	};
+
+	auto &apply = expr.op->Cast<LogicalDependentJoin>();
+	if (CascadeConfig::PrintPlans()) {
+		Printer::Print(StringUtil::Format(
+		    "--- cascade(cascades) apply seen: join_type=%d condition=%s correlated=%llu", (int)apply.join_type,
+		    apply.condition ? "yes" : "no", (unsigned long long)apply.correlated_columns.size()));
+	}
+	if (apply.condition || apply.correlated_columns.empty()) {
+		return decline(__LINE__);
 	}
 	if (!ReplacesWithCorrelatedJoin(apply.join_type)) {
-		return CascadesRulePromise::NONE;
+		return decline(__LINE__);
 	}
 	GroupExpr *projection = nullptr;
 	GroupExpr *filter = nullptr;
 	if (!FindCorrelatedShape(optimizer, expr, projection, filter)) {
-		return CascadesRulePromise::NONE;
+		return decline(__LINE__);
 	}
 	auto &memo = optimizer.GetMemo();
 	auto &left_group = memo.GetGroup(expr.children[0]);
 	auto &right_group = memo.GetGroup(filter->children[0]);
 	if (left_group.exprs.empty() || right_group.exprs.empty()) {
-		return CascadesRulePromise::NONE;
+		return decline(__LINE__);
 	}
 	if (!PredicatesPairBothSides(*filter, left_group.exprs[0]->bindings, right_group.exprs[0]->bindings)) {
-		return CascadesRulePromise::NONE;
+		return decline(__LINE__);
 	}
 	for (idx_t candidate_group = 0; candidate_group < memo.GroupCount(); candidate_group++) {
 		for (auto &candidate : memo.GetGroup(candidate_group).exprs) {
