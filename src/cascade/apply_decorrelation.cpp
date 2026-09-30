@@ -205,6 +205,14 @@ unique_ptr<LogicalOperator> ApplyDecorrelator::DecorrelateApply(unique_ptr<Logic
 	// outer expression with the subquery's output. It becomes one more join
 	// condition, and - unlike EXISTS - it keeps its three-valued marker, so it
 	// must not receive the NULL-stripping treatment below.
+// Measured gap in that model: it cannot express "empty right side means false". For
+//   SELECT i = ANY(SELECT i FROM integers WHERE i = i1.i) FROM integers i1;
+// the outer value NULL makes the sub-query empty, and SQL says the result is false - but with the
+// outer comparison folded into the join an empty side only shows up as "no match", so the mark is
+// NULL and the answer comes out NULL (cascade NULL vs the host's false, measured). Three ways out,
+// in ascending order of agreement with the host: keep an explicit bool_or-style aggregate for ANY;
+// mark the comparison so the consumer can COALESCE the mark to false; or express ANY through the
+// delim/CTE machinery the host uses - which is the same thing the join-order problem needs.
 	auto any_condition = std::move(apply.condition);
 
 
