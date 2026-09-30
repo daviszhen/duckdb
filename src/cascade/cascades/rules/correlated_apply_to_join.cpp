@@ -224,6 +224,13 @@ namespace duckdb {
 // Local changes have now been ruled out in four places - the decorrelator's exposure, the mark
 // consumer, the rule's inner path and the refusals - and every one of them either did nothing or
 // produced a worse plan. The three-piece rewrite is the work, not an adjustment to what is there.
+//
+// Where the 55 failing files sit, by the message that stops them (measured): about 30 come from
+// the scalar path's own refusals - "a correlated scalar subquery without a correlated predicate" /
+// "whose grouping ..." - about 20 from "Apply elimination does not handle this correlated subquery
+// shape yet", and 5 from something else (wrong results, one internal error). So the scalar path is
+// the largest single target, and it is the one whose template is already in the file: the `dedup`
+// aggregate grouped by the outer columns plus its export mapping, three lines above the refusal.
 bool CorrelatedApplyToJoin::Matches(GroupExpr &expr) {
 	return expr.type == LogicalOperatorType::LOGICAL_DEPENDENT_JOIN && expr.children.size() == 2;
 }
