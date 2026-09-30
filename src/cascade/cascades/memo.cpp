@@ -1,3 +1,4 @@
+#include <algorithm>
 #include "duckdb/cascade/cascades/memo.hpp"
 
 #include "duckdb/common/exception.hpp"
@@ -86,6 +87,17 @@ unique_ptr<GroupExpr> Memo::MakeExpr(unique_ptr<LogicalOperator> op, vector<Grou
 		}
 		break;
 	case LogicalOperatorType::LOGICAL_COMPARISON_JOIN:
+	// A join resolves no outer reference itself: it carries what both inputs provide, and that is
+	// what a rule above it may rely on. Duplicates are dropped so the property stays canonical.
+	for (auto child : expr->children) {
+		if (child < groups.size() && !groups[child]->exprs.empty()) {
+			for (auto &provided : groups[child]->exprs[0]->provides) {
+				if (std::find(expr->provides.begin(), expr->provides.end(), provided) == expr->provides.end()) {
+					expr->provides.push_back(provided);
+				}
+			}
+		}
+	}
 		// Only an inner join exposes both sides; a semi or anti join exposes the left one, and
 		// deriving the wrong columns there would be worse than not deriving any.
 	{
