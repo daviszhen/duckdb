@@ -155,6 +155,13 @@ unique_ptr<GroupExpr> Memo::MakeExpr(unique_ptr<LogicalOperator> op, vector<Grou
 		break;
 	}
 	case LogicalOperatorType::LOGICAL_AGGREGATE_AND_GROUP_BY: {
+	// An aggregate groups and computes, but resolves no outer reference itself either: what its input
+	// provides is visible above it. The correlated column it *reads* as a group key is a required
+	// property, not a provided one - which is the case this property exists for.
+	if (!expr->children.empty() && expr->children[0] < groups.size() &&
+	    !groups[expr->children[0]]->exprs.empty()) {
+		expr->provides = groups[expr->children[0]]->exprs[0]->provides;
+	}
 		auto &aggregate = expr->op->Cast<LogicalAggregate>();
 		for (idx_t i = 0; i < aggregate.groups.size(); i++) {
 			expr->bindings.emplace_back(aggregate.group_index, ProjectionIndex(i));
