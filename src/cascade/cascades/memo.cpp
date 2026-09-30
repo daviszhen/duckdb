@@ -80,6 +80,8 @@ unique_ptr<GroupExpr> Memo::MakeExpr(unique_ptr<LogicalOperator> op, vector<Grou
 			if (!child_group.exprs.empty()) {
 				expr->bindings = child_group.exprs[0]->bindings;
 				expr->types = child_group.exprs[0]->types;
+				// A pass-through operator resolves nothing by itself, so what its child provides it provides.
+				expr->provides = child_group.exprs[0]->provides;
 			}
 		}
 		break;
