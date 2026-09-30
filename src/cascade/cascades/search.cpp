@@ -1,3 +1,4 @@
+#include <algorithm>
 #include "duckdb/cascade/cascades/search.hpp"
 
 #include "duckdb/cascade/cascade_config.hpp"
@@ -493,7 +494,21 @@ double CascadesOptimizer::CostOf(GroupExpr &expr) {
 	for (auto child : expr.children) {
 		OptimizationContext context;
 		context.group = child;
-		auto winner = memo.WinnerOf(context);
+// The required side, read for the first time: what this expression still needs from outside is
+// what its inputs need, minus what they resolve themselves. The setter side does not record the
+// required side yet, so a narrow lookup that finds nothing falls back to the plain one - the
+// behaviour is unchanged, but the property is consulted instead of merely stored.
+context.props.outer_refs = expr.outer_refs;
+for (auto &provided : expr.provides) {
+	context.props.outer_refs.erase(
+	    std::remove(context.props.outer_refs.begin(), context.props.outer_refs.end(), provided),
+	    context.props.outer_refs.end());
+}
+auto winner = memo.WinnerOf(context);
+if (!winner && !context.props.outer_refs.empty()) {
+	context.props.outer_refs.clear();
+	winner = memo.WinnerOf(context);
+}
 		child_costs.push_back(winner ? winner->cost : 0.0);
 		// The rows a child produces are what this operator pays to look at.
 		child_rows.push_back(winner && winner->rows >= 1 ? winner->rows : 1.0);
