@@ -170,6 +170,32 @@ namespace duckdb {
 //    2  right=[LOGICAL_PROJECTION] below=[LOGICAL_PROJECTION]
 //
 // The first two classes are 29 of the 50 and are where to start.
+// The rule that should carry these shapes, and how the pieces map. The goal is to express sub-query
+// unnesting in the memo as transformations, not to grow the apply-based decorrelation - so the work
+// belongs in a new rule, with these as its inputs:
+//
+//   class (count)                  apply type   ORCA transform to mirror        rule shape
+//   Projection<-Aggregate  (15)    SINGLE (8)   ExfScalarAggSubquery            group the left side
+//                                                                              by the correlated
+//                                                                              columns, LEFT JOIN
+//                                                                              the aggregate result,
+//                                                                              project what the
+//                                                                              query needs
+//   Projection<-DummyScan  (14)    SINGLE/MARK  ExfScalarSubquery / no-         nothing to lift; the
+//                                              correlations variant            correlated column is
+//                                                                              the whole problem
+//   Distinct<-Union                 MARK (7)    ExfPushJoinBelowUnionAll       push the correlation
+//                                                                              into the branches
+//   Materialized CTE        (6)    SINGLE/MARK  the CTE family                 needs the CTE
+//                                                                              machinery, later
+//   Filter / Unnest / Window / Projection (11) SINGLE  each its own            one at a time
+//
+// A rule is written the way push_filter_below_groupby is: Matches on LOGICAL_DEPENDENT_JOIN, a Promise
+// that decides applicability read-only (the shape checks the census came from), and an Apply that
+// builds the replacement. Two output paths, and which one is legal depends on the column set: if the
+// replacement exposes what the Apply exposed, replace the expression in its own group; if it changes
+// the columns, its parents have to be rebound as well - the session's own measurements are blunt about
+// that (a rule that widened a sub-tree without rebinding its parents cost three matrix files).
 bool CorrelatedApplyToJoin::Matches(GroupExpr &expr) {
 	return expr.type == LogicalOperatorType::LOGICAL_DEPENDENT_JOIN && expr.children.size() == 2;
 }
