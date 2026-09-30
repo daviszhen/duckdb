@@ -569,12 +569,20 @@ shared_ptr<PreparedStatementData> ClientContext::CreatePreparedStatementInternal
 		// measured, a limit of zero over an aggregate of a hundred-billion-row range scanned the range and
 		// hit the timeout, while the host answers immediately. An empty result is the plan it means. This
 		// leaves the constant-false filter case (WHERE 1=0) still to be handled.
-		if (logical_plan->type == LogicalOperatorType::LOGICAL_LIMIT) {
-			auto &limit = logical_plan->Cast<LogicalLimit>();
-			if (limit.limit_val.Type() == LimitNodeType::CONSTANT_VALUE &&
-			    limit.limit_val.GetConstantValue() == 0) {
-				logical_plan = make_uniq<LogicalEmptyResult>(std::move(logical_plan));
-			}
+		{
+			std::function<void(unique_ptr<LogicalOperator> &)> empty_limits = [&](unique_ptr<LogicalOperator> &node) {
+				for (auto &child : node->children) {
+					empty_limits(child);
+				}
+				if (node->type == LogicalOperatorType::LOGICAL_LIMIT) {
+					auto &limit = node->Cast<LogicalLimit>();
+					if (limit.limit_val.Type() == LimitNodeType::CONSTANT_VALUE &&
+					    limit.limit_val.GetConstantValue() == 0) {
+						node = make_uniq<LogicalEmptyResult>(std::move(node));
+					}
+				}
+			};
+			empty_limits(logical_plan);
 		}
 		// Redundant projections are removed here: they are what a LIMIT above a recursive CTE trips over
 		// in the physical planner, which treats a projection as batch-index capable and then picks a batch
