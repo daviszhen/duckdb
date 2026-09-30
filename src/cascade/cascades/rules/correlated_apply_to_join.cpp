@@ -71,6 +71,23 @@
 //     and AddJoinCondition's correlation-list heuristic puts one of them on the wrong side. The two
 //     children's bindings are known (the cross product's and the filter's), so the split can be done
 //     directly instead of heuristically - that is the next step, not a new structure.
+//   * Conclusion about the approach, after the delim-get form was built and measured: the enforcer
+//     goes to zero (enforced=0 on decorrelation.test) and then the statement *segfaults*. A delim
+//     join cannot be hand-built inside a memo rule: LogicalDelimGet and duplicate_eliminated_columns
+//     are only valid with the binder-side bookkeeping that FlattenDependentJoins sets up - the
+//     generated table index registered as a delim join, its delim_types, and the CTE/delim rewriter
+//     that fills the delim scan. None of that exists for a rule, and there is no way to invoke it on
+//     a memo subtree either, because operator-level Copy is unavailable (rules rebuild expressions,
+//     not operators).
+//
+//     What that means for identity (4) in this host: the correlated case cannot be finished by
+//     splicing a join in place of the Apply. The options that remain are (a) keep the Apply and let
+//     the enforcer decorrelate the chosen plan, which is what this rule's declinations already do
+//     and what the matrix has been verifying all along, or (b) run the host's own flattening on the
+//     sub-plan after the memo has chosen it, which needs the plan-taking API rather than a rule.
+//     Recording it rather than leaving it to be rediscovered: the earlier attempts (MARK join, semi
+//     without exposure, exposure by projection) each failed for their own reason, and this one fails
+//     for a structural one.
 //   * The same rule body spliced twice in one build and not at all in another (applied=4 but
 //     ParentsOf(consumer_group) empty) is *not* nondeterminism: the splice rewrites the parents'
 //     child ids, so after the first one the consumer group has no parents left and later
