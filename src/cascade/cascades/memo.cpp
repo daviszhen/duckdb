@@ -140,6 +140,13 @@ unique_ptr<GroupExpr> Memo::MakeExpr(unique_ptr<LogicalOperator> op, vector<Grou
 		}
 		break;
 	case LogicalOperatorType::LOGICAL_PROJECTION: {
+	// A projection computes expressions but resolves no outer reference on its own: whatever its
+	// input provides is visible above it, and the references it reads without resolving are what the
+	// required side has to say (that is what the outer_refs property is for).
+	if (!expr->children.empty() && expr->children[0] < groups.size() &&
+	    !groups[expr->children[0]]->exprs.empty()) {
+		expr->provides = groups[expr->children[0]]->exprs[0]->provides;
+	}
 		auto &projection = expr->op->Cast<LogicalProjection>();
 		for (idx_t i = 0; i < projection.expressions.size(); i++) {
 			expr->bindings.emplace_back(projection.table_index, ProjectionIndex(i));
