@@ -315,6 +315,14 @@ unique_ptr<LogicalOperator> ApplyDecorrelator::DecorrelateScalar(unique_ptr<Logi
 		if (node->type == LogicalOperatorType::LOGICAL_FILTER) {
 			right = ExtractCorrelatedPredicates(std::move(right), correlated, extracted);
 		}
+		// Two things this first version still owes, both measured: the corpus census after it landed
+		// shows that of the 19 files that used to stop here, one now passes and the rest moved to other
+		// failures - nine to the aggregate path's own refusals, the others to files with no "Not
+		// implemented" message at all, which is what a wrong answer looks like from here. The two likely
+		// causes: a scalar sub-query that can match several rows must not multiply the outer rows (ORCA
+		// keeps a scalar marker or groups the outer keys), and the join exposes left ++ right while the
+		// apply it replaces exposed left ++ the scalar column, so the projections above have to be
+		// rebuilt on top rather than inherited.
 		auto non_agg_join = make_uniq<LogicalComparisonJoin>(JoinType::LEFT);
 		non_agg_join->children.push_back(std::move(left));
 		non_agg_join->children.push_back(std::move(right));
