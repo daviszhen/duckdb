@@ -365,7 +365,7 @@ void CascadesOptimizer::RunTasks() {
 			if (task.input >= expr.children.size()) {
 				// Every child has a winner now, so this expression can be costed. Calling
 				// OptimizeExpr here would schedule the inputs again and loop forever.
-				FinishExpr(task.group, expr);
+				FinishExpr(task.group, expr, task.required);
 				break;
 			}
 			// Come back for the next input once this one has a winner.
@@ -456,7 +456,9 @@ void CascadesOptimizer::OptimizeExpr(GroupId group, GroupExpr &expr) {
 	FinishExpr(group, expr);
 }
 
-void CascadesOptimizer::FinishExpr(GroupId group, GroupExpr &expr) {
+void CascadesOptimizer::FinishExpr(GroupId group, GroupExpr &expr, const RequiredProperties &required) {
+	// Not consulted yet: the properties arrive here, the lookup and the winner filing use them next.
+	(void)required;
 	auto cost = CostOf(expr);
 	// The required side is derived per expression and filed with the winner (see CostOf and the
 	// SetWinner below), but it does not yet *travel*: this entry point takes only a group id, so the

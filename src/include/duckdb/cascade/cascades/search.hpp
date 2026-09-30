@@ -86,7 +86,9 @@ private:
 	void OptimizeExpr(GroupId group, GroupExpr &expr);
 	//! Cost the expression and make it the group's winner when it is the best so far. Reached
 	//! once every child has a winner - the terminal step of OptimizeInputs.
-	void FinishExpr(GroupId group, GroupExpr &expr);
+	//! The required properties come from the task that reached this group: the search descends by
+	//! scheduling tasks, so ORCA's optimization context travels with the job rather than being looked up.
+	void FinishExpr(GroupId group, GroupExpr &expr, const RequiredProperties &required = RequiredProperties());
 	void ApplyRule(GroupId group, GroupExpr &expr, CascadesRule &rule);
 	//! Cost an expression from its children's winners (they are already chosen).
 	double CostOf(GroupExpr &expr);
