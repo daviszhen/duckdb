@@ -127,11 +127,13 @@ namespace duckdb {
 // the rule enters Apply and leaves at FindMarkConsumer, which only recognises a mark read by a
 // FILTER - this statement reads it in the select list, i.e. through a PROJECTION.
 //
-// "Consumer B" - replacing the apply in its own group with a MARK join that keeps the mark index, so
-// the projection above still resolves - compiles and takes over from the enforcer, but regresses one
-// cascade matrix file deterministically (7/8 three times over; an earlier single run showed 8/8, so
-// that reading was false). Next step there: find that file and narrow the condition, for instance by
-// requiring the projected mark to be the only consumer, or by excluding the any/delim shapes.
+// "Consumer B" - replacing the apply in its own group with a MARK join that keeps the mark index,
+// so the projection above still resolves what it reads - compiles and takes the work over from the
+// enforcer, but it is a net loss: the subquery sweep goes from 33/88 to 32/88 while the cascade
+// matrix reads 7/8 three runs in a row. An earlier attempt of the same patch measured 8/8 ten
+// times per file and was taken as evidence it was harmless; that reading is not reproducible and is
+// not trusted. Lesson: judge such a change by the sweep (it is stable), not by the matrix alone.
+// Next step there: find which statement it costs and which it gains, then narrow the condition.
 //
 // The other route - exposing the correlated columns in the decorrelator (apply_decorrelation.cpp,
 // before the "cannot lift this correlation" guard) - was tried three times: on its own, with
