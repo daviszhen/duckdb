@@ -60,7 +60,7 @@ unique_ptr<GroupExpr> Memo::MakeExpr(unique_ptr<LogicalOperator> op, vector<Grou
 	if (expr->type == LogicalOperatorType::LOGICAL_DEPENDENT_JOIN) {
 		auto &dependent = expr->op->Cast<LogicalDependentJoin>();
 		for (auto &column : dependent.correlated_columns) {
-			expr->provides.push_back(column.binding);
+			expr->outer_refs.push_back(column.binding);
 		}
 	}
 	// The bindings have to be derived, not asked for: the children are group ids now. Only what a

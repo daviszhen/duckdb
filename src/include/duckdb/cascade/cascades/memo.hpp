@@ -70,6 +70,10 @@ struct OptimizationContext {
 struct GroupExpr {
 	//! The outer references this expression resolves inside itself (ORCA's derived property).
 	vector<ColumnBinding> provides;
+	//! The outer references this expression reads without resolving them - ORCA's required side for
+	//! a single expression. An Apply fills it from its correlated columns; nothing above it can
+	//! resolve them, so a rule reads this to see what still has to be brought in.
+	vector<ColumnBinding> outer_refs;
 	LogicalOperatorType type = LogicalOperatorType::LOGICAL_INVALID;
 	//! The operator itself, with `children` empty - they live in `children` below.
 	unique_ptr<LogicalOperator> op;
