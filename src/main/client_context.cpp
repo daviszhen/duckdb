@@ -1,3 +1,4 @@
+#include "duckdb/optimizer/filter_pushdown.hpp"
 #include "duckdb/optimizer/join_order/join_order_optimizer.hpp"
 #include "duckdb/optimizer/cte_inlining.hpp"
 #include "duckdb/optimizer/empty_result_pullup.hpp"
@@ -563,6 +564,23 @@ shared_ptr<PreparedStatementData> ClientContext::CreatePreparedStatementInternal
 		// binder's cross products - measured on the join-heavy TPC-H queries, where the host produced two
 		// hash joins and this path two cross products, with wrong results. The acceptance criteria forbid
 		// cross products outright.
+		// Only when the plan still contains a cross product: the join ordering phase turns cross products
+		// plus filters into joins and needs the predicates where it expects them, but running this
+		// unconditionally changed the plans the matrix asserts on. Plans without cross products are left
+		// exactly as the search produced them.
+		{
+			bool has_cross = false;
+			std::function<void(LogicalOperator &)> scan_cross = [&](LogicalOperator &op) {
+				if (op.type == LogicalOperatorType::LOGICAL_CROSS_PRODUCT) { has_cross = true; }
+				for (auto &child : op.children) { scan_cross(*child); }
+			};
+			scan_cross(*logical_plan);
+			if (has_cross) {
+				Optimizer filter_pushdown_owner(*logical_planner.binder, *this);
+				FilterPushdown filter_pushdown(filter_pushdown_owner, false);
+				logical_plan = filter_pushdown.Rewrite(std::move(logical_plan));
+			}
+		}
 		{
 			JoinOrderOptimizer join_order_optimizer(*this);
 			logical_plan = join_order_optimizer.Optimize(std::move(logical_plan));
