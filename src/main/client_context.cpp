@@ -1,3 +1,5 @@
+#include "duckdb/planner/operator/logical_empty_result.hpp"
+#include "duckdb/planner/operator/logical_limit.hpp"
 #include "duckdb/optimizer/remove_unused_columns.hpp"
 #include "duckdb/optimizer/optimizer.hpp"
 #include "duckdb/optimizer/statistics_propagator.hpp"
@@ -552,6 +554,17 @@ shared_ptr<PreparedStatementData> ClientContext::CreatePreparedStatementInternal
 				// correlation guards and catch only that, or decide from the plan before calling in.
 				CascadesOptimizer cascades(*logical_planner.binder, *this);
 				logical_plan = cascades.Optimize(std::move(logical_plan));
+		// A limit of zero does not need its input at all, and without this the plan was executed in full:
+		// measured, a limit of zero over an aggregate of a hundred-billion-row range scanned the range and
+		// hit the timeout, while the host answers immediately. An empty result is the plan it means. This
+		// leaves the constant-false filter case (WHERE 1=0) still to be handled.
+		if (logical_plan->type == LogicalOperatorType::LOGICAL_LIMIT) {
+			auto &limit = logical_plan->Cast<LogicalLimit>();
+			if (limit.limit_val.Type() == LimitNodeType::CONSTANT_VALUE &&
+			    limit.limit_val.GetConstantValue() == 0) {
+				logical_plan = make_uniq<LogicalEmptyResult>(std::move(logical_plan));
+			}
+		}
 		// Redundant projections are removed here: they are what a LIMIT above a recursive CTE trips over
 		// in the physical planner, which treats a projection as batch-index capable and then picks a batch
 		// limit that has to materialise batches. The host removes them too. Measured: this fixes one CTE
