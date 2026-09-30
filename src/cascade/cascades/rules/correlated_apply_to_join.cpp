@@ -168,6 +168,117 @@ bool PredicatesPairBothSides(GroupExpr &filter, const vector<ColumnBinding> &lef
 	return true;
 }
 
+//! Point a comparison at one child per side. The two inputs' bindings are known (measured for the
+//! EXISTS shape: left child {#[0.0]}, filter child {#[7.0]}, predicate reading 7.0 on its left and
+//! 0.0 on its right), so the sides are decided here rather than by a correlation-list heuristic -
+//! that heuristic put an inner column on the left input and left a side empty, which is where the
+//! NULL dereference inside the join-condition helper came from. Anything that cannot be put one side
+//! per child is refused, and refused before the memo is touched.
+bool OrientCondition(Expression &condition, const vector<ColumnBinding> &left_side,
+                     const vector<ColumnBinding> &right_side) {
+	if (!BoundComparisonExpression::IsComparison(condition) ||
+	    condition.GetExpressionClass() != ExpressionClass::BOUND_FUNCTION) {
+		return false;
+	}
+	auto &comparison = condition.Cast<BoundFunctionExpression>();
+	auto &lhs = BoundComparisonExpression::LeftMutable(comparison);
+	auto &rhs = BoundComparisonExpression::RightMutable(comparison);
+	auto left_only = [&](const Expression &expr) {
+		return ApplyReadsBindings(expr, left_side) && !ApplyReadsBindings(expr, right_side);
+	};
+	auto right_only = [&](const Expression &expr) {
+		return ApplyReadsBindings(expr, right_side) && !ApplyReadsBindings(expr, left_side);
+	};
+	if (left_only(*lhs) && right_only(*rhs)) {
+		return true;
+	}
+	if (right_only(*lhs) && left_only(*rhs)) {
+		auto moved = std::move(lhs);
+		lhs = std::move(rhs);
+		rhs = std::move(moved);
+		BoundComparisonExpression::FlipType(comparison);
+		return true;
+	}
+	return false;
+}
+
+//! Phase one, read-only: is every correlated reference in this sub-tree inside a filter predicate,
+//! and is each such predicate orientable against the two inputs? Those can become join conditions - a
+//! condition is evaluated over both children, so it can name the outer columns - while a reference
+//! anywhere else cannot, because a rule has no way to carry a column to the right side (a hand-built
+//! delimiter segfaults, measured). Checking before moving keeps a declined rewrite from touching the
+//! memo: an earlier version extracted as it walked and left the sub-tree without its predicates when
+//! it then declined.
+bool LiftableCorrelatedInMemo(Memo &memo, GroupId group, const CorrelatedColumns &correlated,
+                              const vector<ColumnBinding> &left_side, const vector<ColumnBinding> &right_side,
+                              unordered_set<GroupId> &visited) {
+	if (!visited.insert(group).second) {
+		return true;
+	}
+	bool liftable = true;
+	for (auto &expr : memo.GetGroup(group).exprs) {
+		if (!expr->op) {
+			continue;
+		}
+		for (auto &expression : expr->op->expressions) {
+			bool reads = false;
+			ExpressionIterator::VisitExpression<BoundColumnRefExpression>(
+			    *expression, [&](const BoundColumnRefExpression &colref) {
+				    for (auto &entry : correlated) {
+					    if (entry.binding == colref.Binding()) {
+						    reads = true;
+					    }
+				    }
+			    });
+			if (!reads) {
+				continue;
+			}
+			if (expr->type != LogicalOperatorType::LOGICAL_FILTER) {
+				liftable = false;
+				continue;
+			}
+			auto copy = expression->Copy();
+			if (!OrientCondition(*copy, left_side, right_side)) {
+				liftable = false;
+			}
+		}
+		for (auto child : expr->children) {
+			if (!LiftableCorrelatedInMemo(memo, child, correlated, left_side, right_side, visited)) {
+				liftable = false;
+			}
+		}
+	}
+	return liftable;
+}
+
+//! Phase two: move them. A filter's columns pass through, so one left with fewer predicates - or with
+//! none - changes nothing about the columns its group exposes.
+void MoveCorrelatedInMemo(Memo &memo, GroupId group, const CorrelatedColumns &correlated,
+                          vector<unique_ptr<Expression>> &lifted, unordered_set<GroupId> &visited) {
+	if (!visited.insert(group).second) {
+		return;
+	}
+	for (auto &expr : memo.GetGroup(group).exprs) {
+		if (!expr->op) {
+			continue;
+		}
+		if (expr->type == LogicalOperatorType::LOGICAL_FILTER && !expr->op->expressions.empty()) {
+			vector<unique_ptr<Expression>> local;
+			for (auto &predicate : expr->op->expressions) {
+				if (ReferencesCorrelation(*predicate, correlated)) {
+					lifted.push_back(std::move(predicate));
+				} else {
+					local.push_back(std::move(predicate));
+				}
+			}
+			expr->op->expressions = std::move(local);
+		}
+		for (auto child : expr->children) {
+			MoveCorrelatedInMemo(memo, child, correlated, lifted, visited);
+		}
+	}
+}
+
 //! Does anything in this sub-tree read one of the correlated columns? The predicates that move into
 //! the join condition are read from the filter itself, not from its child, so a reference below the
 //! filter is one the condition cannot account for - and carrying it to the right side needs the
@@ -261,6 +372,9 @@ CascadesRulePromise CorrelatedApplyToJoin::Promise(CascadesOptimizer &optimizer,
 }
 
 bool CorrelatedApplyToJoin::Apply(CascadesOptimizer &optimizer, GroupId group, GroupExpr &expr) {
+	if (!expr.op) {
+		return false;
+	}
 	GroupExpr *projection = nullptr;
 	GroupExpr *filter = nullptr;
 	if (!FindCorrelatedShape(optimizer, expr, projection, filter)) {
@@ -268,6 +382,10 @@ bool CorrelatedApplyToJoin::Apply(CascadesOptimizer &optimizer, GroupId group, G
 	}
 	auto &memo = optimizer.GetMemo();
 	auto &dependent = expr.op->Cast<LogicalDependentJoin>();
+	auto &filter_child = memo.GetGroup(filter->children[0]);
+	if (filter_child.exprs.empty()) {
+		return false;
+	}
 	GroupId consumer_group = INVALID_GROUP_ID;
 	GroupExpr *consumer = nullptr;
 	bool negated = false;
@@ -278,35 +396,80 @@ bool CorrelatedApplyToJoin::Apply(CascadesOptimizer &optimizer, GroupId group, G
 	if (consumers.empty()) {
 		return false;
 	}
-	// Everything the correlation needs has to live in the predicates that move into the condition. A
-	// reference below the filter would have to be carried to the right side, and carrying it needs
-	// the delim machinery a rule cannot build - so such a shape keeps the Apply and the enforcer,
-	// which is the safe answer rather than a plan that cannot bind.
-	{
-		unordered_set<GroupId> visited;
-		if (SubtreeReadsCorrelated(memo, filter->children[0], dependent.correlated_columns, visited)) {
+	if (CascadeConfig::PrintPlans()) {
+		Printer::Print("--- cascade(cascades) STEP sides");
+	}
+	auto &left_group = memo.GetGroup(expr.children[0]);
+	if (left_group.exprs.empty()) {
+		return false;
+	}
+	auto &left_side = left_group.exprs[0]->bindings;
+	auto &right_side = filter_child.exprs[0]->bindings;
+
+	// Collect and orient every condition first; nothing below runs unless every reason to decline has
+	// been ruled out, so a refused rewrite leaves the memo exactly as it was.
+	if (CascadeConfig::PrintPlans()) {
+		Printer::Print("--- cascade(cascades) STEP collect");
+	}
+	vector<unique_ptr<Expression>> conditioned;
+	for (auto &predicate : filter->op->expressions) {
+		auto copy = predicate->Copy();
+		if (!OrientCondition(*copy, left_side, right_side)) {
 			if (CascadeConfig::PrintPlans()) {
 				Printer::Print("--- cascade(cascades) rule " + string(Name()) +
-				               ": declined, the sub-query reads the correlation below the lifted predicates");
+				               ": declined, a predicate cannot be put one side per input");
+			}
+			return false;
+		}
+		conditioned.push_back(std::move(copy));
+	}
+	if (CascadeConfig::PrintPlans()) {
+		Printer::Print("--- cascade(cascades) STEP check-liftable");
+	}
+	{
+		unordered_set<GroupId> visited;
+		if (!LiftableCorrelatedInMemo(memo, filter->children[0], dependent.correlated_columns, left_side, right_side,
+		                              visited)) {
+			if (CascadeConfig::PrintPlans()) {
+				Printer::Print("--- cascade(cascades) rule " + string(Name()) +
+				               ": declined, the correlation is read where it cannot be lifted from");
 			}
 			return false;
 		}
 	}
+	if (CascadeConfig::PrintPlans()) {
+		Printer::Print("--- cascade(cascades) STEP move");
+	}
+	{
+		unordered_set<GroupId> visited;
+		MoveCorrelatedInMemo(memo, filter->children[0], dependent.correlated_columns, conditioned, visited);
+	}
+	if (CascadeConfig::PrintPlans()) {
+		Printer::Print("--- cascade(cascades) STEP reorient");
+	}
+	for (auto &condition : conditioned) {
+		if (!OrientCondition(*condition, left_side, right_side)) {
+			return false;
+		}
+	}
 
-	// A plain semi or anti join is enough then: the correlation lives entirely in the condition,
-	// which is evaluated over both of the join's children.
+	if (CascadeConfig::PrintPlans()) {
+		Printer::Print("--- cascade(cascades) STEP build-join");
+	}
 	auto join = make_uniq<LogicalComparisonJoin>(negated ? JoinType::ANTI : JoinType::SEMI);
-	for (auto &predicate : filter->op->expressions) {
-		AddJoinCondition(*join, predicate->Copy(), dependent.correlated_columns, false);
+	for (auto &condition : conditioned) {
+		auto &comparison = condition->Cast<BoundFunctionExpression>();
+		auto &lhs = BoundComparisonExpression::LeftMutable(comparison);
+		auto &rhs = BoundComparisonExpression::RightMutable(comparison);
+		join->conditions.emplace_back(std::move(lhs), std::move(rhs), comparison.GetExpressionType());
 	}
 	join->estimated_cardinality = expr.op->estimated_cardinality;
 	join->has_estimated_cardinality = expr.op->has_estimated_cardinality;
-
 	auto join_group = memo.AddGroup();
 	optimizer.AddExpression(join_group, memo.MakeExpr(std::move(join), {expr.children[0], filter->children[0]}));
-
-	// Splice the absorbed pair out: whoever read the mark filter's columns now reads the join, and
-	// the mark column disappears with the expression that read it.
+	if (CascadeConfig::PrintPlans()) {
+		Printer::Print("--- cascade(cascades) STEP splice");
+	}
 	for (auto parent : consumers) {
 		bool touched = false;
 		for (auto &candidate : memo.GetGroup(parent).exprs) {

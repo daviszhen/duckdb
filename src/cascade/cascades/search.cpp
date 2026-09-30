@@ -342,6 +342,9 @@ void CascadesOptimizer::ExploreGroup(GroupId group) {
 	// group, which is what terminates it.
 	for (idx_t i = 0; i < data.exprs.size(); i++) {
 		for (auto &rule : rules) {
+			if (!data.exprs[i]->op) {
+				continue;
+			}
 			if (rule->Kind() == CascadesRuleKind::IMPLEMENTATION) {
 				// No physical rules in stage 1: a logical expression is its own chosen plan.
 				continue;
