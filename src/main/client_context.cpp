@@ -1,3 +1,5 @@
+#include "duckdb/optimizer/optimizer.hpp"
+#include "duckdb/optimizer/statistics_propagator.hpp"
 #include "duckdb/main/client_context.hpp"
 
 #include "duckdb/cascade/cascade_config.hpp"
@@ -549,6 +551,32 @@ shared_ptr<PreparedStatementData> ClientContext::CreatePreparedStatementInternal
 				// correlation guards and catch only that, or decide from the plan before calling in.
 				CascadesOptimizer cascades(*logical_planner.binder, *this);
 				logical_plan = cascades.Optimize(std::move(logical_plan));
+		// Statements whose return type depends on statistics fail to bind without the propagator -
+		// measured as "Could not retrieve required statistics" for BITSTRING_AGG, one window file. Running
+		// it in full after the memo fixed that file but perturbed the plans the matrix asserts on; running
+		// the filter-simplification half alone was a straight trade - one window file gained, one CTE file
+		// lost - so it is skipped whenever the plan contains a CTE and those plans are left exactly as the
+		// search produced them.
+		{
+			bool has_cte = false;
+			std::function<void(LogicalOperator &)> scan_ctes = [&](LogicalOperator &op) {
+				if (op.type == LogicalOperatorType::LOGICAL_CTE_REF ||
+				    op.type == LogicalOperatorType::LOGICAL_MATERIALIZED_CTE ||
+				    op.type == LogicalOperatorType::LOGICAL_RECURSIVE_CTE) {
+					has_cte = true;
+				}
+				for (auto &child : op.children) {
+					scan_ctes(*child);
+				}
+			};
+			scan_ctes(*logical_plan);
+			if (!has_cte) {
+				Optimizer statistics_owner(*logical_planner.binder, *this);
+				StatisticsPropagator propagator(statistics_owner, *logical_plan,
+				                                StatisticsPropagationMode::FILTER_SIMPLIFICATION);
+				propagator.PropagateStatistics(logical_plan);
+			}
+		}
 			} else if (CascadeConfig::UseCascadeOptimizer()) {
 				CascadeOptimizer cascade(*logical_planner.binder, *this);
 				logical_plan = cascade.Optimize(std::move(logical_plan));
