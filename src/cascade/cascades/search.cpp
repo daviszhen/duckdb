@@ -81,6 +81,49 @@ static bool PlanHasApply(LogicalOperator &op) {
 	return false;
 }
 
+namespace {
+
+//! Replace a MARK join's non-comparison condition with a constant comparison. The physical MARK
+//! implementation needs a left/right comparison and fails to plan otherwise, and a plan the memo
+//! passed through can carry a condition that is a plain expression (measured: the host plans the same
+//! statement with `cmp=40` and no column references - a constant comparison - while this path carried
+//! one that is not a comparison at all).
+//!
+//! MARK only: the semi and anti joins the rules build carry conditions that mean something, and
+//! replacing those broke two matrix files (measured). A MARK join with such a condition, on the other
+//! hand, is a stream the rules declined, so the condition it holds is a filter inside the right
+//! sub-tree already - which is where it belongs, and the join only has to say "has a row". The whole
+//! condition is replaced, not rewritten: the single-expression form has no accessor for its
+//! expression.
+void NormalizeMarkJoinConditions(LogicalOperator &op) {
+	for (auto &child : op.children) {
+		NormalizeMarkJoinConditions(*child);
+	}
+	auto is_join = op.type == LogicalOperatorType::LOGICAL_COMPARISON_JOIN ||
+	               op.type == LogicalOperatorType::LOGICAL_DELIM_JOIN ||
+	               op.type == LogicalOperatorType::LOGICAL_ANY_JOIN;
+	if (!is_join) {
+		return;
+	}
+	auto &join = op.Cast<LogicalComparisonJoin>();
+	if (join.join_type != JoinType::MARK) {
+		return;
+	}
+	for (auto &condition : join.conditions) {
+		if (condition.IsComparison()) {
+			continue;
+		}
+		if (CascadeConfig::PrintPlans()) {
+			Printer::Print("--- cascade(cascades) replacing a non-comparison MARK condition");
+		}
+		condition = JoinCondition(make_uniq<BoundConstantExpression>(Value::BOOLEAN(true)),
+		                          make_uniq<BoundConstantExpression>(Value::BOOLEAN(true)),
+		                          ExpressionType::COMPARE_NOT_DISTINCT_FROM);
+	}
+}
+
+} // namespace
+
 unique_ptr<LogicalOperator> CascadesOptimizer::Optimize(unique_ptr<LogicalOperator> plan) {
 	if (!plan) {
 		return plan;
@@ -229,6 +272,7 @@ unique_ptr<LogicalOperator> CascadesOptimizer::Optimize(unique_ptr<LogicalOperat
 		result = decorrelator.Decorrelate(std::move(result));
 		result = SimplifyMarkerJoins(std::move(result));
 	}
+	NormalizeMarkJoinConditions(*result);
 	result->ResolveOperatorTypes();
 	if (auto self_test = CascadeConfig::MemoSelfTest()) {
 		// The plan is reconstructed first, so the injected corruption cannot affect the answer -
