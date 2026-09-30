@@ -52,6 +52,16 @@ unique_ptr<GroupExpr> Memo::MakeExpr(unique_ptr<LogicalOperator> op, vector<Grou
 	expr->op = std::move(op);
 	expr->op->children.clear();
 	expr->children = std::move(children);
+	//! ORCA's derived property: an Apply resolves exactly the outer references it was built to
+	//! consume, so those are what it provides to whatever needs them further up. Placed here, right
+	//! after the children are taken over and before the switch, because `op` has been moved into
+	//! expr->op by now and the switch is about bindings, not properties.
+	if (expr->type == LogicalOperatorType::LOGICAL_DEPENDENT_JOIN) {
+		auto &dependent = expr->op->Cast<LogicalDependentJoin>();
+		for (auto &column : dependent.correlated_columns) {
+			expr->provides.push_back(column.binding);
+		}
+	}
 	// The bindings have to be derived, not asked for: the children are group ids now. Only what a
 	// rule can actually build is covered - a pass-through operator keeps its child's columns, a
 	// projection and an aggregate generate their own - and anything else is left empty, which
