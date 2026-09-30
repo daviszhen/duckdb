@@ -1,3 +1,4 @@
+#include "duckdb/optimizer/remove_unused_columns.hpp"
 #include "duckdb/optimizer/optimizer.hpp"
 #include "duckdb/optimizer/statistics_propagator.hpp"
 #include "duckdb/main/client_context.hpp"
@@ -551,6 +552,15 @@ shared_ptr<PreparedStatementData> ClientContext::CreatePreparedStatementInternal
 				// correlation guards and catch only that, or decide from the plan before calling in.
 				CascadesOptimizer cascades(*logical_planner.binder, *this);
 				logical_plan = cascades.Optimize(std::move(logical_plan));
+		// Redundant projections are removed here: they are what a LIMIT above a recursive CTE trips over
+		// in the physical planner, which treats a projection as batch-index capable and then picks a batch
+		// limit that has to materialise batches. The host removes them too. Measured: this fixes one CTE
+		// file, and it does NOT yet fix the unbounded-recursion reproducer below - that stays open.
+		{
+			Optimizer unused_owner(*logical_planner.binder, *this);
+			RemoveUnusedColumns unused(unused_owner);
+			unused.VisitOperator(logical_plan);
+		}
 		// Statements whose return type depends on statistics fail to bind without the propagator -
 		// measured as "Could not retrieve required statistics" for BITSTRING_AGG, one window file. Running
 		// it in full after the memo fixed that file but perturbed the plans the matrix asserts on; running
