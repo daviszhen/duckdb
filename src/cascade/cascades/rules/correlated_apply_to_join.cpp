@@ -39,6 +39,15 @@
 //     and the re-pointed parents against what the children expose - and neither refuses this case,
 //     which is consistent with the reference being inside the right sub-tree rather than at either
 //     of those places.
+//   * The next thing that has to exist before the splice can work: the right side needs a
+//     projection that passes the filter's child's columns through *and* appends the correlated
+//     ones, and the conditions then read that projection. Building it needs the *types* of the
+//     pass-through columns, and the memo only records bindings (GroupExpr::bindings) - so a rule
+//     cannot construct that projection today. Recording the types next to the bindings when a
+//     group expression is built is the enabling change, and it is a small one. A DELIM join
+//     carrying duplicate_eliminated_columns was also tried and is not enough on its own: the
+//     columns have to be exposed by the right side's projection, which is the part that needs the
+//     types.
 //   * The same rule body spliced twice in one build and not at all in another (applied=4 but
 //     ParentsOf(consumer_group) empty) is *not* nondeterminism: the splice rewrites the parents'
 //     child ids, so after the first one the consumer group has no parents left and later
