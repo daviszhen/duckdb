@@ -1,3 +1,4 @@
+#include "duckdb/optimizer/cte_inlining.hpp"
 #include "duckdb/optimizer/empty_result_pullup.hpp"
 #include "duckdb/optimizer/constant_or_null_simplification.hpp"
 #include "duckdb/planner/operator/logical_empty_result.hpp"
@@ -556,6 +557,14 @@ shared_ptr<PreparedStatementData> ClientContext::CreatePreparedStatementInternal
 				// correlation guards and catch only that, or decide from the plan before calling in.
 				CascadesOptimizer cascades(*logical_planner.binder, *this);
 				logical_plan = cascades.Optimize(std::move(logical_plan));
+		// A materialised CTE cannot be stopped by the limit above it: the recursion runs to completion before
+		// the limit sees a row, which is why a recursive CTE with a selective filter never finished here
+		// while the host answers immediately. Inlining it removes the materialisation.
+		{
+			Optimizer cte_inlining_owner(*logical_planner.binder, *this);
+			CTEInlining cte_inlining(cte_inlining_owner);
+			logical_plan = cte_inlining.Optimize(std::move(logical_plan));
+		}
 		// The companion case: a filter that is constant false means the same thing as a limit of zero, and
 		// the same test file asserts it. Measured, it also scanned a hundred-billion-row range instead of
 		// answering immediately; these passes turn it into an empty result and lift that up.
