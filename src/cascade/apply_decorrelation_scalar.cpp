@@ -323,6 +323,14 @@ unique_ptr<LogicalOperator> ApplyDecorrelator::DecorrelateScalar(unique_ptr<Logi
 		// keeps a scalar marker or groups the outer keys), and the join exposes left ++ right while the
 		// apply it replaces exposed left ++ the scalar column, so the projections above have to be
 		// rebuilt on top rather than inherited.
+		// Two repair attempts failed, so they are recorded instead of retried. Both tried to fix the output
+		// columns after the fact: rebuilding a projection of left-columns-then-the-right's-last-binding on
+		// top of the join. That compile-and-runs version dropped the sweep back to 33/88 and the binding
+		// error stayed, which says the scalar column is not simply the right side's last binding.
+		// The shape that should work avoids the problem instead: do not move `right` (the projection chain
+		// plus its input) into the join at all. Join `left` with the node below the projections, then hang
+		// the collected `projections` back on top - that is exactly the tree the apply had, with the join in
+		// place of the apply, so the columns above bind for the same reason they did before.
 		auto non_agg_join = make_uniq<LogicalComparisonJoin>(JoinType::LEFT);
 		non_agg_join->children.push_back(std::move(left));
 		non_agg_join->children.push_back(std::move(right));
