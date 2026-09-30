@@ -220,7 +220,8 @@ bool FindCorrelatedShape(CascadesOptimizer &optimizer, GroupExpr &expr, GroupExp
 }
 
 bool ReplacesWithCorrelatedJoin(JoinType type) {
-	return type == JoinType::SEMI || type == JoinType::ANTI || type == JoinType::MARK;
+	// ORCA's ExfInnerApply2InnerJoin belongs in this family too: a correlated inner apply is a join.
+	return type == JoinType::SEMI || type == JoinType::ANTI || type == JoinType::MARK || type == JoinType::INNER;
 }
 
 bool PredicatesPairBothSides(GroupExpr &filter, const vector<ColumnBinding> &left_bindings,
