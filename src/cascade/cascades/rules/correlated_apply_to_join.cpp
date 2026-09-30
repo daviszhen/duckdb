@@ -216,6 +216,14 @@ namespace duckdb {
 // What is new since those attempts: the memo now carries the outer references on both sides (derived,
 // put on the task, used as the optimization context). A rule can therefore decide from the property
 // whether the right sub-tree still reads outer columns, instead of guessing from the shape.
+//
+// One more negative result, so it is not retried: disabling the two refusals in the scalar
+// decorrelator (identity (8) and the main scalar path) changes nothing at all - the sweep stays at
+// 33/88 and the matrix stays 8/8. The refusal is not the obstacle; the rewrite behind it cannot do
+// the job either (the correlation stays inside the sub-tree, so the join it builds is wrong).
+// Local changes have now been ruled out in four places - the decorrelator's exposure, the mark
+// consumer, the rule's inner path and the refusals - and every one of them either did nothing or
+// produced a worse plan. The three-piece rewrite is the work, not an adjustment to what is there.
 bool CorrelatedApplyToJoin::Matches(GroupExpr &expr) {
 	return expr.type == LogicalOperatorType::LOGICAL_DEPENDENT_JOIN && expr.children.size() == 2;
 }
