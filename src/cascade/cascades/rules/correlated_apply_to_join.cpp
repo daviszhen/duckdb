@@ -27,6 +27,18 @@
 //     decline this rule needs. In memo terms that is: rebuild the right-side projection with the
 //     needed columns appended, map the condition's bindings onto the new ones, and refuse when the
 //     group below the projection does not expose them.
+//   * Where the missing reference actually lives, established by the last attempt: the available set
+//     at the failure is the *inner* table and the reference is the *outer* table, so the expression
+//     that fails to bind sits below the join's right child - the right sub-tree still names the
+//     outer columns at their original indices, because in the unflattened plan the Apply's machinery
+//     resolved them. DuckDB's flattened plan for the same query shows what has to be built instead:
+//     the right side carries a projection that *exposes the correlated copies* (`Projection(1,
+//     #[7.0])` for the self-correlated case), and the condition reads those. So the rewrite is not
+//     finished by splicing: the right child has to be a projection that carries the correlated
+//     columns, and the conditions have to read them there. Two guards were tried - the conditions
+//     and the re-pointed parents against what the children expose - and neither refuses this case,
+//     which is consistent with the reference being inside the right sub-tree rather than at either
+//     of those places.
 //   * The same rule body spliced twice in one build and not at all in another (applied=4 but
 //     ParentsOf(consumer_group) empty) is *not* nondeterminism: the splice rewrites the parents'
 //     child ids, so after the first one the consumer group has no parents left and later
