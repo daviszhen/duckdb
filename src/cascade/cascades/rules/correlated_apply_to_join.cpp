@@ -196,6 +196,26 @@ namespace duckdb {
 // replacement exposes what the Apply exposed, replace the expression in its own group; if it changes
 // the columns, its parents have to be rebound as well - the session's own measurements are blunt about
 // that (a rule that widened a sub-tree without rebinding its parents cost three matrix files).
+// The inner-apply family, and why it is not a shape tweak (measured over three attempts):
+//
+//   * admitting JoinType::INNER to the family changes nothing on its own - the rule is tried and then
+//     declined, because the apply path expects the consumer a semi/anti/mark apply has;
+//   * giving it an inner path (replace the apply in its own group, no consumer) makes the rule fire -
+//     the enforcer stops being reached - but the plans it builds are wrong: one lateral statement
+//     segfaults, and the matrix loses a file in three runs out of three. Pointing the replacement's
+//     right side at the projection's child instead of the apply's second child does not help.
+//
+// The reason is the semantics, not the plumbing. For a semi, anti or mark apply the correlated
+// predicate can become the join condition. An INNER apply is a lateral join: its right side *reads*
+// the outer columns and has to keep reading them, so the rewrite has to carry those columns into the
+// right sub-tree - exposure, a rewrite of every reference inside it (join conditions included) and a
+// rebinding of the parents - which is the same three-piece set the decorrelator's exposure attempts
+// needed. A rule that does not have all three must keep refusing rather than emit a plan that cannot
+// bind; the segfault above is what the middle state looks like.
+//
+// What is new since those attempts: the memo now carries the outer references on both sides (derived,
+// put on the task, used as the optimization context). A rule can therefore decide from the property
+// whether the right sub-tree still reads outer columns, instead of guessing from the shape.
 bool CorrelatedApplyToJoin::Matches(GroupExpr &expr) {
 	return expr.type == LogicalOperatorType::LOGICAL_DEPENDENT_JOIN && expr.children.size() == 2;
 }
