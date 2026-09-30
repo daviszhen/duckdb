@@ -1,3 +1,4 @@
+#include "duckdb/optimizer/projection_pullup.hpp"
 #include "duckdb/optimizer/optimizer.hpp"
 #include "duckdb/optimizer/statistics_propagator.hpp"
 #include "duckdb/main/client_context.hpp"
@@ -576,6 +577,16 @@ shared_ptr<PreparedStatementData> ClientContext::CreatePreparedStatementInternal
 				                                StatisticsPropagationMode::FILTER_SIMPLIFICATION);
 				propagator.PropagateStatistics(logical_plan);
 			}
+		}
+		// A projection left between a LIMIT and the filter below it makes the physical planner treat
+		// the source as batch-index capable, and it then picks a batch limit, which has to materialise
+		// batches - fatal when the source is an unbounded recursive CTE. The host pulls that projection
+		// up; measured, that extra projection is the whole difference between "Streaming Limit" and a
+		// plain "Limit", and between 0.11s and never finishing on a one-line reproducer.
+		{
+			Optimizer pullup_owner(*logical_planner.binder, *this);
+			ProjectionPullup projection_pullup(pullup_owner, logical_plan);
+			projection_pullup.Optimize(logical_plan);
 		}
 			} else if (CascadeConfig::UseCascadeOptimizer()) {
 				CascadeOptimizer cascade(*logical_planner.binder, *this);
