@@ -9,11 +9,14 @@
 //!   EXformId 19 CXformSelect2Apply                 -> an Apply has its two inputs
 //!   EXformId 20 CXformProject2Apply                -> (same, the Apply the binder built)
 //!   EXformId 21 CXformGbAgg2Apply                  -> (same)
+//!   EXformId 14 CXformSelect2IndexGet              -> the get has an access path bound
+//!   EXformId 15 CXformSelect2DynamicIndexGet       -> (same)
+//!   EXformId 16 CXformSelect2PartialDynamicIndexGet-> (same)
 //! Kind: EXPLORATION. Apply changes nothing by design.
 #pragma once
 #include "duckdb/cascade/cascades/rule.hpp"
 namespace duckdb {
-enum class BinderSideInvariant : uint8_t { HAS_EXPRESSIONS, NO_SUBQUERY, TWO_INPUTS };
+enum class BinderSideInvariant : uint8_t { HAS_EXPRESSIONS, NO_SUBQUERY, TWO_INPUTS, GET_HAS_ACCESS_PATH };
 class BinderSideInvariantRule : public CascadesRule {
 public:
 	BinderSideInvariantRule(const char *name, LogicalOperatorType watched, BinderSideInvariant invariant)

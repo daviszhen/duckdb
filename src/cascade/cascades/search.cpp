@@ -84,6 +84,15 @@ void CascadesOptimizer::RegisterRules() {
 	                                           BinderSideInvariant::TWO_INPUTS));
 	AddRule(make_uniq<BinderSideInvariantRule>("gbagg_2_apply", LogicalOperatorType::LOGICAL_DEPENDENT_JOIN,
 	                                           BinderSideInvariant::TWO_INPUTS));
+	// ORCA EXformIds 14, 15, 16: the selection reaching an index (or dynamic index) get, migrated as
+	// the invariant that such a get has its access path bound.
+	AddRule(make_uniq<BinderSideInvariantRule>("select_2_index_get", LogicalOperatorType::LOGICAL_GET,
+	                                           BinderSideInvariant::GET_HAS_ACCESS_PATH));
+	AddRule(make_uniq<BinderSideInvariantRule>("select_2_dynamic_index_get", LogicalOperatorType::LOGICAL_GET,
+	                                           BinderSideInvariant::GET_HAS_ACCESS_PATH));
+	AddRule(make_uniq<BinderSideInvariantRule>("select_2_partial_dynamic_index_get",
+	                                           LogicalOperatorType::LOGICAL_GET,
+	                                           BinderSideInvariant::GET_HAS_ACCESS_PATH));
 	// Section 2, identity (3): a predicate reading only the sub-query's own columns moves above
 	// the Apply.
 	AddRule(make_uniq<LiftLocalPredicate>());

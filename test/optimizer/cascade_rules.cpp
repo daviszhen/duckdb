@@ -83,6 +83,14 @@ const RuleContract RULE_CONTRACTS[] = {
      2, true, LogicalOperatorType::LOGICAL_ORDER_BY},
     {"gbagg_2_apply", CascadesRuleKind::EXPLORATION, LogicalOperatorType::LOGICAL_DEPENDENT_JOIN,
      2, true, LogicalOperatorType::LOGICAL_DISTINCT},
+    // ORCA EXformIds 14, 15, 16: the selection reaching an index get, checked as the access path the
+    // get has to carry.
+    {"select_2_index_get", CascadesRuleKind::EXPLORATION, LogicalOperatorType::LOGICAL_GET,
+     0, true, LogicalOperatorType::LOGICAL_DISTINCT},
+    {"select_2_dynamic_index_get", CascadesRuleKind::EXPLORATION, LogicalOperatorType::LOGICAL_GET,
+     0, true, LogicalOperatorType::LOGICAL_LIMIT},
+    {"select_2_partial_dynamic_index_get", CascadesRuleKind::EXPLORATION, LogicalOperatorType::LOGICAL_GET,
+     0, true, LogicalOperatorType::LOGICAL_ORDER_BY},
 };
 
 } // namespace
@@ -116,6 +124,13 @@ TEST_CASE("cascade rule: the declared contract of every registered rule", "[casc
                                                     BinderSideInvariant::TWO_INPUTS));
 	rules.push_back(make_uniq<BinderSideInvariantRule>("gbagg_2_apply", LogicalOperatorType::LOGICAL_DEPENDENT_JOIN,
                                                     BinderSideInvariant::TWO_INPUTS));
+	rules.push_back(make_uniq<BinderSideInvariantRule>("select_2_index_get", LogicalOperatorType::LOGICAL_GET,
+                                                    BinderSideInvariant::GET_HAS_ACCESS_PATH));
+	rules.push_back(make_uniq<BinderSideInvariantRule>("select_2_dynamic_index_get", LogicalOperatorType::LOGICAL_GET,
+                                                    BinderSideInvariant::GET_HAS_ACCESS_PATH));
+	rules.push_back(make_uniq<BinderSideInvariantRule>("select_2_partial_dynamic_index_get",
+                                                    LogicalOperatorType::LOGICAL_GET,
+                                                    BinderSideInvariant::GET_HAS_ACCESS_PATH));
 
 	REQUIRE(rules.size() == sizeof(RULE_CONTRACTS) / sizeof(RULE_CONTRACTS[0]));
 	for (idx_t i = 0; i < rules.size(); i++) {

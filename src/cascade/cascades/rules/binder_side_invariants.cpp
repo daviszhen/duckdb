@@ -6,6 +6,7 @@
 #include "duckdb/planner/expression_iterator.hpp"
 #include "duckdb/planner/operator/logical_filter.hpp"
 #include "duckdb/planner/operator/logical_projection.hpp"
+#include "duckdb/planner/operator/logical_get.hpp"
 #include "duckdb/planner/operator/logical_unnest.hpp"
 namespace duckdb {
 namespace {
@@ -56,6 +57,15 @@ CascadesRulePromise BinderSideInvariantRule::Promise(CascadesOptimizer &, GroupE
 			}
 		} else if (ExpressionsHoldSubquery(expr.op->Cast<LogicalProjection>().expressions)) {
 			violation = "a projection expression still holds a sub-query";
+		}
+		break;
+	}
+	case BinderSideInvariant::GET_HAS_ACCESS_PATH: {
+		// An index or dynamic get only exists once an access path has been chosen for it; a get
+		// without one is the invariant broken, not a shape to rewrite.
+		auto &get = expr.op->Cast<LogicalGet>();
+		if (get.function.name.empty()) {
+			violation = "a get has no access path bound";
 		}
 		break;
 	}
