@@ -10,6 +10,7 @@
 #include "duckdb/cascade/cascades/rules/apply_to_join.hpp"
 #include "duckdb/cascade/cascades/rules/collapse_project.hpp"
 #include "duckdb/cascade/cascades/rules/correlated_apply_to_join.hpp"
+#include "duckdb/cascade/cascades/rules/expand_nary_join.hpp"
 #include "duckdb/cascade/cascades/rules/group_apply_by_outer_columns.hpp"
 #include "duckdb/cascade/cascades/rules/lift_local_predicate.hpp"
 #include "duckdb/cascade/cascades/rules/push_filter_below_groupby.hpp"
@@ -46,6 +47,14 @@ const RuleContract RULE_CONTRACTS[] = {
      LogicalOperatorType::LOGICAL_DISTINCT},
     {"collapse_project", CascadesRuleKind::EXPLORATION, LogicalOperatorType::LOGICAL_PROJECTION,
      LogicalOperatorType::LOGICAL_FILTER},
+    // ORCA EXformIds 1/2/3: the NAry join expansion family, migrated together because the three
+    // differ only in the order they pick.
+    {"expand_nary_join", CascadesRuleKind::EXPLORATION, LogicalOperatorType::LOGICAL_COMPARISON_JOIN,
+     LogicalOperatorType::LOGICAL_PROJECTION},
+    {"expand_nary_join_min_card", CascadesRuleKind::EXPLORATION, LogicalOperatorType::LOGICAL_COMPARISON_JOIN,
+     LogicalOperatorType::LOGICAL_AGGREGATE_AND_GROUP_BY},
+    {"expand_nary_join_dp", CascadesRuleKind::EXPLORATION, LogicalOperatorType::LOGICAL_COMPARISON_JOIN,
+     LogicalOperatorType::LOGICAL_FILTER},
 };
 
 } // namespace
@@ -61,6 +70,9 @@ TEST_CASE("cascade rule: the declared contract of every registered rule", "[casc
 	rules.push_back(make_uniq<GroupApplyByOuterColumns>());
 	rules.push_back(make_uniq<PushFilterBelowGroupBy>());
 	rules.push_back(make_uniq<CollapseProject>());
+	rules.push_back(make_uniq<ExpandNAryJoin>());
+	rules.push_back(make_uniq<ExpandNAryJoinMinCard>());
+	rules.push_back(make_uniq<ExpandNAryJoinDP>());
 
 	REQUIRE(rules.size() == sizeof(RULE_CONTRACTS) / sizeof(RULE_CONTRACTS[0]));
 	for (idx_t i = 0; i < rules.size(); i++) {
