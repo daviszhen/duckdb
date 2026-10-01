@@ -158,7 +158,7 @@ namespace duckdb {
 //
 //   15  right=[LOGICAL_PROJECTION] below=[LOGICAL_AGGREGATE_AND_GROUP_BY]   correlated column under
 //                                                                          an aggregate - ORCA's
-//                                                                          ExfScalarAggSubquery family,
+//                                                                          ExfScalarAggSubquery[非 ORCA 名] family,
 //                                                                          paper identity (8)
 //   14  right=[LOGICAL_PROJECTION] below=[LOGICAL_DUMMY_SCAN]              a sub-query with no table
 //                                                                          at all: nothing to lift,
@@ -175,16 +175,16 @@ namespace duckdb {
 // belongs in a new rule, with these as its inputs:
 //
 //   class (count)                  apply type   ORCA transform to mirror        rule shape
-//   Projection<-Aggregate  (15)    SINGLE (8)   ExfScalarAggSubquery            group the left side
+//   Projection<-Aggregate  (15)    SINGLE (8)   ExfScalarAggSubquery[非 ORCA 名]            group the left side
 //                                                                              by the correlated
 //                                                                              columns, LEFT JOIN
 //                                                                              the aggregate result,
 //                                                                              project what the
 //                                                                              query needs
-//   Projection<-DummyScan  (14)    SINGLE/MARK  ExfScalarSubquery / no-         nothing to lift; the
+//   Projection<-DummyScan  (14)    SINGLE/MARK  ExfScalarSubquery[非 ORCA 名] / no-         nothing to lift; the
 //                                              correlations variant            correlated column is
 //                                                                              the whole problem
-//   Distinct<-Union                 MARK (7)    ExfPushJoinBelowUnionAll       push the correlation
+//   Distinct<-Union                 MARK (7)    ExfPushGbBelowUnionAll       push the correlation
 //                                                                              into the branches
 //   Materialized CTE        (6)    SINGLE/MARK  the CTE family                 needs the CTE
 //                                                                              machinery, later

@@ -297,7 +297,7 @@ unique_ptr<LogicalOperator> ApplyDecorrelator::DecorrelateScalar(unique_ptr<Logi
 	}
 		// This is the largest single bucket of the remaining failures (19 of 55 files, measured): a
 		// scalar sub-query whose root is not an aggregate. ORCA has a separate transformation for it
-		// (ExfScalarSubquery), and it is the easier of the two: there is no grouping to add, only a left
+		// (ExfScalarSubquery[非 ORCA 名]), and it is the easier of the two: there is no grouping to add, only a left
 		// outer join - the correlated predicate becomes the join condition, so an outer row with no
 		// match gets NULL, which is exactly what a scalar sub-query returns. The pieces are all here:
 		// the projections above were collected already, ExtractCorrelatedPredicates fills `extracted`
@@ -307,7 +307,7 @@ unique_ptr<LogicalOperator> ApplyDecorrelator::DecorrelateScalar(unique_ptr<Logi
 		// return that as the new right side, and check that what it exposes is what the apply exposed
 		// before returning - otherwise keep refusing.
 	if (node->type != LogicalOperatorType::LOGICAL_AGGREGATE_AND_GROUP_BY || node->children.size() != 1) {
-		// ExfScalarSubquery: a scalar sub-query that does not aggregate needs no grouping - only a
+		// ExfScalarSubquery[非 ORCA 名]: a scalar sub-query that does not aggregate needs no grouping - only a
 		// left outer join whose condition is the correlated predicate, so an outer row with no match
 		// yields NULL, which is what a scalar sub-query returns. The largest remaining bucket (19/55).
 		// `extracted` is declared below this guard, so this branch keeps its own.
