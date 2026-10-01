@@ -19,6 +19,7 @@
 #include "duckdb/cascade/cascades/cost.hpp"
 #include "duckdb/cascade/cascades/memo.hpp"
 #include "duckdb/cascade/cascades/rule.hpp"
+#include "duckdb/planner/operator/logical_dependent_join.hpp"
 #include "duckdb/cascade/cascades/task.hpp"
 
 namespace duckdb {
@@ -62,10 +63,20 @@ public:
 	//! cascade-orca-notes/NEXT_framework_capability_design.md: measurement before implementation, so
 	//! the interface exists without changing a single plan.
 	idx_t ParameterizableApplies(const LogicalOperator &op) const {
-		// No shape has been taught yet, so the honest answer is zero; the counter exists so that
-		// the number is visible from the first shape onwards rather than appearing at the end.
-		(void)op;
-		return 0;
+		// The first shape the path will be taught: an inner Apply whose right side reads exactly one
+		// outer column. Counting it before implementing it says how much of the backlog that one
+		// shape is worth, which is what decides whether it is the shape to start with.
+		idx_t count = 0;
+		if (op.type == LogicalOperatorType::LOGICAL_DEPENDENT_JOIN) {
+			auto &apply = op.Cast<LogicalDependentJoin>();
+			if (apply.join_type == JoinType::INNER && apply.correlated_columns.size() == 1) {
+				count++;
+			}
+		}
+		for (auto &child : op.children) {
+			count += ParameterizableApplies(*child);
+		}
+		return count;
 	}
 	//! Replace an expression of a group in place, for the rules that have to rewrite what the parent
 	//! reads as well as the expression itself (see Memo::ReplaceExpression), then re-schedule it.
