@@ -76,6 +76,12 @@ public:
 	CascadesRuleKind Kind() const {
 		return kind;
 	}
+	//! The EXformId of the ORCA xform this rule migrates, or -1 when it has no counterpart in the
+	//! authoritative list. Declaring it lets the migration ledger be checked against the code.
+	virtual int OrcaId() const {
+		return -1;
+	}
+
 	const char *Name() const {
 		return name;
 	}

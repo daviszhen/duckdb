@@ -150,6 +150,10 @@ CascadesRulePromise PromiseForNAry(CascadesOptimizer &, GroupExpr &expr, const c
 } // namespace
 
 // --- CXformExpandNAryJoin (EXformId 1): the inputs in the order they arrive ---------------------
+int ExpandNAryJoin::OrcaId() const {
+	return 1;
+}
+
 ExpandNAryJoin::ExpandNAryJoin() : CascadesRule(CascadesRuleKind::EXPLORATION, "expand_nary_join") {}
 bool ExpandNAryJoin::Matches(GroupExpr &expr) {
 	return expr.type == LogicalOperatorType::LOGICAL_COMPARISON_JOIN && expr.children.size() >= 3;
@@ -162,6 +166,10 @@ bool ExpandNAryJoin::Apply(CascadesOptimizer &optimizer, GroupId group, GroupExp
 }
 
 // --- CXformExpandNAryJoinMinCard (EXformId 2): smallest input first -----------------------------
+int ExpandNAryJoinMinCard::OrcaId() const {
+	return 2;
+}
+
 ExpandNAryJoinMinCard::ExpandNAryJoinMinCard()
     : CascadesRule(CascadesRuleKind::EXPLORATION, "expand_nary_join_min_card") {}
 bool ExpandNAryJoinMinCard::Matches(GroupExpr &expr) {
@@ -177,6 +185,10 @@ bool ExpandNAryJoinMinCard::Apply(CascadesOptimizer &optimizer, GroupId group, G
 // --- CXformExpandNAryJoinDP (EXformId 3): the orders a DP would keep ----------------------------
 // Bounded on purpose: every permutation of n inputs is offered up to a cap, so a wide join does not
 // fill the memo with orders, and the cap is printed rather than silently applied.
+int ExpandNAryJoinDP::OrcaId() const {
+	return 3;
+}
+
 ExpandNAryJoinDP::ExpandNAryJoinDP() : CascadesRule(CascadesRuleKind::EXPLORATION, "expand_nary_join_dp") {}
 bool ExpandNAryJoinDP::Matches(GroupExpr &expr) {
 	return expr.type == LogicalOperatorType::LOGICAL_COMPARISON_JOIN && expr.children.size() >= 3 &&

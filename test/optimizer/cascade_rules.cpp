@@ -5,6 +5,8 @@
 // reports, the kind that decides when the search may run it, and the shape it claims to match -
 // which is exactly what breaks silently when a rule is renamed, retyped or pointed at the wrong
 // operator. Tests of what a rule *produces* are added with each rule's transformation.
+#include <set>
+
 #include "catch.hpp"
 #include "test_helpers.hpp"
 
@@ -132,6 +134,7 @@ TEST_CASE("cascade rule: the declared contract of every registered rule", "[casc
                                                     LogicalOperatorType::LOGICAL_GET,
                                                     BinderSideInvariant::GET_HAS_ACCESS_PATH));
 
+	set<int> declared_ids;
 	REQUIRE(rules.size() == sizeof(RULE_CONTRACTS) / sizeof(RULE_CONTRACTS[0]));
 	for (idx_t i = 0; i < rules.size(); i++) {
 		auto &rule = *rules[i];
@@ -147,6 +150,17 @@ TEST_CASE("cascade rule: the declared contract of every registered rule", "[casc
 		for (idx_t c = 0; c < contract.children; c++) {
 			trigger.children.push_back(c);
 		}
+		// The migration ledger says which ORCA xform a rule stands for. Checking the declaration
+		// against the authoritative range, and against the other rules, keeps that table honest: a
+		// wrong id or two rules claiming one xform is bookkeeping that only reading would catch.
+		auto orca_id = rule.OrcaId();
+		bool in_range = orca_id == -1 || (orca_id >= 0 && orca_id <= 151);
+		CHECK(in_range);
+		if (orca_id >= 0) {
+			CHECK(declared_ids.find(orca_id) == declared_ids.end());
+			declared_ids.insert(orca_id);
+		}
+
 		if (contract.type_only) {
 			CHECK(rule.Matches(trigger));
 		} else if (!rule.Matches(trigger)) {

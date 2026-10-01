@@ -17,6 +17,7 @@
 namespace duckdb {
 class ExpandNAryJoin : public CascadesRule {
 public:
+	int OrcaId() const override;
 	ExpandNAryJoin();
 	bool Matches(GroupExpr &expr) override;
 	CascadesRulePromise Promise(CascadesOptimizer &optimizer, GroupExpr &expr) override;
@@ -25,6 +26,7 @@ public:
 
 class ExpandNAryJoinMinCard : public CascadesRule {
 public:
+	int OrcaId() const override;
 	ExpandNAryJoinMinCard();
 	bool Matches(GroupExpr &expr) override;
 	CascadesRulePromise Promise(CascadesOptimizer &optimizer, GroupExpr &expr) override;
@@ -33,6 +35,7 @@ public:
 
 class ExpandNAryJoinDP : public CascadesRule {
 public:
+	int OrcaId() const override;
 	ExpandNAryJoinDP();
 	bool Matches(GroupExpr &expr) override;
 	CascadesRulePromise Promise(CascadesOptimizer &optimizer, GroupExpr &expr) override;
