@@ -1,3 +1,4 @@
+#include "duckdb/planner/operator/logical_secure_view.hpp"
 #include "duckdb/optimizer/outer_join_simplification.hpp"
 #include "duckdb/optimizer/filter_pushdown.hpp"
 #include "duckdb/optimizer/join_order/join_order_optimizer.hpp"
@@ -571,12 +572,15 @@ shared_ptr<PreparedStatementData> ClientContext::CreatePreparedStatementInternal
 		// exactly as the search produced them.
 		{
 			bool has_cross = false;
+		bool has_secure_view = false;
 			std::function<void(LogicalOperator &)> scan_cross = [&](LogicalOperator &op) {
 				if (op.type == LogicalOperatorType::LOGICAL_CROSS_PRODUCT) { has_cross = true; }
+			if (op.type == LogicalOperatorType::LOGICAL_SECURE_VIEW) { has_secure_view = true; }
 				for (auto &child : op.children) { scan_cross(*child); }
 			};
 			scan_cross(*logical_plan);
-			if (has_cross) {
+			LogicalSecureView::AnalyzeStatistics(*logical_plan);
+		if (has_cross || has_secure_view) {
 				Optimizer filter_pushdown_owner(*logical_planner.binder, *this);
 				FilterPushdown filter_pushdown(filter_pushdown_owner, false);
 				logical_plan = filter_pushdown.Rewrite(std::move(logical_plan));
