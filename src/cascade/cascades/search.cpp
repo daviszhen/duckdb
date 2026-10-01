@@ -299,6 +299,23 @@ unique_ptr<LogicalOperator> CascadesOptimizer::Optimize(unique_ptr<LogicalOperat
 // What remains is to build the delimited-join capability inside this pipeline, on our own bindings
 // and properties - the outer_refs/provides derivation added earlier is what that needs, and ORCA's
 // correlated-columns-as-parameters is the model.
+		// Retirement ledger: the shapes the rules could not take are the ones that reach this
+		// fallback, so count them where the legacy path takes over. Printing only - the path itself
+		// is unchanged - but it is what makes the remaining work countable instead of invisible.
+		if (CascadeConfig::PrintPlans()) {
+			idx_t remaining = 0;
+			std::function<void(LogicalOperator &)> count_applies = [&](LogicalOperator &op) {
+				if (op.type == LogicalOperatorType::LOGICAL_DEPENDENT_JOIN) {
+					remaining++;
+				}
+				for (auto &child : op.children) {
+					count_applies(*child);
+				}
+			};
+			count_applies(*result);
+			Printer::Print("--- cascade(cascades) enforcer: the legacy decorrelator takes over " +
+			               std::to_string(remaining) + " Apply(s) the rules did not");
+		}
 		ApplyDecorrelator decorrelator(optimizer_binder, context);
 		result = decorrelator.Decorrelate(std::move(result));
 		result = SimplifyMarkerJoins(std::move(result));
