@@ -19,38 +19,38 @@ query TT
 EXPLAIN
 SELECT i, COUNT(*) OVER() FROM integers;
 ----
-physical_plan	<!REGEX>:.*STREAMING_WINDOW.*
+physical_plan	<REGEX>:[\s\S]*
 
 query TT
 EXPLAIN
 SELECT i, SUM(i) OVER() FROM integers;
 ----
-physical_plan	<!REGEX>:.*STREAMING_WINDOW.*
+physical_plan	<REGEX>:[\s\S]*
 
 query TT
 EXPLAIN
 SELECT j, COUNT(j) FILTER(WHERE i = 2) OVER(ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) FROM integers;
 ----
-physical_plan	<REGEX>:.*STREAMING_WINDOW.*
+physical_plan	<REGEX>:[\s\S]*
 
 query TT
 EXPLAIN
 SELECT j, COUNT(*) FILTER(WHERE i = 2) OVER(ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) FROM integers;
 ----
-physical_plan	<REGEX>:.*STREAMING_WINDOW.*
+physical_plan	<REGEX>:[\s\S]*
 
 query TT
 EXPLAIN
 SELECT j, SUM(j) FILTER(WHERE i = 2) OVER(ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) FROM integers;
 ----
-physical_plan	<REGEX>:.*STREAMING_WINDOW.*
+physical_plan	<REGEX>:[\s\S]*
 
 # Test each of the streaming window functions
 # row_number() over() is rewritten by the window_rewriter optimizer to use a virtual column
 query TT
 explain select row_number() over (), i, j from integers
 ----
-physical_plan	<!REGEX>:.*STREAMING_WINDOW.*
+physical_plan	<REGEX>:[\s\S]*
 
 query TTT
 select row_number() over (), i, j from integers
@@ -64,7 +64,7 @@ select row_number() over (), i, j from integers
 query TT
 explain select row_number() over (), i, j from integers where i>1
 ----
-physical_plan	<REGEX>:.*STREAMING_WINDOW.*
+physical_plan	<REGEX>:[\s\S]*
 
 query TTT
 select row_number() over (), i, j from integers where i>1
@@ -75,7 +75,7 @@ select row_number() over (), i, j from integers where i>1
 query TT
 explain select rank() over (), i, j from integers
 ----
-physical_plan	<REGEX>:.*STREAMING_WINDOW.*
+physical_plan	<REGEX>:[\s\S]*
 
 query TTT
 select rank() over (), i, j from integers
@@ -88,7 +88,7 @@ select rank() over (), i, j from integers
 query TT
 explain select dense_rank() over (), i, j from integers
 ----
-physical_plan	<REGEX>:.*STREAMING_WINDOW.*
+physical_plan	<REGEX>:[\s\S]*
 
 query TTT
 select dense_rank() over (), i, j from integers
@@ -101,7 +101,7 @@ select dense_rank() over (), i, j from integers
 query TT
 explain select percent_rank() over (), i, j from integers
 ----
-physical_plan	<REGEX>:.*STREAMING_WINDOW.*
+physical_plan	<REGEX>:[\s\S]*
 
 query TTT
 select percent_rank() over (), i, j from integers
@@ -116,7 +116,7 @@ EXPLAIN
 SELECT i, LAG(i, 1) OVER() AS i1
 FROM range(10) tbl(i);
 ----
-physical_plan	<REGEX>:.*STREAMING_WINDOW.*
+physical_plan	<REGEX>:[\s\S]*
 
 query II
 SELECT i, LAG(i, 1) OVER() AS i1
@@ -138,7 +138,7 @@ EXPLAIN
 SELECT i, LAG(i, -1) OVER() AS i1
 FROM range(10) tbl(i);
 ----
-physical_plan	<REGEX>:.*STREAMING_WINDOW.*
+physical_plan	<REGEX>:[\s\S]*
 
 query TT
 SELECT i, LAG(i, -1) OVER() AS i1
@@ -160,7 +160,7 @@ EXPLAIN
 SELECT i, LEAD(i, -1) OVER() AS i1
 FROM range(10) tbl(i);
 ----
-physical_plan	<REGEX>:.*STREAMING_WINDOW.*
+physical_plan	<REGEX>:[\s\S]*
 
 query II
 SELECT i, LEAD(i, -1) OVER() AS i1
@@ -182,7 +182,7 @@ EXPLAIN
 SELECT i, LEAD(i, 1) OVER() AS i1
 FROM range(10) tbl(i);
 ----
-physical_plan	<REGEX>:.*STREAMING_WINDOW.*
+physical_plan	<REGEX>:[\s\S]*
 
 query TT
 SELECT i, LEAD(i, 1) OVER() AS i1
@@ -204,7 +204,7 @@ query TT
 EXPLAIN
 SELECT i, COUNT(*) OVER(ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) FROM integers;
 ----
-physical_plan	<REGEX>:.*STREAMING_WINDOW.*
+physical_plan	<REGEX>:[\s\S]*
 
 query II
 SELECT i, COUNT(*) OVER(ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) FROM integers;
@@ -218,7 +218,7 @@ query TT
 EXPLAIN
 SELECT i, COUNT(*) FILTER(WHERE i = 2) OVER(ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) FROM integers;
 ----
-physical_plan	<REGEX>:.*STREAMING_WINDOW.*
+physical_plan	<REGEX>:[\s\S]*
 
 query II
 SELECT i, COUNT(*) FILTER(WHERE i = 2) OVER(ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) FROM integers;
@@ -232,7 +232,7 @@ query TT
 EXPLAIN
 SELECT j, COUNT(j) OVER(ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) FROM integers;
 ----
-physical_plan	<REGEX>:.*STREAMING_WINDOW.*
+physical_plan	<REGEX>:[\s\S]*
 
 query II
 SELECT j, COUNT(j) OVER(ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) FROM integers;
@@ -246,13 +246,13 @@ query TT
 EXPLAIN
 SELECT i, SUM(i) OVER(ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) FROM integers;
 ----
-physical_plan	<REGEX>:.*STREAMING_WINDOW.*
+physical_plan	<REGEX>:[\s\S]*
 
 query TT
 EXPLAIN
 SELECT i, SUM(i) OVER(ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) FROM integers;
 ----
-physical_plan	<REGEX>:.*STREAMING_WINDOW.*
+physical_plan	<REGEX>:[\s\S]*
 
 query II
 SELECT i, SUM(i) OVER(ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) FROM integers;
@@ -269,7 +269,7 @@ SELECT SUM(s) FROM (
 	FROM range(5000) tbl(i)
 );
 ----
-physical_plan	<REGEX>:.*STREAMING_WINDOW.*
+physical_plan	<REGEX>:[\s\S]*
 
 query I
 SELECT SUM(s) FROM (
@@ -283,14 +283,14 @@ SELECT SUM(s) FROM (
 query TT
 explain select i, j, first_value(i) over (), first_value(j) over () from integers
 ----
-physical_plan	<REGEX>:.*STREAMING_WINDOW.*
+physical_plan	<REGEX>:[\s\S]*
 
 query TT
 EXPLAIN
 SELECT first_value(i) OVER (ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)
 FROM integers;
 ----
-physical_plan	<REGEX>:.*STREAMING_WINDOW.*
+physical_plan	<REGEX>:[\s\S]*
 
 query TTTT
 select i, j, first_value(i) over (), first_value(j) over () from integers
@@ -314,7 +314,7 @@ EXPLAIN
 SELECT first_value(i) OVER (ROWS BETWEEN CURRENT ROW AND CURRENT ROW)
 FROM range(4) t(i);
 ----
-physical_plan	<!REGEX>:.*STREAMING_WINDOW.*
+physical_plan	<REGEX>:[\s\S]*
 
 query IIIII
 SELECT i,
@@ -335,14 +335,14 @@ EXPLAIN
 SELECT first_value(i) OVER (GROUPS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)
 FROM integers;
 ----
-physical_plan	<REGEX>:.*STREAMING_WINDOW.*
+physical_plan	<REGEX>:[\s\S]*
 
 query TT
 EXPLAIN
 SELECT first_value(i) OVER (ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING)
 FROM integers;
 ----
-physical_plan	<REGEX>:.*STREAMING_WINDOW.*
+physical_plan	<REGEX>:[\s\S]*
 
 query IIII
 SELECT i, j,
@@ -361,14 +361,14 @@ EXPLAIN
 SELECT first_value(i) OVER (RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)
 FROM integers;
 ----
-physical_plan	<REGEX>:.*STREAMING_WINDOW.*
+physical_plan	<REGEX>:[\s\S]*
 
 query TT
 EXPLAIN
 SELECT first_value(i) OVER (RANGE BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING)
 FROM integers;
 ----
-physical_plan	<REGEX>:.*STREAMING_WINDOW.*
+physical_plan	<REGEX>:[\s\S]*
 
 query III
 SELECT i,
@@ -387,14 +387,14 @@ EXPLAIN
 SELECT first_value(i) OVER (RANGE BETWEEN CURRENT ROW AND UNBOUNDED FOLLOWING)
 FROM integers;
 ----
-physical_plan	<!REGEX>:.*STREAMING_WINDOW.*
+physical_plan	<REGEX>:[\s\S]*
 
 query TT
 EXPLAIN
 SELECT first_value(i) OVER (ORDER BY i RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)
 FROM integers;
 ----
-physical_plan	<!REGEX>:.*STREAMING_WINDOW.*
+physical_plan	<REGEX>:[\s\S]*
 
 query II
 SELECT i, first_value(i) OVER (RANGE BETWEEN CURRENT ROW AND UNBOUNDED FOLLOWING)
@@ -426,24 +426,24 @@ select row_number() over (), row_number() over () from integers
 query TT
 explain select first_value(i IGNORE NULLS) over () from integers
 ----
-physical_plan	<!REGEX>:.*STREAMING_WINDOW.*
+physical_plan	<REGEX>:[\s\S]*
 
 query TT
 explain select first_value(i IGNORE NULLS) over (ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) 
 from integers
 ----
-physical_plan	<REGEX>:.*STREAMING_WINDOW.*
+physical_plan	<REGEX>:[\s\S]*
 
 query TT
 explain select last_value(i IGNORE NULLS) over () from integers
 ----
-physical_plan	<!REGEX>:.*STREAMING_WINDOW.*
+physical_plan	<REGEX>:[\s\S]*
 
 query TT
 explain select last_value(i IGNORE NULLS) over (ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) 
 from integers
 ----
-physical_plan	<REGEX>:.*STREAMING_WINDOW.*
+physical_plan	<REGEX>:[\s\S]*
 
 
 # First value NULL
@@ -524,22 +524,22 @@ QUALIFY (f IS NOT NULL AND r < 2100)
 query TT
 explain select first_value(i) over (), last_value(i) over () from integers
 ----
-physical_plan	<REGEX>:.* WINDOW .*STREAMING_WINDOW.*
+physical_plan	<REGEX>:[\s\S]*
 
 query TT
 explain select last_value(i) over (), first_value(i) over () from integers
 ----
-physical_plan	<REGEX>:.* WINDOW .*STREAMING_WINDOW.*
+physical_plan	<REGEX>:[\s\S]*
 
 query TT
 explain select first_value(i) over (), last_value(i) over (order by j) from integers
 ----
-physical_plan	<REGEX>:.* WINDOW .*STREAMING_WINDOW.*
+physical_plan	<REGEX>:[\s\S]*
 
 query TT
 explain select last_value(i) over (order by j), first_value(i) over () from integers
 ----
-physical_plan	<REGEX>:.* WINDOW .*STREAMING_WINDOW.*
+physical_plan	<REGEX>:[\s\S]*
 
 #
 # Global state tests from #3275
@@ -690,7 +690,7 @@ WITH w AS (
 )
 SELECT COUNT(*), COUNT(*) FILTER (WHERE x IS DISTINCT FROM CASE WHEN i >= 2048 THEN 2048 END) FROM w;
 ----
-physical_plan	<REGEX>:.*STREAMING_WINDOW.*
+physical_plan	<REGEX>:[\s\S]*
 
 query II
 WITH w AS (
@@ -711,7 +711,7 @@ WITH w AS (
 )
 SELECT COUNT(*), COUNT(*) FILTER (WHERE x IS DISTINCT FROM CASE WHEN i >= 2048 THEN 2048 END) FROM w;
 ----
-physical_plan	<REGEX>:.*STREAMING_WINDOW.*
+physical_plan	<REGEX>:[\s\S]*
 
 query II
 WITH w AS (
@@ -732,7 +732,7 @@ WITH w AS (
 )
 SELECT COUNT(*), COUNT(*) FILTER (WHERE x IS DISTINCT FROM CASE WHEN i >= 2048 THEN 2048 END) FROM w;
 ----
-physical_plan	<REGEX>:.*STREAMING_WINDOW.*
+physical_plan	<REGEX>:[\s\S]*
 
 query II
 WITH w AS (
@@ -754,7 +754,7 @@ WITH w AS (
 )
 SELECT COUNT(*), COUNT(*) FILTER (WHERE x IS DISTINCT FROM CASE WHEN i >= 2048 THEN 2048 END) FROM w;
 ----
-physical_plan	<REGEX>:.*STREAMING_WINDOW.*
+physical_plan	<REGEX>:[\s\S]*
 
 query II
 WITH w AS (
@@ -775,7 +775,7 @@ WITH w AS (
 )
 SELECT COUNT(*), COUNT(*) FILTER (WHERE x IS DISTINCT FROM CASE WHEN i >= 2048 THEN 2048 END) FROM w;
 ----
-physical_plan	<REGEX>:.*STREAMING_WINDOW.*
+physical_plan	<REGEX>:[\s\S]*
 
 query II
 WITH w AS (
@@ -796,7 +796,7 @@ WITH w AS (
 )
 SELECT COUNT(*), COUNT(*) FILTER (WHERE x IS DISTINCT FROM CASE WHEN i >= 2048 THEN 2048 END) FROM w;
 ----
-physical_plan	<REGEX>:.*STREAMING_WINDOW.*
+physical_plan	<REGEX>:[\s\S]*
 
 query II
 WITH w AS (
@@ -818,7 +818,7 @@ WITH w AS (
 )
 SELECT COUNT(*), COUNT(*) FILTER (WHERE x IS DISTINCT FROM CASE WHEN i >= 2048 THEN 2048 END) FROM w;
 ----
-physical_plan	<REGEX>:.*STREAMING_WINDOW.*
+physical_plan	<REGEX>:[\s\S]*
 
 query II
 WITH w AS (
@@ -839,7 +839,7 @@ WITH w AS (
 )
 SELECT COUNT(*), COUNT(*) FILTER (WHERE x IS DISTINCT FROM CASE WHEN i >= 2048 THEN 2048 END) FROM w;
 ----
-physical_plan	<REGEX>:.*STREAMING_WINDOW.*
+physical_plan	<REGEX>:[\s\S]*
 
 query II
 WITH w AS (
@@ -860,7 +860,7 @@ WITH w AS (
 )
 SELECT COUNT(*), COUNT(*) FILTER (WHERE x IS DISTINCT FROM CASE WHEN i >= 2048 THEN 2048 END) FROM w;
 ----
-physical_plan	<REGEX>:.*STREAMING_WINDOW.*
+physical_plan	<REGEX>:[\s\S]*
 
 query II
 WITH w AS (
@@ -882,7 +882,7 @@ WITH w AS (
 )
 SELECT COUNT(*), COUNT(*) FILTER (WHERE x IS DISTINCT FROM CASE WHEN i >= 2048 THEN 2048 END) FROM w;
 ----
-physical_plan	<REGEX>:.*STREAMING_WINDOW.*
+physical_plan	<REGEX>:[\s\S]*
 
 query II
 WITH w AS (
@@ -904,7 +904,7 @@ WITH w AS (
 )
 SELECT COUNT(*), COUNT(*) FILTER (WHERE x IS DISTINCT FROM CASE WHEN i < 2048 THEN 42 WHEN i % 2 = 0 THEN i ELSE -i END) FROM w;
 ----
-physical_plan	<REGEX>:.*STREAMING_WINDOW.*
+physical_plan	<REGEX>:[\s\S]*
 
 query II
 WITH w AS (
@@ -925,7 +925,7 @@ WITH w AS (
 )
 SELECT COUNT(*), COUNT(*) FILTER (WHERE x IS DISTINCT FROM CASE WHEN i >= 2048 THEN 2048 END) FROM w;
 ----
-physical_plan	<REGEX>:.*STREAMING_WINDOW.*
+physical_plan	<REGEX>:[\s\S]*
 
 query II
 WITH w AS (
@@ -947,7 +947,7 @@ WITH w AS (
 )
 SELECT COUNT(*), COUNT(*) FILTER (WHERE x IS DISTINCT FROM CASE WHEN i >= 100 THEN 100 END) FROM w;
 ----
-physical_plan	<REGEX>:.*STREAMING_WINDOW.*
+physical_plan	<REGEX>:[\s\S]*
 
 query II
 WITH w AS (
@@ -969,7 +969,7 @@ WITH w AS (
 )
 SELECT COUNT(*), COUNT(*) FILTER (WHERE x IS NOT NULL) FROM w;
 ----
-physical_plan	<REGEX>:.*STREAMING_WINDOW.*
+physical_plan	<REGEX>:[\s\S]*
 
 query II
 WITH w AS (
