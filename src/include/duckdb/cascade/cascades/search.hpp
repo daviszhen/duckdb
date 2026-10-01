@@ -69,7 +69,10 @@ public:
 		idx_t count = 0;
 		if (op.type == LogicalOperatorType::LOGICAL_DEPENDENT_JOIN) {
 			auto &apply = op.Cast<LogicalDependentJoin>();
-			if (apply.join_type == JoinType::INNER && apply.correlated_columns.size() == 1) {
+			// Widened from "inner + one column" to "one column, any join type": the count says which
+			// dimension splits the backlog, and the wider bucket is the honest first one if the join
+			// type turns out not to matter for the shapes the corpus has.
+			if (apply.correlated_columns.size() == 1) {
 				count++;
 			}
 		}
