@@ -133,7 +133,10 @@ const RuleOrcaId RULE_ORCA_IDS[] = {
     // Correlated semi and anti: its promise asks for a semi/anti Apply with correlated columns and
     // no condition, which is the correlated variant of each - not the NoCorrelations ones.
     {"semi_apply_to_join", {36, 39}},
-    {"correlated_apply_to_join", {-1}},
+    // Correlated Apply with no condition, for inner (30, and the outer-key variant 26), semi (36) and
+    // anti (39) joins: exactly the types its ReplacesWithCorrelatedJoin accepts. Outer joins are not
+    // among them, so this rule does not cover the left outer xforms.
+    {"correlated_apply_to_join", {26, 30, 36, 39}},
     {"lift_local_predicate", {-1}},
     {"group_apply_by_outer_columns", {-1}},
     {"push_filter_below_groupby", {-1}},

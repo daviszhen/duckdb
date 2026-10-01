@@ -27,6 +27,14 @@ namespace duckdb {
 
 class CorrelatedApplyToJoin : public CascadesRule {
 public:
+	//! ORCA CXformInnerApply2InnerJoin (EXformId 30); the rule's own helper also accepts semi, anti
+	//! and mark joins, so it covers 26 and 36/39 as well. Read off ReplacesWithCorrelatedJoin, which
+	//! names EXformId 30 in its comment - and which does *not* accept an outer join, so the left outer
+	//! xforms are not claimed here.
+	int OrcaId() const override {
+		return 30;
+	}
+
 	CorrelatedApplyToJoin() : CascadesRule(CascadesRuleKind::SUBSTITUTION, "correlated_apply_to_join") {
 	}
 
