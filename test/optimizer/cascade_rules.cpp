@@ -8,6 +8,7 @@
 #include "catch.hpp"
 #include "test_helpers.hpp"
 
+#include "duckdb/cascade/cascades/memo.hpp"
 #include "duckdb/cascade/cascades/rules/apply_to_join.hpp"
 #include "duckdb/cascade/cascades/rules/collapse_project.hpp"
 #include "duckdb/cascade/cascades/rules/correlated_apply_to_join.hpp"
@@ -25,6 +26,12 @@ struct RuleContract {
 	const char *name;
 	CascadesRuleKind kind;
 	LogicalOperatorType matches;
+	// How many children the trigger shape needs: the matching test builds exactly that many, so a rule
+	// whose Matches also checks the child count is exercised rather than assumed.
+	idx_t children;
+	// Whether Matches looks only at the type. Rules that also want the operator cannot be exercised by
+	// a bare shape, and saying so is better than a green assertion that means nothing.
+	bool type_only;
 	LogicalOperatorType does_not_match;
 };
 
@@ -32,30 +39,30 @@ struct RuleContract {
 // shows, the kind the search loop reads, the shape it claims, and a shape it must refuse.
 const RuleContract RULE_CONTRACTS[] = {
     {"apply_to_join", CascadesRuleKind::SUBSTITUTION, LogicalOperatorType::LOGICAL_DEPENDENT_JOIN,
-     LogicalOperatorType::LOGICAL_PROJECTION},
+     2, false, LogicalOperatorType::LOGICAL_PROJECTION},
     {"semi_apply_to_join", CascadesRuleKind::SUBSTITUTION, LogicalOperatorType::LOGICAL_DEPENDENT_JOIN,
-     LogicalOperatorType::LOGICAL_FILTER},
+     2, false, LogicalOperatorType::LOGICAL_FILTER},
     {"correlated_apply_to_join", CascadesRuleKind::SUBSTITUTION, LogicalOperatorType::LOGICAL_DEPENDENT_JOIN,
-     LogicalOperatorType::LOGICAL_AGGREGATE_AND_GROUP_BY},
+     2, false, LogicalOperatorType::LOGICAL_AGGREGATE_AND_GROUP_BY},
     // SUBSTITUTION, not EXPLORATION: the rule moves a filter rather than offering an alternative,
     // and the first run of this test is what caught the difference (it had been written down the
     // other way round, in the rule order the migration notes happened to list).
     {"lift_local_predicate", CascadesRuleKind::SUBSTITUTION, LogicalOperatorType::LOGICAL_DEPENDENT_JOIN,
-     LogicalOperatorType::LOGICAL_LIMIT},
+     1, false, LogicalOperatorType::LOGICAL_LIMIT},
     {"group_apply_by_outer_columns", CascadesRuleKind::EXPLORATION, LogicalOperatorType::LOGICAL_DEPENDENT_JOIN,
-     LogicalOperatorType::LOGICAL_ORDER_BY},
+     2, false, LogicalOperatorType::LOGICAL_ORDER_BY},
     {"push_filter_below_groupby", CascadesRuleKind::EXPLORATION, LogicalOperatorType::LOGICAL_FILTER,
-     LogicalOperatorType::LOGICAL_DISTINCT},
+     1, false, LogicalOperatorType::LOGICAL_DISTINCT},
     {"collapse_project", CascadesRuleKind::EXPLORATION, LogicalOperatorType::LOGICAL_PROJECTION,
-     LogicalOperatorType::LOGICAL_FILTER},
+     1, true, LogicalOperatorType::LOGICAL_FILTER},
     // ORCA EXformIds 1/2/3: the NAry join expansion family, migrated together because the three
     // differ only in the order they pick.
     {"expand_nary_join", CascadesRuleKind::EXPLORATION, LogicalOperatorType::LOGICAL_COMPARISON_JOIN,
-     LogicalOperatorType::LOGICAL_PROJECTION},
+     3, true, LogicalOperatorType::LOGICAL_PROJECTION},
     {"expand_nary_join_min_card", CascadesRuleKind::EXPLORATION, LogicalOperatorType::LOGICAL_COMPARISON_JOIN,
-     LogicalOperatorType::LOGICAL_AGGREGATE_AND_GROUP_BY},
+     3, true, LogicalOperatorType::LOGICAL_AGGREGATE_AND_GROUP_BY},
     {"expand_nary_join_dp", CascadesRuleKind::EXPLORATION, LogicalOperatorType::LOGICAL_COMPARISON_JOIN,
-     LogicalOperatorType::LOGICAL_FILTER},
+     3, true, LogicalOperatorType::LOGICAL_FILTER},
 };
 
 } // namespace
@@ -82,6 +89,27 @@ TEST_CASE("cascade rule: the declared contract of every registered rule", "[casc
 		INFO("rule " << rule.Name());
 		CHECK(string(rule.Name()) == string(contract.name));
 		CHECK(rule.Kind() == contract.kind);
+
+		// The trigger shape: built here rather than taken from the corpus, so a rule whose shape the
+		// corpus happens not to contain is still exercised.
+		GroupExpr trigger;
+		trigger.type = contract.matches;
+		for (idx_t c = 0; c < contract.children; c++) {
+			trigger.children.push_back(c);
+		}
+		if (contract.type_only) {
+			CHECK(rule.Matches(trigger));
+		} else if (!rule.Matches(trigger)) {
+			WARN("rule " << rule.Name() << " needs the operator as well: a bare shape is not enough");
+		}
+
+		// And a shape it has to refuse: the same child count under a different operator.
+		GroupExpr other;
+		other.type = contract.does_not_match;
+		for (idx_t c = 0; c < contract.children; c++) {
+			other.children.push_back(c);
+		}
+		CHECK(!rule.Matches(other));
 	}
 }
 
