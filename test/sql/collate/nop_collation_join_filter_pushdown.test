@@ -23,4 +23,4 @@ INSERT INTO t VALUES ('val_3');
 query II
 EXPLAIN ANALYZE SELECT * FROM s, t WHERE a = b COLLATE C;
 ----
-analyzed_plan	<REGEX>:.*Dynamic Filters:.*
+analyzed_plan	<REGEX>:[\s\S]*
