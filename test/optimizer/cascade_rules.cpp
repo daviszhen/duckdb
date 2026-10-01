@@ -6,6 +6,7 @@
 // which is exactly what breaks silently when a rule is renamed, retyped or pointed at the wrong
 // operator. Tests of what a rule *produces* are added with each rule's transformation.
 #include "catch.hpp"
+#include "test_helpers.hpp"
 
 #include "duckdb/cascade/cascades/rules/apply_to_join.hpp"
 #include "duckdb/cascade/cascades/rules/collapse_project.hpp"
@@ -82,4 +83,31 @@ TEST_CASE("cascade rule: the declared contract of every registered rule", "[casc
 		CHECK(string(rule.Name()) == string(contract.name));
 		CHECK(rule.Kind() == contract.kind);
 	}
+}
+
+// The physical family: ORCA's implementation rules are DuckDB's, so what a migration of one of them
+// has to show is that the logical shape reaches the host's physical operator. These are the first
+// two attributed rules - CXformProject2ComputeScalar (EXformId 0, projection) and CXformGet2TableScan
+// (EXformId 4, scan) - and the pattern the rest of the family follows.
+TEST_CASE("cascade physical attribution: the host plans the shape with its own operator", "[cascade]") {
+	DuckDB db(nullptr);
+	Connection con(db);
+	REQUIRE(con.Query("CREATE TABLE t(a INTEGER, b INTEGER)"));
+	REQUIRE(con.Query("INSERT INTO t VALUES (1, 2), (3, 4)"));
+
+	// The projection has to be one the host cannot omit: a pass-through projection is folded away by
+	// plan_projection.cpp ("check if this projection can be omitted entirely"), which is the host's
+	// own optimisation and not part of this attribution. Computed columns keep it.
+	auto result = con.Query("EXPLAIN SELECT a + b AS s, b * 2 AS d FROM t WHERE b > 0");
+	REQUIRE(result);
+	REQUIRE(result->RowCount() > 0);
+	auto plan = result->GetValue(1, 0).ToString();
+
+	// EXformId 0: the projection becomes the host's projection. The plan this version prints names
+	// operators in CamelCase ("Projection", "Seq Scan"), which is what the checks below pin down.
+	REQUIRE(plan.find("Projection") != string::npos);
+	// EXformId 4: the scan becomes the host's table scan. "Seq Scan" is the name this version uses;
+	// "Table Scan" is accepted too, so the test pins the attribution rather than the spelling.
+	bool scanned = plan.find("Seq Scan") != string::npos || plan.find("Table Scan") != string::npos;
+	REQUIRE(scanned);
 }
