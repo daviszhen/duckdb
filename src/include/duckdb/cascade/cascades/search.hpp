@@ -56,6 +56,17 @@ public:
 	}
 	//! Add an expression to a group (called by rules).
 	void AddExpression(GroupId group, unique_ptr<GroupExpr> expr);
+	//! The parameterisation path (ORCA's correlated-columns-as-parameters): how many of the Applies
+	//! in this plan the path could take, given which shapes it has been taught so far. Everything it
+	//! cannot take is counted by the enforcer as the remaining backlog. Step one of the design in
+	//! cascade-orca-notes/NEXT_framework_capability_design.md: measurement before implementation, so
+	//! the interface exists without changing a single plan.
+	idx_t ParameterizableApplies(const LogicalOperator &op) const {
+		// No shape has been taught yet, so the honest answer is zero; the counter exists so that
+		// the number is visible from the first shape onwards rather than appearing at the end.
+		(void)op;
+		return 0;
+	}
 	//! Replace an expression of a group in place, for the rules that have to rewrite what the parent
 	//! reads as well as the expression itself (see Memo::ReplaceExpression), then re-schedule it.
 	void ReplaceExpression(GroupId group, const GroupExpr *old_expression, unique_ptr<GroupExpr> replacement);

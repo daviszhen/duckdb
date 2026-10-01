@@ -315,6 +315,9 @@ unique_ptr<LogicalOperator> CascadesOptimizer::Optimize(unique_ptr<LogicalOperat
 			count_applies(*result);
 			Printer::Print("--- cascade(cascades) enforcer: the legacy decorrelator takes over " +
 			               std::to_string(remaining) + " Apply(s) the rules did not");
+			Printer::Print("--- cascade(cascades) enforcer: the parameterisation path could take " +
+			               std::to_string(ParameterizableApplies(*result)) +
+			               " of them (no shape taught yet)");
 		}
 		ApplyDecorrelator decorrelator(optimizer_binder, context);
 		result = decorrelator.Decorrelate(std::move(result));
