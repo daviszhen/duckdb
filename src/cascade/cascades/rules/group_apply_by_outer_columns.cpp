@@ -293,6 +293,9 @@ CascadesRulePromise GroupApplyByOuterColumns::Promise(CascadesOptimizer &optimiz
 		// ORCA's Exfp(): the precondition does not hold, so no task is queued. A shape that
 		// passes here but cannot be built is possible in principle, but not on this rule's
 		// path: Apply redoes exactly these checks before it builds anything.
+				if (CascadeConfig::PrintPlans()) {
+			Printer::Print("--- cascade(cascades) rule " + string(Name()) + ": ORCA's Exfp(): the precondition does not hold, so no task is queued. A shape that passes here but cannot be bu");
+		}
 		return CascadesRulePromise::NONE;
 	}
 	return CascadesRulePromise::MEDIUM;
