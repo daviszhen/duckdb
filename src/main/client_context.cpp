@@ -572,13 +572,6 @@ shared_ptr<PreparedStatementData> ClientContext::CreatePreparedStatementInternal
 			ExpressionHeuristics expression_heuristics(heuristics_owner);
 			expression_heuristics.VisitOperator(*logical_plan);
 		}
-		// The build/probe side choice also settles which side of a comparison carries a cast, so it has to
-		// run on the plan the search produced; without it a natural join over differently typed columns
-		// keeps the cast on the column that cannot take it.
-		{
-			BuildProbeSideOptimizer build_probe_side(*this, *logical_plan);
-			build_probe_side.VisitOperator(*logical_plan);
-		}
 		// The host runs the IN-clause rewriter as a pass of its own, separate from the expression rewriter, and
 		// the search does not run it. Without it an IN list whose constants do not fit the column type is cast
 		// constant-first and fails (measured: Conversion Error: Could not convert string 'y' to INT32 on a
@@ -634,6 +627,13 @@ shared_ptr<PreparedStatementData> ClientContext::CreatePreparedStatementInternal
 		{
 			JoinOrderOptimizer join_order_optimizer(*this);
 			logical_plan = join_order_optimizer.Optimize(std::move(logical_plan));
+		// The build/probe side choice also settles which side of a comparison carries a cast, and it has to
+		// run where the host runs it: after the join order planner has set up the delim scan statistics,
+		// because flipping a delim join before that leaves the planner unable to find them.
+		{
+			BuildProbeSideOptimizer build_probe_side(*this, *logical_plan);
+			build_probe_side.VisitOperator(*logical_plan);
+		}
 		}
 		// A materialised CTE cannot be stopped by the limit above it: the recursion runs to completion before
 		// the limit sees a row, which is why a recursive CTE with a selective filter never finished here
