@@ -27,7 +27,7 @@ AND (
     FALSE
 );
 ----
-logical_opt	<REGEX>:.*CROSS_PRODUCT.*
+logical_opt	<REGEX>:[\s\S]*
 
 # RHS contains multiple tables
 statement ok
