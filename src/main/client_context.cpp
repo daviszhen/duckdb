@@ -1,3 +1,4 @@
+#include "duckdb/optimizer/in_clause_rewriter.hpp"
 #include "duckdb/planner/operator/logical_secure_view.hpp"
 #include "duckdb/optimizer/outer_join_simplification.hpp"
 #include "duckdb/optimizer/filter_pushdown.hpp"
@@ -561,6 +562,15 @@ shared_ptr<PreparedStatementData> ClientContext::CreatePreparedStatementInternal
 				// correlation guards and catch only that, or decide from the plan before calling in.
 				CascadesOptimizer cascades(*logical_planner.binder, *this);
 				logical_plan = cascades.Optimize(std::move(logical_plan));
+		// The host runs the IN-clause rewriter as a pass of its own, separate from the expression rewriter, and
+		// the search does not run it. Without it an IN list whose constants do not fit the column type is cast
+		// constant-first and fails (measured: Conversion Error: Could not convert string 'y' to INT32 on a
+		// plain integer column), where the rewritten form casts the column instead and matches nothing.
+		{
+			Optimizer in_clause_owner(*logical_planner.binder, *this);
+			InClauseRewriter in_clause_rewriter(*this, in_clause_owner);
+			logical_plan = in_clause_rewriter.Rewrite(std::move(logical_plan));
+		}
 		// The join ordering phase is not just ordering: as its own comment in the host says, it rewrites
 		// cross products plus filters into joins and pushes filters down. Without it the plan keeps the
 		// binder's cross products - measured on the join-heavy TPC-H queries, where the host produced two
