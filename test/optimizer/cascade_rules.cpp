@@ -110,4 +110,12 @@ TEST_CASE("cascade physical attribution: the host plans the shape with its own o
 	// "Table Scan" is accepted too, so the test pins the attribution rather than the spelling.
 	bool scanned = plan.find("Seq Scan") != string::npos || plan.find("Table Scan") != string::npos;
 	REQUIRE(scanned);
+
+	// EXformId 9: a constant relation - a VALUES list - is planned as the host's column data scan
+	// (plan_column_data_get.cpp). The name the plan prints for it is checked here.
+	auto constants = con.Query("EXPLAIN SELECT * FROM (VALUES (1), (2)) t(x)");
+	REQUIRE(constants);
+	REQUIRE(constants->RowCount() > 0);
+	auto constants_plan = constants->GetValue(1, 0).ToString();
+	REQUIRE(constants_plan.find("Column Data Scan") != string::npos);
 }
