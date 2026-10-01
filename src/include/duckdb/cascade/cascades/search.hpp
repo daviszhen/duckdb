@@ -18,6 +18,8 @@
 #include "duckdb/cascade/apply_decorrelation.hpp"
 #include "duckdb/cascade/cascades/cost.hpp"
 #include "duckdb/cascade/cascades/memo.hpp"
+#include <functional>
+
 #include "duckdb/cascade/cascades/rule.hpp"
 #include "duckdb/planner/operator/logical_dependent_join.hpp"
 #include "duckdb/cascade/cascades/task.hpp"
@@ -80,6 +82,26 @@ public:
 			count += ParameterizableApplies(*child);
 		}
 		return count;
+	}
+
+	//! The same traversal, one line per bucket: how many Applies carry 1, 2 or 3+ correlated
+	//! columns. The count decides which shape the rewrite starts with; the buckets that are left
+	//! decide the order of everything after it. Counting only, never applied.
+	string ParameterisableBreakdown(const LogicalOperator &op) const {
+		vector<idx_t> buckets(4, 0);
+		std::function<void(const LogicalOperator &)> walk = [&](const LogicalOperator &node) {
+			if (node.type == LogicalOperatorType::LOGICAL_DEPENDENT_JOIN) {
+				auto &apply = node.Cast<LogicalDependentJoin>();
+				auto n = apply.correlated_columns.size();
+				buckets[n < 3 ? n : 3]++;
+			}
+			for (auto &child : node.children) {
+				walk(*child);
+			}
+		};
+		walk(op);
+		return "one column=" + std::to_string(buckets[1]) + " two=" + std::to_string(buckets[2]) +
+		       " three_or_more=" + std::to_string(buckets[3]);
 	}
 	//! Replace an expression of a group in place, for the rules that have to rewrite what the parent
 	//! reads as well as the expression itself (see Memo::ReplaceExpression), then re-schedule it.

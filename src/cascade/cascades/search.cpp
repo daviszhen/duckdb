@@ -318,6 +318,8 @@ unique_ptr<LogicalOperator> CascadesOptimizer::Optimize(unique_ptr<LogicalOperat
 			Printer::Print("--- cascade(cascades) enforcer: the parameterisation path could take " +
 			               std::to_string(ParameterizableApplies(*result)) +
 			               " of them (no shape taught yet)");
+			Printer::Print("--- cascade(cascades) enforcer: parameterisation buckets: " +
+			               ParameterisableBreakdown(*result));
 		}
 		ApplyDecorrelator decorrelator(optimizer_binder, context);
 		result = decorrelator.Decorrelate(std::move(result));
