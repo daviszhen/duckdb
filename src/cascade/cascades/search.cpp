@@ -4,6 +4,7 @@
 #include "duckdb/cascade/cascade_config.hpp"
 #include "duckdb/cascade/cascades/rules/apply_to_join.hpp"
 #include "duckdb/cascade/cascades/rules/expand_nary_join.hpp"
+#include "duckdb/cascade/cascades/rules/select_2_filter.hpp"
 #include "duckdb/cascade/cascades/rules/correlated_apply_to_join.hpp"
 #include "duckdb/cascade/cascades/rules/group_apply_by_outer_columns.hpp"
 #include "duckdb/cascade/cascades/rules/collapse_project.hpp"
@@ -65,6 +66,8 @@ void CascadesOptimizer::RegisterRules() {
 	AddRule(make_uniq<ExpandNAryJoin>());
 	AddRule(make_uniq<ExpandNAryJoinMinCard>());
 	AddRule(make_uniq<ExpandNAryJoinDP>());
+	// ORCA EXformId 13: Select2Filter, migrated as the invariant a Filter has to satisfy.
+	AddRule(make_uniq<Select2Filter>());
 	// Section 2, identity (3): a predicate reading only the sub-query's own columns moves above
 	// the Apply.
 	AddRule(make_uniq<LiftLocalPredicate>());

@@ -14,6 +14,7 @@
 #include "duckdb/cascade/cascades/rules/correlated_apply_to_join.hpp"
 #include "duckdb/cascade/cascades/rules/expand_nary_join.hpp"
 #include "duckdb/cascade/cascades/rules/group_apply_by_outer_columns.hpp"
+#include "duckdb/cascade/cascades/rules/select_2_filter.hpp"
 #include "duckdb/cascade/cascades/rules/lift_local_predicate.hpp"
 #include "duckdb/cascade/cascades/rules/push_filter_below_groupby.hpp"
 #include "duckdb/cascade/cascades/rules/semi_apply_to_join.hpp"
@@ -63,6 +64,9 @@ const RuleContract RULE_CONTRACTS[] = {
      3, true, LogicalOperatorType::LOGICAL_AGGREGATE_AND_GROUP_BY},
     {"expand_nary_join_dp", CascadesRuleKind::EXPLORATION, LogicalOperatorType::LOGICAL_COMPARISON_JOIN,
      3, true, LogicalOperatorType::LOGICAL_FILTER},
+    // ORCA EXformId 13: migrated as the invariant a Filter has to satisfy, since DuckDB has no Select.
+    {"select_2_filter", CascadesRuleKind::EXPLORATION, LogicalOperatorType::LOGICAL_FILTER,
+     1, true, LogicalOperatorType::LOGICAL_DISTINCT},
 };
 
 } // namespace
@@ -81,6 +85,7 @@ TEST_CASE("cascade rule: the declared contract of every registered rule", "[casc
 	rules.push_back(make_uniq<ExpandNAryJoin>());
 	rules.push_back(make_uniq<ExpandNAryJoinMinCard>());
 	rules.push_back(make_uniq<ExpandNAryJoinDP>());
+	rules.push_back(make_uniq<Select2Filter>());
 
 	REQUIRE(rules.size() == sizeof(RULE_CONTRACTS) / sizeof(RULE_CONTRACTS[0]));
 	for (idx_t i = 0; i < rules.size(); i++) {
