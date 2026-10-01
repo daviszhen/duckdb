@@ -35,6 +35,97 @@
 
 using namespace duckdb;
 
+
+namespace {
+
+//! A three-input inner join whose every step has a predicate, plus the shapes the NAry rules need:
+//! the child groups carry the bindings the conditions refer to, which is what the expansion reads to
+//! place each predicate.
+void BuildThreeInputJoin(CascadesOptimizer &optimizer, GroupId &target, vector<GroupId> &inputs) {
+	auto &memo = optimizer.GetMemo();
+	target = memo.AddGroup();
+	for (idx_t i = 0; i < 3; i++) {
+		auto group = memo.AddGroup();
+		auto scan = make_uniq<LogicalDummyScan>(TableIndex(200 + i));
+		optimizer.AddExpression(group, memo.MakeExpr(std::move(scan), {}));
+		memo.GetGroup(group).exprs[0]->bindings = {ColumnBinding(TableIndex(200 + i), ProjectionIndex(0))};
+		inputs.push_back(group);
+	}
+}
+
+unique_ptr<LogicalComparisonJoin> ThreeInputConditions() {
+	auto join = make_uniq<LogicalComparisonJoin>(JoinType::INNER);
+	for (idx_t step = 0; step + 1 < 3; step++) {
+		auto left = make_uniq<BoundColumnRefExpression>("c", LogicalType::INTEGER,
+		                                              ColumnBinding(TableIndex(200 + step), ProjectionIndex(0)));
+		auto right = make_uniq<BoundColumnRefExpression>("c", LogicalType::INTEGER,
+		                                                ColumnBinding(TableIndex(201 + step), ProjectionIndex(0)));
+		join->conditions.emplace_back(std::move(left), std::move(right), ExpressionType::COMPARE_EQUAL);
+	}
+	return join;
+}
+
+//! No join in the produced chain may be condition-free: that would be a cartesian product.
+bool ChainHasNoConditionFreeJoin(Memo &memo, GroupId group) {
+	auto &g = memo.GetGroup(group);
+	if (g.exprs.empty()) {
+		return false;
+	}
+	auto &expr = g.exprs.back();
+	if (expr->type != LogicalOperatorType::LOGICAL_COMPARISON_JOIN || !expr->op) {
+		return false;
+	}
+	if (expr->op->Cast<LogicalComparisonJoin>().conditions.empty()) {
+		return false;
+	}
+	return expr->children.size() == 2;
+}
+
+} // namespace
+
+TEST_CASE("cascade rule: the smallest-first NAry expansion keeps every step connected", "[cascade]") {
+	DuckDB db(nullptr);
+	Connection con(db);
+	auto binder = Binder::CreateBinder(*con.context);
+	CascadesOptimizer optimizer(*binder, *con.context);
+	GroupId target;
+	vector<GroupId> inputs;
+	BuildThreeInputJoin(optimizer, target, inputs);
+
+	GroupExpr expr;
+	expr.type = LogicalOperatorType::LOGICAL_COMPARISON_JOIN;
+	expr.op = ThreeInputConditions();
+	expr.children = inputs;
+
+	ExpandNAryJoinMinCard rule;
+	REQUIRE(rule.Promise(optimizer, expr) != CascadesRulePromise::NONE);
+	REQUIRE(rule.Apply(optimizer, target, expr));
+	REQUIRE(ChainHasNoConditionFreeJoin(optimizer.GetMemo(), target));
+}
+
+TEST_CASE("cascade rule: the DP NAry expansion offers only connected orders", "[cascade]") {
+	DuckDB db(nullptr);
+	Connection con(db);
+	auto binder = Binder::CreateBinder(*con.context);
+	CascadesOptimizer optimizer(*binder, *con.context);
+	GroupId target;
+	vector<GroupId> inputs;
+	BuildThreeInputJoin(optimizer, target, inputs);
+
+	GroupExpr expr;
+	expr.type = LogicalOperatorType::LOGICAL_COMPARISON_JOIN;
+	expr.op = ThreeInputConditions();
+	expr.children = inputs;
+
+	ExpandNAryJoinDP rule;
+	REQUIRE(rule.Promise(optimizer, expr) != CascadesRulePromise::NONE);
+	REQUIRE(rule.Apply(optimizer, target, expr));
+	// Every alternative it offered has to be connected, and it has to have offered at least one.
+	auto &group = optimizer.GetMemo().GetGroup(target);
+	REQUIRE(group.exprs.size() >= 2);
+	REQUIRE(ChainHasNoConditionFreeJoin(optimizer.GetMemo(), target));
+}
+
 namespace {
 
 struct RuleContract {
