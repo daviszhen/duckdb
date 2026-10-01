@@ -5,6 +5,7 @@ add_library_unity(
   bound_expression_sql_export.cpp
   bound_function_identity.cpp
   build_probe_side_optimizer.cpp
+  cascade_rules.cpp
   column_binding_rewrite.cpp
   common_subplan_nonserializable.cpp
   expression_type_serialization.cpp

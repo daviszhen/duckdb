@@ -36,6 +36,11 @@
 
 namespace duckdb {
 
+//! A memo group id. The same alias memo.hpp declares: repeated here so that the rule headers stand
+//! on their own - a unit test (or anything else that only needs the rule interface) can include one
+//! without pulling in the memo, which used to be the only way to get this name.
+using GroupId = idx_t;
+
 class GroupExpr;
 class Memo;
 class CascadesOptimizer;
