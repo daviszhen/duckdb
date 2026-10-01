@@ -47,6 +47,13 @@ public:
 	ClientContext &GetContext() {
 		return context;
 	}
+	//! The binder, for a rule that has to mint a table index. An aggregate a rule pushes down
+	//! keeps the index it already had (so the bindings above it do not move); a compensating
+	//! projection is a new operator and needs a new one, and taking it from the binder is what
+	//! keeps it from colliding with an index the plan already uses.
+	Binder &GetBinder() {
+		return optimizer_binder;
+	}
 	//! Add an expression to a group (called by rules).
 	void AddExpression(GroupId group, unique_ptr<GroupExpr> expr);
 	//! Replace an expression of a group in place, for the rules that have to rewrite what the parent

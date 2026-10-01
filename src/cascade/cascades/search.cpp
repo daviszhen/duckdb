@@ -4,6 +4,7 @@
 #include "duckdb/cascade/cascade_config.hpp"
 #include "duckdb/cascade/cascades/rules/apply_to_join.hpp"
 #include "duckdb/cascade/cascades/rules/correlated_apply_to_join.hpp"
+#include "duckdb/cascade/cascades/rules/group_apply_by_outer_columns.hpp"
 #include "duckdb/cascade/cascades/rules/lift_local_predicate.hpp"
 #include "duckdb/cascade/cascades/rules/semi_apply_to_join.hpp"
 #include "duckdb/cascade/cascades/rules/push_filter_below_groupby.hpp"
@@ -46,6 +47,8 @@ void CascadesOptimizer::RegisterRules() {
 	//                     -> ORCA ExfInnerApply2InnerJoin / ExfSelect2Apply
 	//   section 3.1 (A)   predicate below the GroupBy
 	//                     -> ORCA ExfPushGbBelowJoin / ExfPushGbWithHavingBelowJoin
+	//   section 3.2       the scalar sub-query's GroupBy below the outer join
+	//                     -> no ORCA xform; CSubqueryHandler / CDecorrelator
 	//
 	if (!CascadeConfig::MemoRules()) {
 		// The verified state is the skeleton: the memo builds, the tasks run and the plan comes
@@ -66,6 +69,11 @@ void CascadesOptimizer::RegisterRules() {
 	AddRule(make_uniq<CorrelatedApplyToJoin>());
 	// Section 3.1 (A): a predicate constant within a group moves below the GroupBy.
 	AddRule(make_uniq<PushFilterBelowGroupBy>());
+	// Section 3.2: the GroupBy of a correlated scalar sub-query moves below the outer join.
+	// ORCA counterpart: none as a registered xform - this shape is decorrelated in ORCA inside
+	// CSubqueryHandler / CDecorrelator (ExfScalarAggSubquery is NOT an ORCA rule id). Kind:
+	// EXPLORATION, because whether the pushdown pays is the cost model's decision.
+	AddRule(make_uniq<GroupApplyByOuterColumns>());
 }
 
 //! Does this plan still contain an Apply? The host has no physical operator for one, so this is
