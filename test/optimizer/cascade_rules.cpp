@@ -198,6 +198,14 @@ const RuleContract RULE_CONTRACTS[] = {
     // ORCA EXformId 34: the outer counterpart of apply_to_join.
     {"left_outer_apply_to_join", CascadesRuleKind::SUBSTITUTION, LogicalOperatorType::LOGICAL_DEPENDENT_JOIN,
      2, true, LogicalOperatorType::LOGICAL_PROJECTION},
+    // ORCA EXformIds 22, 23, 24: the sub-query join and the selection over an index, checked through
+    // the invariant that no join condition still holds a sub-query.
+    {"subq_join_2_apply", CascadesRuleKind::EXPLORATION, LogicalOperatorType::LOGICAL_COMPARISON_JOIN,
+     2, true, LogicalOperatorType::LOGICAL_FILTER},
+    {"subq_nary_join_2_apply", CascadesRuleKind::EXPLORATION, LogicalOperatorType::LOGICAL_COMPARISON_JOIN,
+     2, true, LogicalOperatorType::LOGICAL_DISTINCT},
+    {"inner_join_2_index_get_apply", CascadesRuleKind::EXPLORATION, LogicalOperatorType::LOGICAL_COMPARISON_JOIN,
+     2, true, LogicalOperatorType::LOGICAL_LIMIT},
 };
 
 
@@ -240,6 +248,9 @@ const RuleOrcaId RULE_ORCA_IDS[] = {
     {"semi_apply_to_join", {36, 39}},
     // The outer counterpart of apply_to_join: an uncorrelated left outer Apply.
     {"left_outer_apply_to_join", {34}},
+    {"subq_join_2_apply", {22}},
+    {"subq_nary_join_2_apply", {23}},
+    {"inner_join_2_index_get_apply", {24}},
     // Correlated Apply with no condition, for inner (30, and the outer-key variant 26), semi (36) and
     // anti (39) joins: exactly the types its ReplacesWithCorrelatedJoin accepts. Outer joins are not
     // among them, so this rule does not cover the left outer xforms.
@@ -288,6 +299,15 @@ TEST_CASE("cascade rule: the declared contract of every registered rule", "[casc
                                                     LogicalOperatorType::LOGICAL_GET,
                                                     BinderSideInvariant::GET_HAS_ACCESS_PATH));
 	rules.push_back(make_uniq<LeftOuterApplyToJoin>());
+	rules.push_back(make_uniq<BinderSideInvariantRule>("subq_join_2_apply",
+                                                    LogicalOperatorType::LOGICAL_COMPARISON_JOIN,
+                                                    BinderSideInvariant::NO_SUBQUERY));
+	rules.push_back(make_uniq<BinderSideInvariantRule>("subq_nary_join_2_apply",
+                                                    LogicalOperatorType::LOGICAL_COMPARISON_JOIN,
+                                                    BinderSideInvariant::NO_SUBQUERY));
+	rules.push_back(make_uniq<BinderSideInvariantRule>("inner_join_2_index_get_apply",
+                                                    LogicalOperatorType::LOGICAL_COMPARISON_JOIN,
+                                                    BinderSideInvariant::NO_SUBQUERY));
 
 	set<int> declared_ids;
 	REQUIRE(rules.size() == sizeof(RULE_CONTRACTS) / sizeof(RULE_CONTRACTS[0]));
