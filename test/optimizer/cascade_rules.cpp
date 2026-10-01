@@ -14,6 +14,7 @@
 #include "duckdb/cascade/cascades/rules/correlated_apply_to_join.hpp"
 #include "duckdb/cascade/cascades/rules/expand_nary_join.hpp"
 #include "duckdb/cascade/cascades/rules/group_apply_by_outer_columns.hpp"
+#include "duckdb/cascade/cascades/rules/binder_side_invariants.hpp"
 #include "duckdb/cascade/cascades/rules/select_2_filter.hpp"
 #include "duckdb/cascade/cascades/rules/lift_local_predicate.hpp"
 #include "duckdb/cascade/cascades/rules/push_filter_below_groupby.hpp"
@@ -67,6 +68,21 @@ const RuleContract RULE_CONTRACTS[] = {
     // ORCA EXformId 13: migrated as the invariant a Filter has to satisfy, since DuckDB has no Select.
     {"select_2_filter", CascadesRuleKind::EXPLORATION, LogicalOperatorType::LOGICAL_FILTER,
      1, true, LogicalOperatorType::LOGICAL_DISTINCT},
+    // ORCA EXformIds 10, 17, 18, 19, 20, 21: one parameterised rule per invariant, batched because
+    // they are the same migration - the shape the binder already established, checked instead of
+    // assumed.
+    {"unnest_tvf", CascadesRuleKind::EXPLORATION, LogicalOperatorType::LOGICAL_UNNEST,
+     1, true, LogicalOperatorType::LOGICAL_LIMIT},
+    {"simplify_select_with_subquery", CascadesRuleKind::EXPLORATION, LogicalOperatorType::LOGICAL_FILTER,
+     1, true, LogicalOperatorType::LOGICAL_ORDER_BY},
+    {"simplify_project_with_subquery", CascadesRuleKind::EXPLORATION, LogicalOperatorType::LOGICAL_PROJECTION,
+     1, true, LogicalOperatorType::LOGICAL_DISTINCT},
+    {"select_2_apply", CascadesRuleKind::EXPLORATION, LogicalOperatorType::LOGICAL_DEPENDENT_JOIN,
+     2, true, LogicalOperatorType::LOGICAL_LIMIT},
+    {"project_2_apply", CascadesRuleKind::EXPLORATION, LogicalOperatorType::LOGICAL_DEPENDENT_JOIN,
+     2, true, LogicalOperatorType::LOGICAL_ORDER_BY},
+    {"gbagg_2_apply", CascadesRuleKind::EXPLORATION, LogicalOperatorType::LOGICAL_DEPENDENT_JOIN,
+     2, true, LogicalOperatorType::LOGICAL_DISTINCT},
 };
 
 } // namespace
@@ -86,6 +102,20 @@ TEST_CASE("cascade rule: the declared contract of every registered rule", "[casc
 	rules.push_back(make_uniq<ExpandNAryJoinMinCard>());
 	rules.push_back(make_uniq<ExpandNAryJoinDP>());
 	rules.push_back(make_uniq<Select2Filter>());
+	rules.push_back(make_uniq<BinderSideInvariantRule>("unnest_tvf", LogicalOperatorType::LOGICAL_UNNEST,
+                                                    BinderSideInvariant::HAS_EXPRESSIONS));
+	rules.push_back(make_uniq<BinderSideInvariantRule>("simplify_select_with_subquery",
+                                                    LogicalOperatorType::LOGICAL_FILTER,
+                                                    BinderSideInvariant::NO_SUBQUERY));
+	rules.push_back(make_uniq<BinderSideInvariantRule>("simplify_project_with_subquery",
+                                                    LogicalOperatorType::LOGICAL_PROJECTION,
+                                                    BinderSideInvariant::NO_SUBQUERY));
+	rules.push_back(make_uniq<BinderSideInvariantRule>("select_2_apply", LogicalOperatorType::LOGICAL_DEPENDENT_JOIN,
+                                                    BinderSideInvariant::TWO_INPUTS));
+	rules.push_back(make_uniq<BinderSideInvariantRule>("project_2_apply", LogicalOperatorType::LOGICAL_DEPENDENT_JOIN,
+                                                    BinderSideInvariant::TWO_INPUTS));
+	rules.push_back(make_uniq<BinderSideInvariantRule>("gbagg_2_apply", LogicalOperatorType::LOGICAL_DEPENDENT_JOIN,
+                                                    BinderSideInvariant::TWO_INPUTS));
 
 	REQUIRE(rules.size() == sizeof(RULE_CONTRACTS) / sizeof(RULE_CONTRACTS[0]));
 	for (idx_t i = 0; i < rules.size(); i++) {

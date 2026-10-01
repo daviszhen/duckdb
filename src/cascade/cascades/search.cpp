@@ -5,6 +5,7 @@
 #include "duckdb/cascade/cascades/rules/apply_to_join.hpp"
 #include "duckdb/cascade/cascades/rules/expand_nary_join.hpp"
 #include "duckdb/cascade/cascades/rules/select_2_filter.hpp"
+#include "duckdb/cascade/cascades/rules/binder_side_invariants.hpp"
 #include "duckdb/cascade/cascades/rules/correlated_apply_to_join.hpp"
 #include "duckdb/cascade/cascades/rules/group_apply_by_outer_columns.hpp"
 #include "duckdb/cascade/cascades/rules/collapse_project.hpp"
@@ -68,6 +69,21 @@ void CascadesOptimizer::RegisterRules() {
 	AddRule(make_uniq<ExpandNAryJoinDP>());
 	// ORCA EXformId 13: Select2Filter, migrated as the invariant a Filter has to satisfy.
 	AddRule(make_uniq<Select2Filter>());
+	// ORCA EXformIds 10, 17, 18, 19, 20, 21: the rules whose pre-shape the binder already removed,
+	// migrated as the invariants they establish (one parameterised rule per invariant).
+	AddRule(make_uniq<BinderSideInvariantRule>("unnest_tvf", LogicalOperatorType::LOGICAL_UNNEST,
+	                                           BinderSideInvariant::HAS_EXPRESSIONS));
+	AddRule(make_uniq<BinderSideInvariantRule>("simplify_select_with_subquery", LogicalOperatorType::LOGICAL_FILTER,
+	                                           BinderSideInvariant::NO_SUBQUERY));
+	AddRule(make_uniq<BinderSideInvariantRule>("simplify_project_with_subquery",
+	                                           LogicalOperatorType::LOGICAL_PROJECTION,
+	                                           BinderSideInvariant::NO_SUBQUERY));
+	AddRule(make_uniq<BinderSideInvariantRule>("select_2_apply", LogicalOperatorType::LOGICAL_DEPENDENT_JOIN,
+	                                           BinderSideInvariant::TWO_INPUTS));
+	AddRule(make_uniq<BinderSideInvariantRule>("project_2_apply", LogicalOperatorType::LOGICAL_DEPENDENT_JOIN,
+	                                           BinderSideInvariant::TWO_INPUTS));
+	AddRule(make_uniq<BinderSideInvariantRule>("gbagg_2_apply", LogicalOperatorType::LOGICAL_DEPENDENT_JOIN,
+	                                           BinderSideInvariant::TWO_INPUTS));
 	// Section 2, identity (3): a predicate reading only the sub-query's own columns moves above
 	// the Apply.
 	AddRule(make_uniq<LiftLocalPredicate>());
