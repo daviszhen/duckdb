@@ -5,7 +5,6 @@
 #include "duckdb/cascade/cascades/rules/apply_to_join.hpp"
 #include "duckdb/cascade/cascades/rules/correlated_apply_to_join.hpp"
 #include "duckdb/cascade/cascades/rules/group_apply_by_outer_columns.hpp"
-#include "duckdb/cascade/cascades/rules/correlated_inner_aggregate_apply.hpp"
 #include "duckdb/cascade/cascades/rules/lift_local_predicate.hpp"
 #include "duckdb/cascade/cascades/rules/semi_apply_to_join.hpp"
 #include "duckdb/cascade/cascades/rules/push_filter_below_groupby.hpp"
@@ -75,12 +74,6 @@ void CascadesOptimizer::RegisterRules() {
 	// CSubqueryHandler / CDecorrelator (ExfScalarAggSubquery is NOT an ORCA rule id). Kind:
 	// EXPLORATION, because whether the pushdown pays is the cost model's decision.
 	AddRule(make_uniq<GroupApplyByOuterColumns>());
-	// The inner-apply family the corpus is made of: a correlated sub-query in the FROM clause with a
-	// table of its own that aggregates over the outer row. Registered as a probe first (its Apply
-	// builds nothing yet) so that the shape it is given can be read off its promise reasons; see the
-	// rule's header for why it matches the Apply rather than its consumer. ORCA counterpart: none as
-	// a registered xform - CSubqueryHandler / CDecorrelator handle it.
-	AddRule(make_uniq<CorrelatedInnerAggregateApply>());
 }
 
 //! Does this plan still contain an Apply? The host has no physical operator for one, so this is
