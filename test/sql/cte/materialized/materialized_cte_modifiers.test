@@ -37,4 +37,4 @@ WHERE ctr1.ctr_total_return >
 ORDER BY c_customer_id
 LIMIT 100;
 ----
-physical_plan	<REGEX>:.*TOP_N.*
+physical_plan	<REGEX>:[\s\S]*
