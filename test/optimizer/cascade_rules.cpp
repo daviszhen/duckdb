@@ -7,10 +7,16 @@
 // operator. Tests of what a rule *produces* are added with each rule's transformation.
 #include <set>
 
+#include "duckdb/main/connection.hpp"
+#include "duckdb/main/database.hpp"
+
 #include "catch.hpp"
 #include "test_helpers.hpp"
 
 #include "duckdb/cascade/cascades/memo.hpp"
+#include "duckdb/cascade/cascades/search.hpp"
+#include "duckdb/planner/binder.hpp"
+#include "duckdb/planner/operator/logical_dependent_join.hpp"
 #include "duckdb/cascade/cascades/rules/apply_to_join.hpp"
 #include "duckdb/cascade/cascades/rules/collapse_project.hpp"
 #include "duckdb/cascade/cascades/rules/correlated_apply_to_join.hpp"
@@ -291,4 +297,36 @@ TEST_CASE("cascade physical attribution: the host plans the shape with its own o
 	REQUIRE(constants->RowCount() > 0);
 	auto constants_plan = constants->GetValue(1, 0).ToString();
 	REQUIRE(constants_plan.find("Column Data Scan") != string::npos);
+}
+
+// The shapes the corpus does not contain still have to be exercised, and that means driving Apply
+// rather than only checking Matches. This is the smallest fixture that can: a client context and a
+// binder, a memo with three groups, and a synthesized expression to hand the rule.
+TEST_CASE("cascade rule: the outer Apply rule builds the join it claims", "[cascade]") {
+	DuckDB db(nullptr);
+	Connection con(db);
+	auto binder = Binder::CreateBinder(*con.context);
+	CascadesOptimizer optimizer(*binder, *con.context);
+
+	auto target = optimizer.GetMemo().AddGroup();
+	auto left = optimizer.GetMemo().AddGroup();
+	auto right = optimizer.GetMemo().AddGroup();
+
+	GroupExpr expr;
+	expr.type = LogicalOperatorType::LOGICAL_DEPENDENT_JOIN;
+	expr.op = make_uniq<LogicalDependentJoin>(JoinType::LEFT);
+	expr.children = {left, right};
+
+	LeftOuterApplyToJoin rule;
+	// The precondition holds: an outer Apply with no correlation and no condition.
+	REQUIRE(rule.Promise(optimizer, expr) != CascadesRulePromise::NONE);
+	REQUIRE(rule.Apply(optimizer, target, expr));
+
+	// What it promised to build: a comparison join over the same two inputs.
+	auto &group = optimizer.GetMemo().GetGroup(target);
+	REQUIRE(!group.exprs.empty());
+	REQUIRE(group.exprs.back()->type == LogicalOperatorType::LOGICAL_COMPARISON_JOIN);
+	REQUIRE(group.exprs.back()->children.size() == 2);
+	REQUIRE(group.exprs.back()->children[0] == left);
+	REQUIRE(group.exprs.back()->children[1] == right);
 }
