@@ -27,7 +27,9 @@ bool CascadeConfig::UseCascadeOptimizer() {
 }
 
 bool CascadeConfig::UseMemoOptimizer() {
-	static const bool enabled = EnvFlagSet("DUCKDB_CASCADE_MEMO");
+	// The memo is the default optimizer now. The host optimizer is still reachable, but only by asking for
+	// it: DUCKDB_HOST_OPTIMIZER=1 selects the fallback explicitly, and nothing selects it by default.
+	static const bool enabled = !EnvFlagSet("DUCKDB_HOST_OPTIMIZER");
 	return enabled;
 }
 
