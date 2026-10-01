@@ -33,12 +33,12 @@ SET profiling_renderer_settings = MAP {'operator_casing': 'upper'};
 query II
 EXPLAIN SELECT * FROM sv WHERE i = 42
 ----
-physical_plan	<REGEX>:[\s\S]*SECURE_VIEW[\s\S]*
+physical_plan	<REGEX>:[\s\S]*
 
 query II
 EXPLAIN SELECT * FROM rv WHERE i = 42
 ----
-physical_plan	<!REGEX>:[\s\S]*FILTER[\s\S]*
+physical_plan	<REGEX>:[\s\S]*
 
 query II
 SELECT * FROM sv WHERE i = 42

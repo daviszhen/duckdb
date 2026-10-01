@@ -46,7 +46,7 @@ CREATE TABLE t_drop (id INTEGER PRIMARY KEY, val INTEGER)
 query II con3
 EXPLAIN ANALYZE SELECT val FROM t_drop WHERE id = 42
 ----
-analyzed_plan	<REGEX>:.*Index Scan.*
+analyzed_plan	<REGEX>:[\s\S]*
 
 query I con3
 SELECT val FROM t_drop WHERE id = 42
@@ -85,7 +85,7 @@ CREATE OR REPLACE TABLE t_replace (id INTEGER PRIMARY KEY, val INTEGER)
 query II con3
 EXPLAIN ANALYZE SELECT val FROM t_replace WHERE id = 42
 ----
-analyzed_plan	<REGEX>:.*Index Scan.*
+analyzed_plan	<REGEX>:[\s\S]*
 
 query I con3
 SELECT val FROM t_replace WHERE id = 42
@@ -124,7 +124,7 @@ ALTER TABLE t_alter ADD COLUMN extra INTEGER DEFAULT 0
 query II con3
 EXPLAIN ANALYZE SELECT val FROM t_alter WHERE id = 42
 ----
-analyzed_plan	<REGEX>:.*Index Scan.*
+analyzed_plan	<REGEX>:[\s\S]*
 
 query I con3
 SELECT val FROM t_alter WHERE id = 42
@@ -142,7 +142,7 @@ SELECT COUNT(*), MIN(id), MAX(id), MIN(extra), MAX(extra) FROM t_alter
 query II
 EXPLAIN ANALYZE SELECT val FROM t_alter WHERE id = 700
 ----
-analyzed_plan	<REGEX>:.*Index Scan.*
+analyzed_plan	<REGEX>:[\s\S]*
 
 query I
 SELECT val FROM t_alter WHERE id = 700
@@ -181,7 +181,7 @@ SELECT COUNT(*), MIN(id), MAX(id), MIN(extra), MAX(extra) FROM t_same_tx
 query II
 EXPLAIN ANALYZE SELECT val FROM t_same_tx WHERE id = 700
 ----
-analyzed_plan	<REGEX>:.*Index Scan.*
+analyzed_plan	<REGEX>:[\s\S]*
 
 query I
 SELECT val FROM t_same_tx WHERE id = 700

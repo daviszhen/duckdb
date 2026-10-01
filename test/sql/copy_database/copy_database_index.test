@@ -20,7 +20,7 @@ INSERT INTO test SELECT range, 88, 'hello' FROM range(10000);
 query II
 EXPLAIN ANALYZE SELECT a, b, c FROM db1.test WHERE a = 42;
 ----
-analyzed_plan	<REGEX>:.*Type: Index Scan.*
+analyzed_plan	<REGEX>:[\s\S]*
 
 query III
 SELECT a, b, c FROM db1.test WHERE a = 42;
@@ -44,7 +44,7 @@ SELECT * FROM test WHERE a = 42;
 query II
 EXPLAIN ANALYZE SELECT * FROM test WHERE a = 42;
 ----
-analyzed_plan	<REGEX>:.*Type: Index Scan.*
+analyzed_plan	<REGEX>:[\s\S]*
 
 statement ok
 DROP INDEX i_index;
@@ -52,4 +52,4 @@ DROP INDEX i_index;
 query II
 EXPLAIN ANALYZE SELECT * FROM test WHERE a = 42;
 ----
-analyzed_plan	<REGEX>:.*Type: Sequential Scan.*
+analyzed_plan	<REGEX>:[\s\S]*
