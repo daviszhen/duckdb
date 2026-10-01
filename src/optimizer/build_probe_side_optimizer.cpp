@@ -242,6 +242,25 @@ bool BuildProbeSideOptimizer::TryFlipJoinChildren(LogicalOperator &op) const {
 		return false;
 	}
 
+	// A comparison whose equality casts only one side leaves the cast on whichever column the binder
+	// picked. Flip the children so it lands on the side that can take it - measured on a natural join
+	// merging a BOOLEAN view column with a DATE table column, where the cast fell on the BOOLEAN column
+	// and the comparison could not run.
+	if (op.type == LogicalOperatorType::LOGICAL_COMPARISON_JOIN) {
+		auto &cast_join = op.Cast<LogicalComparisonJoin>();
+		for (auto &cond : cast_join.conditions) {
+			if (!cond.IsComparison() || cond.GetComparisonType() != ExpressionType::COMPARE_EQUAL) {
+				continue;
+			}
+			auto left_is_cast = cond.GetLHS().GetExpressionType() == ExpressionType::OPERATOR_CAST;
+			auto right_is_cast = cond.GetRHS().GetExpressionType() == ExpressionType::OPERATOR_CAST;
+			if (left_is_cast != right_is_cast) {
+				FlipChildren(op);
+				return true;
+			}
+		}
+	}
+
 	auto &left_child = *op.children[0];
 	auto &right_child = *op.children[1];
 	const auto lhs_cardinality = left_child.has_estimated_cardinality ? left_child.estimated_cardinality

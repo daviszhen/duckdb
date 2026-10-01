@@ -1,3 +1,4 @@
+#include "duckdb/optimizer/build_probe_side_optimizer.hpp"
 #include "duckdb/optimizer/in_clause_rewriter.hpp"
 #include "duckdb/planner/operator/logical_secure_view.hpp"
 #include "duckdb/optimizer/outer_join_simplification.hpp"
@@ -562,6 +563,13 @@ shared_ptr<PreparedStatementData> ClientContext::CreatePreparedStatementInternal
 				// correlation guards and catch only that, or decide from the plan before calling in.
 				CascadesOptimizer cascades(*logical_planner.binder, *this);
 				logical_plan = cascades.Optimize(std::move(logical_plan));
+		// The build/probe side choice also settles which side of a comparison carries a cast, so it has to
+		// run on the plan the search produced; without it a natural join over differently typed columns
+		// keeps the cast on the column that cannot take it.
+		{
+			BuildProbeSideOptimizer build_probe_side(*this, *logical_plan);
+			build_probe_side.VisitOperator(*logical_plan);
+		}
 		// The host runs the IN-clause rewriter as a pass of its own, separate from the expression rewriter, and
 		// the search does not run it. Without it an IN list whose constants do not fit the column type is cast
 		// constant-first and fails (measured: Conversion Error: Could not convert string 'y' to INT32 on a
