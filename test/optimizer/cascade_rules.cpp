@@ -329,4 +329,17 @@ TEST_CASE("cascade rule: the outer Apply rule builds the join it claims", "[casc
 	REQUIRE(group.exprs.back()->children.size() == 2);
 	REQUIRE(group.exprs.back()->children[0] == left);
 	REQUIRE(group.exprs.back()->children[1] == right);
+
+	// And the shapes it must refuse: an inner Apply is apply_to_join's case, not this rule's, and a
+	// rule that transformed it anyway would turn a left outer join into an inner one.
+	GroupExpr inner;
+	inner.type = LogicalOperatorType::LOGICAL_DEPENDENT_JOIN;
+	inner.op = make_uniq<LogicalDependentJoin>(JoinType::INNER);
+	inner.children = {left, right};
+	CHECK(rule.Promise(optimizer, inner) == CascadesRulePromise::NONE);
+	CHECK(!rule.Apply(optimizer, target, inner));
+
+	// A correlated Apply needs the parameterisation this rule does not have, so it declines too. The
+	// correlated columns live in a CorrelatedColumns collection whose insertion API is not the vector
+	// one; the check is added with it rather than guessed here.
 }
