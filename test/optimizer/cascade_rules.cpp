@@ -16,6 +16,7 @@
 #include "duckdb/cascade/cascades/memo.hpp"
 #include "duckdb/cascade/cascades/search.hpp"
 #include "duckdb/planner/binder.hpp"
+#include "duckdb/planner/expression/bound_columnref_expression.hpp"
 #include "duckdb/planner/operator/logical_dependent_join.hpp"
 #include "duckdb/cascade/cascades/rules/apply_to_join.hpp"
 #include "duckdb/cascade/cascades/rules/collapse_project.hpp"
@@ -340,6 +341,17 @@ TEST_CASE("cascade rule: the outer Apply rule builds the join it claims", "[casc
 	CHECK(!rule.Apply(optimizer, target, inner));
 
 	// A correlated Apply needs the parameterisation this rule does not have, so it declines too. The
-	// correlated columns live in a CorrelatedColumns collection whose insertion API is not the vector
-	// one; the check is added with it rather than guessed here.
+	// correlated columns go in through CorrelatedColumns::AddColumn, whose CorrelatedColumnInfo can be
+	// built from a column reference - the collection is not a vector, which is why this is not a
+	// push_back.
+	GroupExpr correlated;
+	correlated.type = LogicalOperatorType::LOGICAL_DEPENDENT_JOIN;
+	correlated.op = make_uniq<LogicalDependentJoin>(JoinType::LEFT);
+	correlated.children = {left, right};
+	BoundColumnRefExpression correlated_ref("c", LogicalType::INTEGER,
+	                                        ColumnBinding(TableIndex(7), ProjectionIndex(0)));
+	correlated.op->Cast<LogicalDependentJoin>().correlated_columns.AddColumn(
+	    CorrelatedColumnInfo(correlated_ref));
+	CHECK(rule.Promise(optimizer, correlated) == CascadesRulePromise::NONE);
+	CHECK(!rule.Apply(optimizer, target, correlated));
 }
