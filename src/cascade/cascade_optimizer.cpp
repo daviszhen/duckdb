@@ -103,7 +103,20 @@ unique_ptr<LogicalOperator> CascadeOptimizer::Optimize(unique_ptr<LogicalOperato
 
 	// Apply elimination: ours, in place of FlattenDependentJoins.
 	ApplyDecorrelator decorrelator(binder, context);
-	plan = decorrelator.Decorrelate(std::move(plan));
+	// A shape this pass cannot handle must not end the query here: the memo's rules are the
+	// place those shapes are meant to be handled, and this pass runs *before* them, so
+	// throwing would mean the rules never see the Apply at all. Keep the plan as it is and let
+	// the pipeline try; if nothing there handles it either, the enforcer runs this same
+	// decorrelator and raises the same exception - so an unhandled shape still fails, with the
+	// same error, but only after the rules had their chance. Measured motivation: with the pass
+	// throwing first, the memo reported `rules applied=0` and its `enforced` counter stayed 0,
+	// i.e. no rule could ever be observed to take any of this work.
+	auto untransformed = plan->Copy(context);
+	try {
+		plan = decorrelator.Decorrelate(std::move(plan));
+	} catch (const NotImplementedException &) {
+		plan = std::move(untransformed);
+	}
 
 	// Then turn the marker joins that produced into the semi/anti joins they mean.
 	plan = SimplifyMarkerJoins(std::move(plan));

@@ -269,6 +269,14 @@ unique_ptr<LogicalOperator> CascadesOptimizer::Optimize(unique_ptr<LogicalOperat
 	// Apply the rules remove makes this number smaller.
 	if (PlanHasApply(*result)) {
 		enforced++;
+		if (CascadeConfig::PrintPlans()) {
+			// Printed before the decorrelation below, which can throw: the summary line at the end
+			// of the search never runs in that case, so without this the two stages are
+			// indistinguishable in the output - "the pre-pass refused it" and "the enforcer had to
+			// apply the decorrelation and refused it" look the same.
+			Printer::Print("--- cascade(cascades) enforcer: the plan still has an Apply, enforced=" +
+			               std::to_string(enforced));
+		}
 // Reusing the host's dependent-join flattening here was measured and does not work: calling
 // FlattenDependentJoins::DecorrelateIndependent at this point produced INTERNAL errors in 51 of
 // the 88 sub-query files. The component expects the plan it is given to be untouched - it walks
