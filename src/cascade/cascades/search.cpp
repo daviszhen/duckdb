@@ -5,6 +5,7 @@
 #include "duckdb/cascade/cascades/rules/apply_to_join.hpp"
 #include "duckdb/cascade/cascades/rules/correlated_apply_to_join.hpp"
 #include "duckdb/cascade/cascades/rules/group_apply_by_outer_columns.hpp"
+#include "duckdb/cascade/cascades/rules/collapse_project.hpp"
 #include "duckdb/cascade/cascades/rules/lift_local_predicate.hpp"
 #include "duckdb/cascade/cascades/rules/semi_apply_to_join.hpp"
 #include "duckdb/cascade/cascades/rules/push_filter_below_groupby.hpp"
@@ -74,6 +75,8 @@ void CascadesOptimizer::RegisterRules() {
 	// CSubqueryHandler / CDecorrelator (ExfScalarAggSubquery is NOT an ORCA rule id). Kind:
 	// EXPLORATION, because whether the pushdown pays is the cost model's decision.
 	AddRule(make_uniq<GroupApplyByOuterColumns>());
+	// ORCA ExfCollapseProject (EXformId 139): adjacent projections collapse into one.
+	AddRule(make_uniq<CollapseProject>());
 }
 
 //! Does this plan still contain an Apply? The host has no physical operator for one, so this is
