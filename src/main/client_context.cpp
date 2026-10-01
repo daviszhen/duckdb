@@ -1,3 +1,4 @@
+#include "duckdb/optimizer/expression_heuristics.hpp"
 #include "duckdb/optimizer/build_probe_side_optimizer.hpp"
 #include "duckdb/optimizer/in_clause_rewriter.hpp"
 #include "duckdb/planner/operator/logical_secure_view.hpp"
@@ -563,6 +564,14 @@ shared_ptr<PreparedStatementData> ClientContext::CreatePreparedStatementInternal
 				// correlation guards and catch only that, or decide from the plan before calling in.
 				CascadesOptimizer cascades(*logical_planner.binder, *this);
 				logical_plan = cascades.Optimize(std::move(logical_plan));
+		// The host runs the expression heuristics as part of its own pipeline; the search does not, and the
+		// operand order it settles is visible in the plan (for instance the OR that an IS NOT DISTINCT FROM
+		// expands into). Run it here so the plan the search produces reads the way the host's does.
+		{
+			Optimizer heuristics_owner(*logical_planner.binder, *this);
+			ExpressionHeuristics expression_heuristics(heuristics_owner);
+			expression_heuristics.VisitOperator(*logical_plan);
+		}
 		// The build/probe side choice also settles which side of a comparison carries a cast, so it has to
 		// run on the plan the search produced; without it a natural join over differently typed columns
 		// keeps the cast on the column that cannot take it.
