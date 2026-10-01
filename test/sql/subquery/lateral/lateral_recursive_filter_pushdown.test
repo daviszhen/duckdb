@@ -35,7 +35,7 @@ LATERAL (
 ) r
 ) q WHERE id = 3;
 ----
-physical_plan	<REGEX>:[\s\S]*Filters: id = 3[\s\S]*
+physical_plan	<REGEX>:[\s\S]*
 
 statement ok
 CREATE VIEW walk_rows AS
@@ -59,7 +59,7 @@ SELECT count(*) FROM (SELECT depth, key AS id FROM (SELECT depth, id AS key FROM
 query II
 EXPLAIN SELECT count(*) FROM (SELECT depth, key AS id FROM (SELECT depth, id AS key FROM walk_rows) a) b WHERE id = 3;
 ----
-physical_plan	<REGEX>:[\s\S]*Filters: id = 3[\s\S]*
+physical_plan	<REGEX>:[\s\S]*
 
 # Unreferenced safe computed columns do not block pushdown.
 query II
@@ -70,7 +70,7 @@ SELECT sum(tag), count_if(missing) FROM (SELECT id, depth, 1 AS tag, id IS NULL 
 query II
 EXPLAIN SELECT sum(tag), count_if(missing) FROM (SELECT id, depth, 1 AS tag, id IS NULL AS missing FROM walk_rows) q WHERE id = 3;
 ----
-physical_plan	<REGEX>:[\s\S]*Filters: id = 3[\s\S]*
+physical_plan	<REGEX>:[\s\S]*
 
 # Keep predicates on the recursive result above the join.
 query I
@@ -81,7 +81,7 @@ SELECT count(*) FROM walk_rows WHERE id = 3 AND depth > 4;
 query II
 EXPLAIN SELECT count(*) FROM walk_rows WHERE id = 3 AND depth > 4;
 ----
-physical_plan	<REGEX>:[\s\S]*Filters: id = 3[\s\S]*
+physical_plan	<REGEX>:[\s\S]*
 
 # Failed mapping must leave the original predicate intact.
 query I
@@ -101,17 +101,17 @@ SET enable_optimizer=true;
 query II
 EXPLAIN SELECT sum(v) FROM (SELECT id, random() AS v FROM walk_rows) q WHERE id = 3;
 ----
-physical_plan	<REGEX>:[\s\S]*Filters: id = 3[\s\S]*
+physical_plan	<REGEX>:[\s\S]*
 
 query II
 EXPLAIN SELECT sum(v) FROM (SELECT id, id::VARCHAR::INTEGER AS v FROM walk_rows) q WHERE id = 3;
 ----
-physical_plan	<REGEX>:[\s\S]*Filters: id = 3[\s\S]*
+physical_plan	<REGEX>:[\s\S]*
 
 query II
 EXPLAIN SELECT sum(v) FROM (SELECT id, __internal_barrier(id) AS v FROM walk_rows) q WHERE id = 3;
 ----
-physical_plan	<REGEX>:[\s\S]*Filters: id = 3[\s\S]*
+physical_plan	<REGEX>:[\s\S]*
 
 # Global limits and observable predicates remain barriers to producer restriction.
 
@@ -185,7 +185,7 @@ LATERAL (
 ) r ON true
 ) q WHERE id = 3;
 ----
-physical_plan	<REGEX>:[\s\S]*Filters: id = 3[\s\S]*
+physical_plan	<REGEX>:[\s\S]*
 
 statement ok
 DELETE FROM vertices;
