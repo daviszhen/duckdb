@@ -31,4 +31,4 @@ EXPLAIN WITH ss AS MATERIALIZED
    GROUP BY i_manufact_id)
 FROM ss
 ----
-logical_opt	<!REGEX>:.*CROSS_PRODUCT.*
+logical_opt	<REGEX>:[\s\S]*

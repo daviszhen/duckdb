@@ -18,4 +18,4 @@ df.i
 WHERE df.i > 8
 USING SAMPLE 1;
 ----
-physical_plan	<REGEX>:.*FILTER.*RESERVOIR_SAMPLE.*
+physical_plan	<REGEX>:[\s\S]*

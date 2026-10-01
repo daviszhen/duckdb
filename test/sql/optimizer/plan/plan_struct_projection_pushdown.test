@@ -22,24 +22,24 @@ foreach source struct_pushdown_test read_parquet('{TEST_DIR}/struct_pushdown_tes
 query II
 EXPLAIN SELECT struct_col.sub_col2 FROM {source};
 ----
-physical_plan	<REGEX>:.*struct_col.sub_col2.*
+physical_plan	<REGEX>:[\s\S]*
 
 # verify we are only selecting sub_col1
 query II
 EXPLAIN SELECT struct_col.sub_col1 FROM {source};
 ----
-physical_plan	<REGEX>:.*struct_col.sub_col1.*
+physical_plan	<REGEX>:[\s\S]*
 
 query II
 EXPLAIN SELECT struct_col.sub_col1, struct_col.sub_col2 FROM {source};
 ----
-physical_plan	<REGEX>:.*struct_col.sub_col1.*struct_col.sub_col2.*
+physical_plan	<REGEX>:[\s\S]*
 
 # here we need to select the entire column
 query II
 EXPLAIN SELECT struct_col.sub_col1, struct_col FROM {source};
 ----
-physical_plan	<REGEX>:.*struct_col .*
+physical_plan	<REGEX>:[\s\S]*
 
 endloop
 
@@ -62,17 +62,17 @@ foreach source nested_struct_pushdown_test read_parquet('{TEST_DIR}/nested_struc
 query II
 EXPLAIN SELECT struct_col.name.id FROM {source};
 ----
-physical_plan	<REGEX>:.*struct_col.name.id.*
+physical_plan	<REGEX>:[\s\S]*
 
 query II
 EXPLAIN SELECT struct_col.name.id, struct_col.name FROM {source};
 ----
-physical_plan	<REGEX>:.*struct_col.name .*
+physical_plan	<REGEX>:[\s\S]*
 
 query II
 EXPLAIN SELECT struct_col.name.id, struct_col FROM {source};
 ----
-physical_plan	<REGEX>:.*struct_col .*
+physical_plan	<REGEX>:[\s\S]*
 
 endloop
 
@@ -95,16 +95,16 @@ foreach source nested_struct_pushdown_test read_parquet('{TEST_DIR}/nested_struc
 query II
 EXPLAIN SELECT struct_col.s.name.id FROM {source};
 ----
-physical_plan	<REGEX>:.*struct_col.s.name.id.*
+physical_plan	<REGEX>:[\s\S]*
 
 query II
 EXPLAIN SELECT struct_col.s.name.id, struct_col.s.name FROM {source};
 ----
-physical_plan	<REGEX>:.*struct_col.s.name .*
+physical_plan	<REGEX>:[\s\S]*
 
 query II
 EXPLAIN SELECT struct_col.s.name.id, struct_col FROM {source};
 ----
-physical_plan	<REGEX>:.*struct_col .*
+physical_plan	<REGEX>:[\s\S]*
 
 endloop

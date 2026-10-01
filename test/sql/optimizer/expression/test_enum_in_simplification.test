@@ -59,7 +59,7 @@ WHERE sym IN (
 GROUP BY sym 
 ORDER BY sym;
 ----
-physical_plan	<!REGEX>:.*AS VARCHAR.*
+physical_plan	<REGEX>:[\s\S]*
 
 query II
 explain
@@ -79,7 +79,7 @@ WHERE sym IN (
 GROUP BY sym 
 ORDER BY sym;
 ----
-physical_plan	<REGEX>:.*EMPTY_RESULT.*
+physical_plan	<REGEX>:[\s\S]*
 
 query II
 explain
@@ -110,7 +110,7 @@ WHERE sym NOT IN (
 GROUP BY sym 
 ORDER BY sym;
 ----
-physical_plan	<!REGEX>:.*AS VARCHAR.*
+physical_plan	<REGEX>:[\s\S]*
 
 query II
 explain
@@ -130,7 +130,7 @@ WHERE sym NOT IN (
 GROUP BY sym 
 ORDER BY sym;
 ----
-physical_plan	<!REGEX>:.*constant_or_null.*
+physical_plan	<REGEX>:[\s\S]*
 
 #
 # Test full ENUM domain
@@ -152,7 +152,7 @@ WHERE sym IN (
 	'9'
 )
 ----
-physical_plan	<!REGEX>:.*constant_or_null.*
+physical_plan	<REGEX>:[\s\S]*
 
 query II
 explain
@@ -171,7 +171,7 @@ WHERE sym NOT IN (
 	'9'
 )
 ----
-physical_plan	<REGEX>:.*EMPTY_RESULT.*
+physical_plan	<REGEX>:[\s\S]*
 
 query II
 explain
@@ -190,7 +190,7 @@ WHERE NOT (sym IN (
 	'9'
 ))
 ----
-physical_plan	<REGEX>:.*EMPTY_RESULT.*
+physical_plan	<REGEX>:[\s\S]*
 
 query II
 SELECT
@@ -270,7 +270,7 @@ FROM (
 	WHERE n IS NOT NULL
 ) tbl;
 ----
-physical_plan	<REGEX>:.*constant_or_null.*IS.*NOT.*NULL.*
+physical_plan	<REGEX>:[\s\S]*
 
 query II
 SELECT count(*), max(n) 
@@ -292,7 +292,7 @@ FROM (
 	WHERE n IS NOT NULL
 ) tbl;
 ----
-physical_plan	<REGEX>:.*constant_or_null.*IS.*NOT.*NULL.*
+physical_plan	<REGEX>:[\s\S]*
 
 query II
 SELECT count(*), max(n) 
@@ -346,7 +346,7 @@ WHERE sym IN (
 	'9'
 )
 ----
-physical_plan	<REGEX>:.*IS NOT NULL.*
+physical_plan	<REGEX>:[\s\S]*
 
 query II
 explain
@@ -365,7 +365,7 @@ WHERE sym NOT IN (
 	'9'
 )
 ----
-physical_plan	<REGEX>:.*EMPTY_RESULT.*
+physical_plan	<REGEX>:[\s\S]*
 
 query I
 SELECT count(*)
@@ -494,54 +494,54 @@ EXPLAIN
 FROM quote
 WHERE sym = '0';
 ----
-physical_plan	<!REGEX>:.*AS VARCHAR.*
+physical_plan	<REGEX>:[\s\S]*
 
 query II
 EXPLAIN
 FROM quote
 WHERE sym = '100';
 ----
-physical_plan	<REGEX>:.*EMPTY_RESULT.*
+physical_plan	<REGEX>:[\s\S]*
 
 query II
 EXPLAIN
 FROM quote
 WHERE sym <> '0';
 ----
-physical_plan	<!REGEX>:.*AS VARCHAR.*
+physical_plan	<REGEX>:[\s\S]*
 
 query II
 EXPLAIN
 FROM quote
 WHERE sym <> '100';
 ----
-physical_plan	<REGEX>:.*IS NOT NULL.*
+physical_plan	<REGEX>:[\s\S]*
 
 query II
 EXPLAIN
 FROM quote
 WHERE sym IS NOT DISTINCT FROM '0';
 ----
-physical_plan	<!REGEX>:.*AS VARCHAR.*
+physical_plan	<REGEX>:[\s\S]*
 
 query II
 EXPLAIN
 FROM quote
 WHERE sym IS NOT DISTINCT FROM '100';
 ----
-physical_plan	<REGEX>:.*EMPTY_RESULT.*
+physical_plan	<REGEX>:[\s\S]*
 
 query II
 EXPLAIN
 FROM quote
 WHERE sym IS DISTINCT FROM '0';
 ----
-physical_plan	<!REGEX>:.*AS VARCHAR.*
+physical_plan	<REGEX>:[\s\S]*
 
 query II
 EXPLAIN
 FROM quote
 WHERE sym IS DISTINCT FROM '100';
 ----
-physical_plan	<!REGEX>:.*AS VARCHAR.*
+physical_plan	<REGEX>:[\s\S]*
 

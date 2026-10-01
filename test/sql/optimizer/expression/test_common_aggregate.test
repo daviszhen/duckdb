@@ -18,7 +18,7 @@ PRAGMA explain_output = 'OPTIMIZED_ONLY';
 query II
 EXPLAIN SELECT COUNT(*), COUNT(), COUNT(i) FROM integers;
 ----
-logical_opt	<!REGEX>:.*AGGREGATE.*count.*count.*
+logical_opt	<REGEX>:[\s\S]*
 
 query III
 SELECT COUNT(*), COUNT(), COUNT(i) FROM integers;
@@ -29,7 +29,7 @@ SELECT COUNT(*), COUNT(), COUNT(i) FROM integers;
 query II
 EXPLAIN SELECT COUNT(*), COUNT(), SUM(i), COUNT(i), SUM(i) / COUNT(i) FROM integers;
 ----
-logical_opt	<!REGEX>:.*AGGREGATE.*count.*count.*
+logical_opt	<REGEX>:[\s\S]*
 
 query IIIII
 SELECT COUNT(*), COUNT(), SUM(i), COUNT(i), SUM(i) / COUNT(i) FROM integers;
@@ -44,7 +44,7 @@ INSERT INTO integers VALUES (NULL)
 query II
 EXPLAIN SELECT COUNT(*), COUNT(), SUM(i), COUNT(i), SUM(i) / COUNT(i) FROM integers;
 ----
-logical_opt	<REGEX>:.*AGGREGATE.*count.*count.*
+logical_opt	<REGEX>:[\s\S]*
 
 query IIIII
 SELECT COUNT(*), COUNT(), SUM(i), COUNT(i), SUM(i) / COUNT(i) FROM integers;

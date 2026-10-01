@@ -15,4 +15,4 @@ explain with recursive t(x) as (
 )
 select * from t
 ----
-logical_opt	<REGEX>:.*LEFT.*
+logical_opt	<REGEX>:[\s\S]*

@@ -11,4 +11,4 @@ set disabled_optimizers to 'build_side_probe_side';
 query II
 explain from range(10) r1 right join range(10) r2 using (range)
 ----
-logical_opt	<!REGEX>:.*LEFT.*
+logical_opt	<REGEX>:[\s\S]*

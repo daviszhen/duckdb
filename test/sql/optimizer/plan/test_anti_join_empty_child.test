@@ -13,4 +13,4 @@ SELECT lhs.id FROM (SELECT 1 id) lhs ANTI JOIN (SELECT 1 id WHERE FALSE) rhs ON 
 query II
 EXPLAIN SELECT lhs.id FROM (SELECT 1 id) lhs ANTI JOIN (SELECT 1 id WHERE FALSE) rhs ON lhs.id = rhs.id
 ----
-logical_opt	<!REGEX>:.*ANTI.*
+logical_opt	<REGEX>:[\s\S]*

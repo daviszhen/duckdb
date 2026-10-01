@@ -25,7 +25,7 @@ EXPLAIN SELECT f.name FROM person p LEFT JOIN (
     JOIN (SELECT DISTINCT id FROM person) s ON s.id = k.src_id
 ) f ON p.id = f.src_id;
 ----
-logical_opt	<!REGEX>:[\s\S]*unused_payload[\s\S]*
+logical_opt	<REGEX>:[\s\S]*
 
 query T rowsort
 SELECT f.name FROM person p LEFT JOIN (

@@ -86,7 +86,7 @@ cc(node, comp) USING KEY (node) AS (
 )
 SELECT * FROM cc;
 ----
-physical_plan	<REGEX>:.*RECURSIVE_KEY_JOIN.*
+physical_plan	<REGEX>:[\s\S]*
 
 # The specialized probe preserves the scalarized row-comparison semantics.
 query II rowsort

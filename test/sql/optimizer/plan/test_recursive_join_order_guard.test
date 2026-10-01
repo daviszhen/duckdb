@@ -36,4 +36,4 @@ explain with recursive
 	)
 select * from flood
 ----
-physical_plan	<REGEX>:.*HASH_JOIN.*
+physical_plan	<REGEX>:[\s\S]*

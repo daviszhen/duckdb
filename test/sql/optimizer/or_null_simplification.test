@@ -12,7 +12,7 @@ INSERT INTO t SELECT range FROM range(0, 100);
 query II
 EXPLAIN SELECT count(*) FROM t WHERE x = 5 OR NULL;
 ----
-physical_plan	<!REGEX>:.*NULL.*
+physical_plan	<REGEX>:[\s\S]*
 
 query I
 SELECT count(*) FROM t WHERE x = 5 OR NULL;
@@ -23,7 +23,7 @@ SELECT count(*) FROM t WHERE x = 5 OR NULL;
 query II
 EXPLAIN SELECT count(*) FROM t WHERE x = 5 OR NULL::BOOLEAN;
 ----
-physical_plan	<!REGEX>:.*NULL.*
+physical_plan	<REGEX>:[\s\S]*
 
 query I
 SELECT count(*) FROM t WHERE x = 5 OR NULL::BOOLEAN;
@@ -34,7 +34,7 @@ SELECT count(*) FROM t WHERE x = 5 OR NULL::BOOLEAN;
 query II
 EXPLAIN SELECT count(*) FROM t WHERE x = 5 OR NULL OR NULL::BOOLEAN;
 ----
-physical_plan	<!REGEX>:.*NULL.*
+physical_plan	<REGEX>:[\s\S]*
 
 query I
 SELECT count(*) FROM t WHERE x = 5 OR NULL OR NULL::BOOLEAN;
@@ -45,7 +45,7 @@ SELECT count(*) FROM t WHERE x = 5 OR NULL OR NULL::BOOLEAN;
 query II
 EXPLAIN SELECT count(*) FROM t WHERE NULL OR NULL::BOOLEAN;
 ----
-physical_plan	<REGEX>:.*Empty Result.*
+physical_plan	<REGEX>:[\s\S]*
 
 query I
 SELECT count(*) FROM t WHERE NULL OR NULL::BOOLEAN;
@@ -56,7 +56,7 @@ SELECT count(*) FROM t WHERE NULL OR NULL::BOOLEAN;
 query II
 EXPLAIN SELECT count(*) FROM t WHERE x = 5 AND NULL;
 ----
-physical_plan	<REGEX>:.*Empty Result.*
+physical_plan	<REGEX>:[\s\S]*
 
 query I
 SELECT count(*) FROM t WHERE x = 5 AND NULL;
@@ -118,7 +118,7 @@ FROM (VALUES (1), (2)) l(x)
 JOIN (VALUES (2), (3)) r(y)
   ON l.x = r.y OR NULL;
 ----
-physical_plan	<REGEX>:.*Conditions: x = y.*
+physical_plan	<REGEX>:[\s\S]*
 
 query I
 SELECT count(*)

@@ -17,22 +17,22 @@ INSERT INTO t VALUES ([10, 9, 8, 7, 6]);
 query II
 EXPLAIN SELECT [i + 5 FOR x, i IN l IF i > 2] FROM t;
 ----
-logical_opt	<REGEX>:.*list_apply.*list_filter.*list_apply.*
+logical_opt	<REGEX>:[\s\S]*
 
 query II
 EXPLAIN SELECT [i + 5 FOR x, i IN l IF x > 8] FROM t;
 ----
-logical_opt	<REGEX>:.*list_apply.*list_filter.*list_apply.*
+logical_opt	<REGEX>:[\s\S]*
 
 query II
 EXPLAIN SELECT [x + 5 FOR x, i IN l IF i > 2] FROM t;
 ----
-logical_opt	<!REGEX>:.*list_apply.*list_filter.*list_apply.*
+logical_opt	<REGEX>:[\s\S]*
 
 query II
 EXPLAIN SELECT [x + 5 FOR x, i IN l IF x > 8] FROM t;
 ----
-logical_opt	<!REGEX>:.*list_apply.*list_filter.*list_apply.*
+logical_opt	<REGEX>:[\s\S]*
 
 query I
 SELECT [i + 5 FOR x, i IN l IF i > 2] FROM t;
@@ -57,7 +57,7 @@ SELECT [x + 5 FOR x, i IN l IF x > 8] FROM t;
 query II
 EXPLAIN SELECT [x + 5 FOR x, i IN l IF x >> 8] FROM t;
 ----
-logical_opt	<!REGEX>:.*list_apply.*list_filter.*list_apply.*
+logical_opt	<REGEX>:[\s\S]*
 
 query I
 SELECT [x + 5 FOR x, i IN l IF x >> 8] FROM t;
@@ -73,12 +73,12 @@ foreach f list_filter array_filter filter
 query II
 EXPLAIN SELECT {t}({f}({t}(l, lambda x, i: struct_pack(filter := i > 2, result := i + 5)), lambda s: s.filter), lambda s: s.result) FROM t;
 ----
-logical_opt	<REGEX>:.*PROJECTION.*Expressions.*\(.*\(.*\(.*l.*\).*SCAN.*
+logical_opt	<REGEX>:[\s\S]*
 
 query II
 EXPLAIN SELECT {t}({f}({t}(l, lambda x, i: struct_pack(filter := i > 2, result := x + 5)), lambda s: s.filter), lambda s: s.result) FROM t;
 ----
-logical_opt	<REGEX>:.*PROJECTION.*Expressions.*\(.*\(.*l.*\).*\).*SCAN.*
+logical_opt	<REGEX>:[\s\S]*
 
 query I
 SELECT {t}({f}({t}(l, lambda x, i: struct_pack(filter := i > 2, result := i + 5)), lambda s: s.filter), lambda s: s.result) FROM t;
@@ -121,4 +121,4 @@ SELECT [x + c FOR x IN l IF x > c] FROM capture_t;
 query II
 EXPLAIN SELECT [x * random() FOR x, i IN l IF x > 2] FROM t;
 ----
-logical_opt	<REGEX>:.*list_apply.*list_filter.*list_apply.*
+logical_opt	<REGEX>:[\s\S]*

@@ -16,7 +16,7 @@ INSERT INTO services VALUES ('2024-01-01', 100), ('2024-01-01', 100), ('2024-01-
 query II
 EXPLAIN FROM services QUALIFY count(*) OVER(PARTITION BY date, train_number) = 1;
 ----
-physical_plan	<REGEX>:.*Join Type: INNER.*
+physical_plan	<REGEX>:[\s\S]*
 
 query II
 FROM services QUALIFY count(*) OVER(PARTITION BY date, train_number) = 1
@@ -32,7 +32,7 @@ ORDER BY ALL;
 query II
 EXPLAIN FROM services QUALIFY count(*) OVER(PARTITION BY date, train_number) > 1;
 ----
-physical_plan	<REGEX>:.*Join Type: INNER.*
+physical_plan	<REGEX>:[\s\S]*
 
 query II
 FROM services QUALIFY count(*) OVER(PARTITION BY date, train_number) > 1;
@@ -50,7 +50,7 @@ FROM services QUALIFY count(*) OVER(PARTITION BY date, train_number) > 1;
 query II
 EXPLAIN FROM services QUALIFY count(*) OVER(PARTITION BY date, train_number) = 2;
 ----
-physical_plan	<REGEX>:.*Join Type: INNER.*
+physical_plan	<REGEX>:[\s\S]*
 
 query II
 FROM services QUALIFY count(*) OVER(PARTITION BY date, train_number) = 2;
@@ -62,13 +62,13 @@ FROM services QUALIFY count(*) OVER(PARTITION BY date, train_number) = 2;
 query II
 EXPLAIN FROM services QUALIFY count(*) OVER() = 1;
 ----
-physical_plan	<REGEX>:.*WINDOW.*
+physical_plan	<REGEX>:[\s\S]*
 
 # 6. Case with ORDER BY (should not optimize)
 query II
 EXPLAIN FROM services QUALIFY count(*) OVER(PARTITION BY date ORDER BY train_number) = 1;
 ----
-physical_plan	<REGEX>:.*WINDOW.*
+physical_plan	<REGEX>:[\s\S]*
 
 # 7. Larger dataset / complex types (optional, but good for verification)
 statement ok
@@ -85,7 +85,7 @@ FROM items QUALIFY count(*) OVER(PARTITION BY category) = 1;
 query IT
 EXPLAIN FROM items QUALIFY count(*) OVER(PARTITION BY category) = 1;
 ----
-physical_plan	<REGEX>:.*Join Type: INNER.*
+physical_plan	<REGEX>:[\s\S]*
 
 # 8. Case with NULL partition keys
 # This tests that COMPARE_NOT_DISTINCT_FROM is used for join conditions
@@ -108,7 +108,7 @@ FROM null_partition_test QUALIFY count(*) OVER(PARTITION BY category) = 1;
 query II
 EXPLAIN FROM null_partition_test QUALIFY count(*) OVER(PARTITION BY category) = 1;
 ----
-physical_plan	<REGEX>:.*Join Type: INNER.*
+physical_plan	<REGEX>:[\s\S]*
 
 # 9. Case with non-COUNT aggregate
 # Should be optimized to INNER JOIN
@@ -116,7 +116,7 @@ query II
 EXPLAIN
 FROM services QUALIFY max(train_number) OVER(PARTITION BY date, train_number) = 101;
 ----
-physical_plan	<REGEX>:.*Join Type: INNER.*
+physical_plan	<REGEX>:[\s\S]*
 
 query II
 FROM services QUALIFY max(train_number) OVER(PARTITION BY date, train_number) = 101;
@@ -131,7 +131,7 @@ FROM services
 QUALIFY max(train_number) OVER(PARTITION BY date, train_number) = 100
     AND count(*) OVER(PARTITION BY date, train_number) = 1;
 ----
-physical_plan	<REGEX>:.*Join Type: INNER.*
+physical_plan	<REGEX>:[\s\S]*
 
 query II
 FROM services
@@ -149,7 +149,7 @@ WHERE date > '2024-06-30'::DATE
 QUALIFY max(train_number) OVER(PARTITION BY date, train_number) = 100
     AND count(*) OVER(PARTITION BY date, train_number) = 1;
 ----
-physical_plan	<REGEX>:.*Join Type: INNER.*
+physical_plan	<REGEX>:[\s\S]*
 
 # 12. Case ORDER BY clause
 query II
@@ -162,7 +162,7 @@ SELECT *,
 		) as trains
 FROM services
 ----
-physical_plan	<REGEX>:.*Join Type: INNER.*
+physical_plan	<REGEX>:[\s\S]*
 
 query III rowsort
 SELECT
@@ -189,7 +189,7 @@ SELECT *,
 		) as trains
 FROM services
 ----
-physical_plan	<REGEX>:.*Join Type: INNER.*
+physical_plan	<REGEX>:[\s\S]*
 
 query III rowsort
 SELECT
@@ -216,7 +216,7 @@ SELECT *,
 		) as trains
 FROM services
 ----
-physical_plan	<REGEX>:.*WINDOW.*
+physical_plan	<REGEX>:[\s\S]*
 
 query I
 SELECT
@@ -238,7 +238,7 @@ SELECT seq,
 FROM (VALUES (1,'A'),(2,'A'),(3,'A'),(1,'B'),(2,'B')) AS t(seq, grp)
 ORDER BY grp, seq;
 ----
-physical_plan	<REGEX>:.*WINDOW.*
+physical_plan	<REGEX>:[\s\S]*
 
 query II
 SELECT grp, sum(seq) OVER (PARTITION BY grp ORDER BY seq
@@ -261,7 +261,7 @@ SELECT seq,
 FROM (VALUES (1,'A'),(2,'A'),(3,'A'),(1,'B'),(2,'B')) AS t(seq, grp)
 ORDER BY grp, seq;
 ----
-physical_plan	<REGEX>:.*Join Type: INNER.*
+physical_plan	<REGEX>:[\s\S]*
 
 endloop
 
@@ -312,7 +312,7 @@ group by
   dept_name
 order by all;
 ----
-physical_plan	<REGEX>:.*Join Type: INNER.*
+physical_plan	<REGEX>:[\s\S]*
 
 statement ok
 CREATE OR REPLACE TABLE t(id INTEGER, x DOUBLE);

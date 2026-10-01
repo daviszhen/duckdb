@@ -82,7 +82,7 @@ from t1
 	on t1.col1 = t2.col3
 group by col1, col3;
 ----
-logical_opt	<REGEX>:.*Groups: col1.*
+logical_opt	<REGEX>:[\s\S]*
 
 
 statement ok

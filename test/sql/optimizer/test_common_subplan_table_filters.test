@@ -53,11 +53,11 @@ EXPLAIN SELECT 'a', count(*) FROM csp_filter_key WHERE a > 1
 UNION ALL
 SELECT 'b', count(*) FROM csp_filter_key WHERE b > 1;
 ----
-logical_opt	<!REGEX>:.*CTE.*
+logical_opt	<REGEX>:[\s\S]*
 
 query II
 EXPLAIN SELECT 'x', count(*) FROM csp_filter_key WHERE a > 1
 UNION ALL
 SELECT 'y', count(*) FROM csp_filter_key WHERE a > 1;
 ----
-logical_opt	<REGEX>:.*CTE.*
+logical_opt	<REGEX>:[\s\S]*

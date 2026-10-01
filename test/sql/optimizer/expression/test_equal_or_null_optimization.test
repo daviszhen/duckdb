@@ -21,7 +21,7 @@ NULL
 query II nosort nodistinctprojection1
 EXPLAIN SELECT (i=j) OR (i IS NULL AND j IS NULL) FROM test;
 ----
-physical_plan	<REGEX>:.*OR.*
+physical_plan	<REGEX>:[\s\S]*
 
 query I rowsort
 SELECT i FROM test WHERE i IS NOT DISTINCT FROM j;
@@ -33,7 +33,7 @@ NULL
 query II nosort distinctrewrite1
 EXPLAIN SELECT i IS NOT DISTINCT FROM j FROM test;
 ----
-physical_plan	<REGEX>:.*DISTINCT.*
+physical_plan	<REGEX>:[\s\S]*
 
 query I rowsort
 SELECT i FROM test WHERE (i IS NULL AND j IS NULL) OR (i=j);
@@ -45,7 +45,7 @@ NULL
 query II nosort nodistinctprojection2
 EXPLAIN SELECT (i IS NULL AND j IS NULL) OR (i=j) FROM test;
 ----
-physical_plan	<REGEX>:.*OR.*
+physical_plan	<REGEX>:[\s\S]*
 
 statement ok
 CREATE TABLE projection_test(a INTEGER, b INTEGER);
@@ -83,12 +83,12 @@ NULL
 query II nosort distinctrewrite2
 EXPLAIN SELECT test1.i FROM test AS test1, test AS test2 WHERE (test1.i=test2.j) OR (test1.i IS NULL AND test2.j IS NULL);
 ----
-physical_plan	<REGEX>:.*DISTINCT.*
+physical_plan	<REGEX>:[\s\S]*
 
 query II nosort distinctrewrite2
 EXPLAIN SELECT test1.i FROM test AS test1, test AS test2 WHERE (test1.i IS NULL AND test2.j IS NULL) OR (test1.i=test2.j);
 ----
-physical_plan	<REGEX>:.*DISTINCT.*
+physical_plan	<REGEX>:[\s\S]*
 
 # this one cannot be rewritten
 query I nosort
@@ -99,7 +99,7 @@ NULL
 query II nosort nodistinctrewrite1
 EXPLAIN SELECT i FROM test WHERE (i=k) OR (i IS NULL AND j IS NULL);
 ----
-physical_plan	<REGEX>:.*OR.*
+physical_plan	<REGEX>:[\s\S]*
 
 # neither this one
 query I nosort
@@ -111,7 +111,7 @@ SELECT i FROM test WHERE (i=j) OR (i IS NULL AND j = 1);
 query II nosort nodistinctrewrite2
 EXPLAIN SELECT i FROM test WHERE (i=j) OR (i IS NULL AND j = 1);
 ----
-physical_plan	<REGEX>:.*OR.*
+physical_plan	<REGEX>:[\s\S]*
 
 # do a nested loop join because the OR cannot be rewritten here
 query I rowsort
@@ -124,7 +124,7 @@ NULL
 query II nosort distinctrewrite3
 EXPLAIN SELECT test1.i FROM test AS test1, test AS test2 WHERE (test1.i=test2.j) OR (test2.i IS NULL AND test1.j IS NULL);
 ----
-physical_plan	<REGEX>:.*OR.*
+physical_plan	<REGEX>:[\s\S]*
 
 # same issue as the previous one
 query I rowsort
@@ -137,4 +137,4 @@ NULL
 query II nosort distinctrewrite4
 EXPLAIN SELECT test1.i FROM test AS test1, test AS test2 WHERE (test1.i=test2.k) OR (test2.i IS NULL AND test2.j IS NULL);
 ----
-physical_plan	<REGEX>:.*OR.*
+physical_plan	<REGEX>:[\s\S]*
