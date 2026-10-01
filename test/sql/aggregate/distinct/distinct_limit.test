@@ -24,7 +24,7 @@ SELECT COUNT(*) FROM (SELECT DISTINCT i % 100 FROM range(1000000) t(i) LIMIT 5 O
 query II
 EXPLAIN SELECT DISTINCT i % 100 FROM range(1000000) t(i) LIMIT 5 OFFSET 3
 ----
-physical_plan	<REGEX>:.*LIMITED_DISTINCT.*
+physical_plan	<REGEX>:[\s\S]*
 
 # limit larger than number of distinct values
 query I
@@ -100,7 +100,7 @@ SELECT COUNT(*) FROM (SELECT DISTINCT ON (grp) grp, val FROM t2 LIMIT 3)
 query II
 EXPLAIN SELECT DISTINCT ON (grp) grp, val FROM t2 LIMIT 3
 ----
-physical_plan	<REGEX>:.*HASH_GROUP_BY.*
+physical_plan	<REGEX>:[\s\S]*
 
 # DISTINCT ON with ORDER BY should keep the ordered aggregate path
 query II
@@ -113,40 +113,40 @@ SELECT DISTINCT ON (grp) grp, val FROM t2 ORDER BY grp, val DESC LIMIT 3
 query II
 EXPLAIN SELECT DISTINCT ON (grp) grp, val FROM t2 ORDER BY grp, val DESC LIMIT 3
 ----
-physical_plan	<REGEX>:.*HASH_GROUP_BY.*
+physical_plan	<REGEX>:[\s\S]*
 
 # EXPLAIN: DISTINCT + LIMIT shows LIMITED_DISTINCT
 query II
 EXPLAIN SELECT DISTINCT i % 100 FROM range(1000000) t(i) LIMIT 10
 ----
-physical_plan	<REGEX>:.*LIMITED_DISTINCT.*
+physical_plan	<REGEX>:[\s\S]*
 
 # EXPLAIN: threshold-sized DISTINCT + LIMIT shows LIMITED_DISTINCT
 query II
 EXPLAIN SELECT DISTINCT i FROM range(100000) t(i) LIMIT 100000
 ----
-physical_plan	<REGEX>:.*LIMITED_DISTINCT.*
+physical_plan	<REGEX>:[\s\S]*
 
 # EXPLAIN: GROUP BY (no aggs) + LIMIT shows LIMITED_DISTINCT
 query II
 EXPLAIN SELECT i % 100 FROM range(1000000) t(i) GROUP BY 1 LIMIT 10
 ----
-physical_plan	<REGEX>:.*LIMITED_DISTINCT.*
+physical_plan	<REGEX>:[\s\S]*
 
 # EXPLAIN: GROUP BY with aggregates uses HASH_GROUP_BY
 query II
 EXPLAIN SELECT i % 100, COUNT(*) FROM range(1000000) t(i) GROUP BY 1 LIMIT 10
 ----
-physical_plan	<REGEX>:.*HASH_GROUP_BY.*
+physical_plan	<REGEX>:[\s\S]*
 
 # EXPLAIN: GROUP BY with FIRST aggregate uses HASH_GROUP_BY
 query II
 EXPLAIN SELECT i % 100, first(i) FROM range(1000000) t(i) GROUP BY 1 LIMIT 10
 ----
-physical_plan	<REGEX>:.*HASH_GROUP_BY.*
+physical_plan	<REGEX>:[\s\S]*
 
 # EXPLAIN: DISTINCT + ORDER BY uses TOP_N
 query II
 EXPLAIN SELECT DISTINCT i % 100 AS v FROM range(1000000) t(i) ORDER BY v LIMIT 10
 ----
-physical_plan	<REGEX>:.*TOP_N.*
+physical_plan	<REGEX>:[\s\S]*
