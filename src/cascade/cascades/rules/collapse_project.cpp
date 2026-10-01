@@ -13,8 +13,9 @@ bool CollapseProject::Matches(GroupExpr &expr) {
 	return expr.type == LogicalOperatorType::LOGICAL_PROJECTION && expr.children.size() == 1;
 }
 namespace {
-//! The inner projection, if the group below holds one that is a plain re-numbering.
-GroupExpr *FindRenumbering(CascadesOptimizer &optimizer, GroupId below) {
+//! The inner projection, if the group below holds one that may be folded in: any projection whose
+//! expressions are non-volatile and carry no sub-query (the rule inlines them, one row each).
+GroupExpr *FindCollapsibleProjection(CascadesOptimizer &optimizer, GroupId below) {
 	for (auto &candidate : optimizer.GetMemo().GetGroup(below).exprs) {
 		if (candidate->type != LogicalOperatorType::LOGICAL_PROJECTION || !candidate->op ||
 		    candidate->children.size() != 1) {
@@ -65,8 +66,8 @@ CascadesRulePromise CollapseProject::Promise(CascadesOptimizer &optimizer, Group
 	string reason;
 	if (!expr.op) {
 		reason = "the projection has no operator";
-	} else if (!FindRenumbering(optimizer, expr.children[0])) {
-		reason = "the child is not a plain re-numbering projection";
+	} else if (!FindCollapsibleProjection(optimizer, expr.children[0])) {
+		reason = "the child holds no projection that can be collapsed into this one (it must be non-volatile and free of sub-queries)";
 	} else {
 		return CascadesRulePromise::MEDIUM;
 	}
@@ -76,7 +77,7 @@ CascadesRulePromise CollapseProject::Promise(CascadesOptimizer &optimizer, Group
 	return CascadesRulePromise::NONE;
 }
 bool CollapseProject::Apply(CascadesOptimizer &optimizer, GroupId group, GroupExpr &expr) {
-	auto inner = FindRenumbering(optimizer, expr.children[0]);
+	auto inner = FindCollapsibleProjection(optimizer, expr.children[0]);
 	if (!inner || !expr.op) {
 		return false;
 	}
