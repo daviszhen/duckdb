@@ -412,6 +412,34 @@ TEST_CASE("cascade physical attribution: the host plans the shape with its own o
 	REQUIRE(constants->RowCount() > 0);
 	auto constants_plan = constants->GetValue(1, 0).ToString();
 	REQUIRE(constants_plan.find("Column Data Scan") != string::npos);
+
+	// EXformIds 27/29/45/46/47/48: the join implementations are the host's choice between its hash
+	// join and its nested loop join. Which one it picks for a shape is the attribution, so each shape
+	// is checked for the operator the host plans it with: equality joins get the hash join, and a
+	// join without an equality gets the nested loop one.
+	REQUIRE(con.Query("CREATE TABLE ja(x INTEGER)"));
+	REQUIRE(con.Query("CREATE TABLE jb(x INTEGER)"));
+	REQUIRE(con.Query("INSERT INTO ja VALUES (1), (2)"));
+	REQUIRE(con.Query("INSERT INTO jb VALUES (1), (3)"));
+
+	auto hash_join = con.Query("EXPLAIN SELECT * FROM ja JOIN jb ON ja.x = jb.x");
+	REQUIRE(hash_join);
+	auto hash_plan = hash_join->GetValue(1, 0).ToString();
+	CHECK(hash_plan.find("Hash Join") != string::npos);
+
+	auto nested_loop = con.Query("EXPLAIN SELECT * FROM ja JOIN jb ON ja.x < jb.x");
+	REQUIRE(nested_loop);
+	auto nested_plan = nested_loop->GetValue(1, 0).ToString();
+	CHECK(nested_plan.find("Nested Loop Join") != string::npos);
+
+	// The outer and the semi variant reach the same implementations.
+	auto outer_join = con.Query("EXPLAIN SELECT * FROM ja LEFT JOIN jb ON ja.x = jb.x");
+	REQUIRE(outer_join);
+	CHECK(outer_join->GetValue(1, 0).ToString().find("Hash Join") != string::npos);
+
+	auto semi_join = con.Query("EXPLAIN SELECT * FROM ja WHERE EXISTS (SELECT 1 FROM jb WHERE jb.x = ja.x)");
+	REQUIRE(semi_join);
+	CHECK(semi_join->GetValue(1, 0).ToString().find("Hash Join") != string::npos);
 }
 
 // The shapes the corpus does not contain still have to be exercised, and that means driving Apply
