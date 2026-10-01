@@ -321,8 +321,15 @@ unique_ptr<LogicalOperator> CascadesOptimizer::Optimize(unique_ptr<LogicalOperat
 			Printer::Print("--- cascade(cascades) enforcer: parameterisation buckets: " +
 			               ParameterisableBreakdown(*result));
 		}
-		ApplyDecorrelator decorrelator(optimizer_binder, context);
-		result = decorrelator.Decorrelate(std::move(result));
+		// The legacy apply path is now used by exactly one configuration: the one that exists to keep
+		// the Applies for it. Measured before making this explicit: removing the call entirely leaves
+		// the default path untouched (87/88 -> 87/88) and only KEEP_APPLY loses files (33/88 -> 27/88),
+		// so the default path never needed it. Naming the condition is the first step of retiring it:
+		// everything that still reaches these files is now the work of migrating one shape at a time.
+		if (CascadeConfig::KeepApply()) {
+			ApplyDecorrelator decorrelator(optimizer_binder, context);
+			result = decorrelator.Decorrelate(std::move(result));
+		}
 		result = SimplifyMarkerJoins(std::move(result));
 	}
 	// Measured limit of the normalization above, recorded here so the next step does not have to
