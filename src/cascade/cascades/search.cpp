@@ -96,6 +96,17 @@ void CascadesOptimizer::RegisterRules() {
 	AddRule(make_uniq<BinderSideInvariantRule>("select_2_partial_dynamic_index_get",
 	                                           LogicalOperatorType::LOGICAL_GET,
 	                                           BinderSideInvariant::GET_HAS_ACCESS_PATH));
+	// ORCA EXformIds 22, 23, 24: a sub-query join becomes an Apply, and a selection over an index
+	// becomes an index get - the invariant that survives is that no join condition still holds a
+	// sub-query.
+	AddRule(make_uniq<BinderSideInvariantRule>("subq_join_2_apply", LogicalOperatorType::LOGICAL_COMPARISON_JOIN,
+	                                           BinderSideInvariant::NO_SUBQUERY));
+	AddRule(make_uniq<BinderSideInvariantRule>("subq_nary_join_2_apply",
+	                                           LogicalOperatorType::LOGICAL_COMPARISON_JOIN,
+	                                           BinderSideInvariant::NO_SUBQUERY));
+	AddRule(make_uniq<BinderSideInvariantRule>("inner_join_2_index_get_apply",
+	                                           LogicalOperatorType::LOGICAL_COMPARISON_JOIN,
+	                                           BinderSideInvariant::NO_SUBQUERY));
 	// Section 2, identity (3): a predicate reading only the sub-query's own columns moves above
 	// the Apply.
 	AddRule(make_uniq<LiftLocalPredicate>());

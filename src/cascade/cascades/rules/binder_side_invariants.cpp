@@ -4,6 +4,7 @@
 #include "duckdb/cascade/cascades/search.hpp"
 #include "duckdb/common/printer.hpp"
 #include "duckdb/planner/expression_iterator.hpp"
+#include "duckdb/planner/operator/logical_comparison_join.hpp"
 #include "duckdb/planner/operator/logical_filter.hpp"
 #include "duckdb/planner/operator/logical_projection.hpp"
 #include "duckdb/planner/operator/logical_get.hpp"
@@ -54,6 +55,17 @@ CascadesRulePromise BinderSideInvariantRule::Promise(CascadesOptimizer &, GroupE
 		if (expr.type == LogicalOperatorType::LOGICAL_FILTER) {
 			if (ExpressionsHoldSubquery(expr.op->Cast<LogicalFilter>().expressions)) {
 				violation = "a filter predicate still holds a sub-query";
+			}
+		} else if (expr.type == LogicalOperatorType::LOGICAL_COMPARISON_JOIN) {
+			// A join whose conditions still hold a sub-query is the shape ORCA's SubqJoin2Apply and
+			// InnerJoin2IndexGetApply remove, so seeing one means the normalisation did not run.
+			auto &join = expr.op->Cast<LogicalComparisonJoin>();
+			for (auto &condition : join.conditions) {
+				if (HoldsSubquery(condition.GetLHS()) ||
+				    (condition.IsComparison() && HoldsSubquery(condition.GetRHS()))) {
+					violation = "a join condition still holds a sub-query";
+					break;
+				}
 			}
 		} else if (ExpressionsHoldSubquery(expr.op->Cast<LogicalProjection>().expressions)) {
 			violation = "a projection expression still holds a sub-query";
