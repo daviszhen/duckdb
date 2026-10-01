@@ -6,6 +6,7 @@
 #include "duckdb/cascade/cascades/rules/left_outer_apply_to_join.hpp"
 #include "duckdb/cascade/cascades/rules/expand_nary_join.hpp"
 #include "duckdb/cascade/cascades/rules/select_2_filter.hpp"
+#include "duckdb/cascade/cascades/rules/union_2_union_all.hpp"
 #include "duckdb/cascade/cascades/rules/binder_side_invariants.hpp"
 #include "duckdb/cascade/cascades/rules/correlated_apply_to_join.hpp"
 #include "duckdb/cascade/cascades/rules/group_apply_by_outer_columns.hpp"
@@ -72,6 +73,8 @@ void CascadesOptimizer::RegisterRules() {
 	AddRule(make_uniq<ExpandNAryJoinDP>());
 	// ORCA EXformId 13: Select2Filter, migrated as the invariant a Filter has to satisfy.
 	AddRule(make_uniq<Select2Filter>());
+	// ORCA EXformId 65: a UNION is a UNION ALL with the duplicates removed.
+	AddRule(make_uniq<Union2UnionAll>());
 	// ORCA EXformIds 10, 17, 18, 19, 20, 21: the rules whose pre-shape the binder already removed,
 	// migrated as the invariants they establish (one parameterised rule per invariant).
 	AddRule(make_uniq<BinderSideInvariantRule>("unnest_tvf", 10, LogicalOperatorType::LOGICAL_UNNEST,

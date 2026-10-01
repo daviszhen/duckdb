@@ -2,6 +2,7 @@ add_library_unity(duckdb_cascade OBJECT aggregate_pullup.cpp aggregate_pushdown.
                   cascade_bindings.cpp cascade_correlation.cpp
                   cascades/memo.cpp cascades/task.cpp cascades/cost.cpp cascades/search.cpp
                   cascades/rules/push_filter_below_groupby.cpp
+	cascades/rules/union_2_union_all.cpp
 	cascades/rules/left_outer_apply_to_join.cpp
 	cascades/rules/binder_side_invariants.cpp
 	cascades/rules/select_2_filter.cpp
