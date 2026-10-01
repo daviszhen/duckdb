@@ -19,14 +19,21 @@ namespace duckdb {
 enum class BinderSideInvariant : uint8_t { HAS_EXPRESSIONS, NO_SUBQUERY, TWO_INPUTS, GET_HAS_ACCESS_PATH };
 class BinderSideInvariantRule : public CascadesRule {
 public:
-	BinderSideInvariantRule(const char *name, LogicalOperatorType watched, BinderSideInvariant invariant)
-	    : CascadesRule(CascadesRuleKind::EXPLORATION, name), watched(watched), invariant(invariant) {
+	BinderSideInvariantRule(const char *name, int orca_id, LogicalOperatorType watched,
+	                        BinderSideInvariant invariant)
+	    : CascadesRule(CascadesRuleKind::EXPLORATION, name), orca_id(orca_id), watched(watched),
+	      invariant(invariant) {
+	}
+	//! The ORCA xform this invariant stands for: every instance names one.
+	int OrcaId() const override {
+		return orca_id;
 	}
 	bool Matches(GroupExpr &expr) override;
 	CascadesRulePromise Promise(CascadesOptimizer &optimizer, GroupExpr &expr) override;
 	bool Apply(CascadesOptimizer &optimizer, GroupId group, GroupExpr &expr) override;
 
 private:
+	int orca_id;
 	LogicalOperatorType watched;
 	BinderSideInvariant invariant;
 };

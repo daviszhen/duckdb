@@ -74,37 +74,37 @@ void CascadesOptimizer::RegisterRules() {
 	AddRule(make_uniq<Select2Filter>());
 	// ORCA EXformIds 10, 17, 18, 19, 20, 21: the rules whose pre-shape the binder already removed,
 	// migrated as the invariants they establish (one parameterised rule per invariant).
-	AddRule(make_uniq<BinderSideInvariantRule>("unnest_tvf", LogicalOperatorType::LOGICAL_UNNEST,
+	AddRule(make_uniq<BinderSideInvariantRule>("unnest_tvf", 10, LogicalOperatorType::LOGICAL_UNNEST,
 	                                           BinderSideInvariant::HAS_EXPRESSIONS));
-	AddRule(make_uniq<BinderSideInvariantRule>("simplify_select_with_subquery", LogicalOperatorType::LOGICAL_FILTER,
+	AddRule(make_uniq<BinderSideInvariantRule>("simplify_select_with_subquery", 17, LogicalOperatorType::LOGICAL_FILTER,
 	                                           BinderSideInvariant::NO_SUBQUERY));
-	AddRule(make_uniq<BinderSideInvariantRule>("simplify_project_with_subquery",
+	AddRule(make_uniq<BinderSideInvariantRule>("simplify_project_with_subquery", 18,
 	                                           LogicalOperatorType::LOGICAL_PROJECTION,
 	                                           BinderSideInvariant::NO_SUBQUERY));
-	AddRule(make_uniq<BinderSideInvariantRule>("select_2_apply", LogicalOperatorType::LOGICAL_DEPENDENT_JOIN,
+	AddRule(make_uniq<BinderSideInvariantRule>("select_2_apply", 19, LogicalOperatorType::LOGICAL_DEPENDENT_JOIN,
 	                                           BinderSideInvariant::TWO_INPUTS));
-	AddRule(make_uniq<BinderSideInvariantRule>("project_2_apply", LogicalOperatorType::LOGICAL_DEPENDENT_JOIN,
+	AddRule(make_uniq<BinderSideInvariantRule>("project_2_apply", 20, LogicalOperatorType::LOGICAL_DEPENDENT_JOIN,
 	                                           BinderSideInvariant::TWO_INPUTS));
-	AddRule(make_uniq<BinderSideInvariantRule>("gbagg_2_apply", LogicalOperatorType::LOGICAL_DEPENDENT_JOIN,
+	AddRule(make_uniq<BinderSideInvariantRule>("gbagg_2_apply", 21, LogicalOperatorType::LOGICAL_DEPENDENT_JOIN,
 	                                           BinderSideInvariant::TWO_INPUTS));
 	// ORCA EXformIds 14, 15, 16: the selection reaching an index (or dynamic index) get, migrated as
 	// the invariant that such a get has its access path bound.
-	AddRule(make_uniq<BinderSideInvariantRule>("select_2_index_get", LogicalOperatorType::LOGICAL_GET,
+	AddRule(make_uniq<BinderSideInvariantRule>("select_2_index_get", 14, LogicalOperatorType::LOGICAL_GET,
 	                                           BinderSideInvariant::GET_HAS_ACCESS_PATH));
-	AddRule(make_uniq<BinderSideInvariantRule>("select_2_dynamic_index_get", LogicalOperatorType::LOGICAL_GET,
+	AddRule(make_uniq<BinderSideInvariantRule>("select_2_dynamic_index_get", 15, LogicalOperatorType::LOGICAL_GET,
 	                                           BinderSideInvariant::GET_HAS_ACCESS_PATH));
-	AddRule(make_uniq<BinderSideInvariantRule>("select_2_partial_dynamic_index_get",
+	AddRule(make_uniq<BinderSideInvariantRule>("select_2_partial_dynamic_index_get", 16,
 	                                           LogicalOperatorType::LOGICAL_GET,
 	                                           BinderSideInvariant::GET_HAS_ACCESS_PATH));
 	// ORCA EXformIds 22, 23, 24: a sub-query join becomes an Apply, and a selection over an index
 	// becomes an index get - the invariant that survives is that no join condition still holds a
 	// sub-query.
-	AddRule(make_uniq<BinderSideInvariantRule>("subq_join_2_apply", LogicalOperatorType::LOGICAL_COMPARISON_JOIN,
+	AddRule(make_uniq<BinderSideInvariantRule>("subq_join_2_apply", 22, LogicalOperatorType::LOGICAL_COMPARISON_JOIN,
 	                                           BinderSideInvariant::NO_SUBQUERY));
-	AddRule(make_uniq<BinderSideInvariantRule>("subq_nary_join_2_apply",
+	AddRule(make_uniq<BinderSideInvariantRule>("subq_nary_join_2_apply", 23,
 	                                           LogicalOperatorType::LOGICAL_COMPARISON_JOIN,
 	                                           BinderSideInvariant::NO_SUBQUERY));
-	AddRule(make_uniq<BinderSideInvariantRule>("inner_join_2_index_get_apply",
+	AddRule(make_uniq<BinderSideInvariantRule>("inner_join_2_index_get_apply", 24,
 	                                           LogicalOperatorType::LOGICAL_COMPARISON_JOIN,
 	                                           BinderSideInvariant::NO_SUBQUERY));
 	// Section 2, identity (3): a predicate reading only the sub-query's own columns moves above

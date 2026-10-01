@@ -277,35 +277,35 @@ TEST_CASE("cascade rule: the declared contract of every registered rule", "[casc
 	rules.push_back(make_uniq<ExpandNAryJoinMinCard>());
 	rules.push_back(make_uniq<ExpandNAryJoinDP>());
 	rules.push_back(make_uniq<Select2Filter>());
-	rules.push_back(make_uniq<BinderSideInvariantRule>("unnest_tvf", LogicalOperatorType::LOGICAL_UNNEST,
+	rules.push_back(make_uniq<BinderSideInvariantRule>("unnest_tvf", 10, LogicalOperatorType::LOGICAL_UNNEST,
                                                     BinderSideInvariant::HAS_EXPRESSIONS));
-	rules.push_back(make_uniq<BinderSideInvariantRule>("simplify_select_with_subquery",
+	rules.push_back(make_uniq<BinderSideInvariantRule>("simplify_select_with_subquery", 17,
                                                     LogicalOperatorType::LOGICAL_FILTER,
                                                     BinderSideInvariant::NO_SUBQUERY));
-	rules.push_back(make_uniq<BinderSideInvariantRule>("simplify_project_with_subquery",
+	rules.push_back(make_uniq<BinderSideInvariantRule>("simplify_project_with_subquery", 18,
                                                     LogicalOperatorType::LOGICAL_PROJECTION,
                                                     BinderSideInvariant::NO_SUBQUERY));
-	rules.push_back(make_uniq<BinderSideInvariantRule>("select_2_apply", LogicalOperatorType::LOGICAL_DEPENDENT_JOIN,
+	rules.push_back(make_uniq<BinderSideInvariantRule>("select_2_apply", 19, LogicalOperatorType::LOGICAL_DEPENDENT_JOIN,
                                                     BinderSideInvariant::TWO_INPUTS));
-	rules.push_back(make_uniq<BinderSideInvariantRule>("project_2_apply", LogicalOperatorType::LOGICAL_DEPENDENT_JOIN,
+	rules.push_back(make_uniq<BinderSideInvariantRule>("project_2_apply", 20, LogicalOperatorType::LOGICAL_DEPENDENT_JOIN,
                                                     BinderSideInvariant::TWO_INPUTS));
-	rules.push_back(make_uniq<BinderSideInvariantRule>("gbagg_2_apply", LogicalOperatorType::LOGICAL_DEPENDENT_JOIN,
+	rules.push_back(make_uniq<BinderSideInvariantRule>("gbagg_2_apply", 21, LogicalOperatorType::LOGICAL_DEPENDENT_JOIN,
                                                     BinderSideInvariant::TWO_INPUTS));
-	rules.push_back(make_uniq<BinderSideInvariantRule>("select_2_index_get", LogicalOperatorType::LOGICAL_GET,
+	rules.push_back(make_uniq<BinderSideInvariantRule>("select_2_index_get", 14, LogicalOperatorType::LOGICAL_GET,
                                                     BinderSideInvariant::GET_HAS_ACCESS_PATH));
-	rules.push_back(make_uniq<BinderSideInvariantRule>("select_2_dynamic_index_get", LogicalOperatorType::LOGICAL_GET,
+	rules.push_back(make_uniq<BinderSideInvariantRule>("select_2_dynamic_index_get", 15, LogicalOperatorType::LOGICAL_GET,
                                                     BinderSideInvariant::GET_HAS_ACCESS_PATH));
-	rules.push_back(make_uniq<BinderSideInvariantRule>("select_2_partial_dynamic_index_get",
+	rules.push_back(make_uniq<BinderSideInvariantRule>("select_2_partial_dynamic_index_get", 16,
                                                     LogicalOperatorType::LOGICAL_GET,
                                                     BinderSideInvariant::GET_HAS_ACCESS_PATH));
 	rules.push_back(make_uniq<LeftOuterApplyToJoin>());
-	rules.push_back(make_uniq<BinderSideInvariantRule>("subq_join_2_apply",
+	rules.push_back(make_uniq<BinderSideInvariantRule>("subq_join_2_apply", 22,
                                                     LogicalOperatorType::LOGICAL_COMPARISON_JOIN,
                                                     BinderSideInvariant::NO_SUBQUERY));
-	rules.push_back(make_uniq<BinderSideInvariantRule>("subq_nary_join_2_apply",
+	rules.push_back(make_uniq<BinderSideInvariantRule>("subq_nary_join_2_apply", 23,
                                                     LogicalOperatorType::LOGICAL_COMPARISON_JOIN,
                                                     BinderSideInvariant::NO_SUBQUERY));
-	rules.push_back(make_uniq<BinderSideInvariantRule>("inner_join_2_index_get_apply",
+	rules.push_back(make_uniq<BinderSideInvariantRule>("inner_join_2_index_get_apply", 24,
                                                     LogicalOperatorType::LOGICAL_COMPARISON_JOIN,
                                                     BinderSideInvariant::NO_SUBQUERY));
 
