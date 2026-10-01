@@ -16,8 +16,11 @@
 #include "duckdb/cascade/cascades/memo.hpp"
 #include "duckdb/cascade/cascades/search.hpp"
 #include "duckdb/planner/binder.hpp"
+#include "duckdb/planner/joinside.hpp"
 #include "duckdb/planner/expression/bound_columnref_expression.hpp"
+#include "duckdb/planner/operator/logical_comparison_join.hpp"
 #include "duckdb/planner/operator/logical_dependent_join.hpp"
+#include "duckdb/planner/operator/logical_dummy_scan.hpp"
 #include "duckdb/cascade/cascades/rules/apply_to_join.hpp"
 #include "duckdb/cascade/cascades/rules/collapse_project.hpp"
 #include "duckdb/cascade/cascades/rules/correlated_apply_to_join.hpp"
@@ -354,4 +357,59 @@ TEST_CASE("cascade rule: the outer Apply rule builds the join it claims", "[casc
 	    CorrelatedColumnInfo(correlated_ref));
 	CHECK(rule.Promise(optimizer, correlated) == CascadesRulePromise::NONE);
 	CHECK(!rule.Apply(optimizer, target, correlated));
+}
+
+// The NAry family at transformation level: a three-input join with a predicate for each step, so the
+// conditions have somewhere to go and the expansion cannot fall back to a cartesian product.
+TEST_CASE("cascade rule: the NAry expansion builds a binary tree over the same columns", "[cascade]") {
+	DuckDB db(nullptr);
+	Connection con(db);
+	auto binder = Binder::CreateBinder(*con.context);
+	CascadesOptimizer optimizer(*binder, *con.context);
+	auto &memo = optimizer.GetMemo();
+
+	auto target = memo.AddGroup();
+	vector<GroupId> inputs;
+	// One input per child, each carrying a single column: the bindings are what the conditions below
+	// refer to, and the expansion reads them off the child groups.
+	for (idx_t i = 0; i < 3; i++) {
+		auto group = memo.AddGroup();
+		auto scan = make_uniq<LogicalDummyScan>(TableIndex(100 + i));
+		memo.GetGroup(group); // (the group exists; the expression is added next)
+		optimizer.AddExpression(group, memo.MakeExpr(std::move(scan), {}));
+		memo.GetGroup(group).exprs[0]->bindings = {ColumnBinding(TableIndex(100 + i), ProjectionIndex(0))};
+		inputs.push_back(group);
+	}
+
+	auto join = make_uniq<LogicalComparisonJoin>(JoinType::INNER);
+	// input0.c0 = input1.c0, and input1.c0 = input2.c0: connected, so every step has a condition.
+	for (idx_t step = 0; step + 1 < 3; step++) {
+		auto left = make_uniq<BoundColumnRefExpression>("c", LogicalType::INTEGER,
+		                                              ColumnBinding(TableIndex(100 + step), ProjectionIndex(0)));
+		auto right = make_uniq<BoundColumnRefExpression>("c", LogicalType::INTEGER,
+		                                                ColumnBinding(TableIndex(101 + step), ProjectionIndex(0)));
+		join->conditions.emplace_back(std::move(left), std::move(right), ExpressionType::COMPARE_EQUAL);
+	}
+
+	GroupExpr expr;
+	expr.type = LogicalOperatorType::LOGICAL_COMPARISON_JOIN;
+	expr.op = std::move(join);
+	expr.children = inputs;
+
+	ExpandNAryJoin rule;
+	REQUIRE(rule.Matches(expr));
+	REQUIRE(rule.Promise(optimizer, expr) != CascadesRulePromise::NONE);
+	REQUIRE(rule.Apply(optimizer, target, expr));
+
+	// The alternative offered: a comparison join over an inner one and the last input.
+	auto &group = memo.GetGroup(target);
+	REQUIRE(!group.exprs.empty());
+	REQUIRE(group.exprs.back()->type == LogicalOperatorType::LOGICAL_COMPARISON_JOIN);
+	REQUIRE(group.exprs.back()->children.size() == 2);
+	REQUIRE(group.exprs.back()->children[1] == inputs[2]);
+	auto inner = group.exprs.back()->children[0];
+	REQUIRE(memo.GetGroup(inner).exprs.back()->type == LogicalOperatorType::LOGICAL_COMPARISON_JOIN);
+	// Every step carried a condition, so nothing became a cartesian product.
+	REQUIRE(!memo.GetGroup(inner).exprs.back()->op->Cast<LogicalComparisonJoin>().conditions.empty());
+	REQUIRE(!group.exprs.back()->op->Cast<LogicalComparisonJoin>().conditions.empty());
 }
