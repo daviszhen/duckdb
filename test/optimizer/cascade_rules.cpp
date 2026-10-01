@@ -95,6 +95,44 @@ const RuleContract RULE_CONTRACTS[] = {
      0, true, LogicalOperatorType::LOGICAL_ORDER_BY},
 };
 
+
+// The migration ledger in cascade-orca-notes/ORCA_RULE_MIGRATION_PLAN.md says which ORCA xform each
+// rule stands for. This is that table in code: one place to read, one place to check. An entry of
+// -1 means the rule has no counterpart in the authoritative list yet - it is a statement, not a gap
+// - and a rule that starts declaring an id in code has to agree with the row here, so the ledger and
+// the rules cannot drift apart quietly.
+struct RuleOrcaId {
+	const char *name;
+	int orca_id;
+};
+
+const RuleOrcaId RULE_ORCA_IDS[] = {
+    // Migrated and effective.
+    {"expand_nary_join", 1},
+    {"expand_nary_join_min_card", 2},
+    {"expand_nary_join_dp", 3},
+    {"collapse_project", 139},
+    {"select_2_filter", 13},
+    // Invariants of the shapes the binder already established.
+    {"unnest_tvf", 10},
+    {"select_2_index_get", 14},
+    {"select_2_dynamic_index_get", 15},
+    {"select_2_partial_dynamic_index_get", 16},
+    {"simplify_select_with_subquery", 17},
+    {"simplify_project_with_subquery", 18},
+    {"select_2_apply", 19},
+    {"project_2_apply", 20},
+    {"gbagg_2_apply", 21},
+    // The rules that were in the memo before this migration; their ORCA ids are attributed in the
+    // ledger, and the declaration in code follows as each one is verified.
+    {"apply_to_join", -1},
+    {"semi_apply_to_join", -1},
+    {"correlated_apply_to_join", -1},
+    {"lift_local_predicate", -1},
+    {"group_apply_by_outer_columns", -1},
+    {"push_filter_below_groupby", -1},
+};
+
 } // namespace
 
 TEST_CASE("cascade rule: the declared contract of every registered rule", "[cascade]") {
@@ -159,6 +197,22 @@ TEST_CASE("cascade rule: the declared contract of every registered rule", "[casc
 		if (orca_id >= 0) {
 			CHECK(declared_ids.find(orca_id) == declared_ids.end());
 			declared_ids.insert(orca_id);
+		}
+
+		// The ledger table above has to agree with what the rules declare, and with itself.
+		{
+			const RuleOrcaId *row = nullptr;
+			for (auto &candidate : RULE_ORCA_IDS) {
+				if (string(candidate.name) == string(rule.Name())) {
+					row = &candidate;
+					break;
+				}
+			}
+			REQUIRE(row != nullptr);
+			if (rule.OrcaId() != -1) {
+				// Declared in code: the ledger row has to say the same thing.
+				CHECK(row->orca_id == rule.OrcaId());
+			}
 		}
 
 		if (contract.type_only) {
