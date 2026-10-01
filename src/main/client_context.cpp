@@ -532,7 +532,7 @@ shared_ptr<PreparedStatementData> ClientContext::CreatePreparedStatementInternal
 	if (logical_plan->RequireOptimizer()) {
 		{
 			auto optimizer_timer = profiler.StartTimer<MetricOptimizerTotalTime>();
-			if (CascadeConfig::UseMemoOptimizer()) {
+			if (optimize && CascadeConfig::UseMemoOptimizer()) {
 				// The cascade optimizer proper: memo + rules + cost, stage 1 (design A) - it
 				// decides the logical plan, the host still instantiates the physical ones.
 				// The mandatory rewrites come first for the same reason as in the cascade-only
@@ -675,7 +675,7 @@ shared_ptr<PreparedStatementData> ClientContext::CreatePreparedStatementInternal
 				propagator.PropagateStatistics(logical_plan);
 			}
 		}
-			} else if (CascadeConfig::UseCascadeOptimizer()) {
+			} else if (optimize && CascadeConfig::UseCascadeOptimizer()) {
 				CascadeOptimizer cascade(*logical_planner.binder, *this);
 				logical_plan = cascade.Optimize(std::move(logical_plan));
 			} else {
