@@ -103,34 +103,38 @@ const RuleContract RULE_CONTRACTS[] = {
 // the rules cannot drift apart quietly.
 struct RuleOrcaId {
 	const char *name;
-	int orca_id;
+	// A rule can cover more than one ORCA xform (a correlated and an uncorrelated variant, say), so a
+	// row lists them; -1 means none is attributed yet - a statement rather than a gap.
+	vector<int> orca_ids;
 };
 
 const RuleOrcaId RULE_ORCA_IDS[] = {
     // Migrated and effective.
-    {"expand_nary_join", 1},
-    {"expand_nary_join_min_card", 2},
-    {"expand_nary_join_dp", 3},
-    {"collapse_project", 139},
-    {"select_2_filter", 13},
+    {"expand_nary_join", {1}},
+    {"expand_nary_join_min_card", {2}},
+    {"expand_nary_join_dp", {3}},
+    {"collapse_project", {139}},
+    {"select_2_filter", {13}},
     // Invariants of the shapes the binder already established.
-    {"unnest_tvf", 10},
-    {"select_2_index_get", 14},
-    {"select_2_dynamic_index_get", 15},
-    {"select_2_partial_dynamic_index_get", 16},
-    {"simplify_select_with_subquery", 17},
-    {"simplify_project_with_subquery", 18},
-    {"select_2_apply", 19},
-    {"project_2_apply", 20},
-    {"gbagg_2_apply", 21},
+    {"unnest_tvf", {10}},
+    {"select_2_index_get", {14}},
+    {"select_2_dynamic_index_get", {15}},
+    {"select_2_partial_dynamic_index_get", {16}},
+    {"simplify_select_with_subquery", {17}},
+    {"simplify_project_with_subquery", {18}},
+    {"select_2_apply", {19}},
+    {"project_2_apply", {20}},
+    {"gbagg_2_apply", {21}},
     // The rules that were in the memo before this migration; their ORCA ids are attributed in the
     // ledger, and the declaration in code follows as each one is verified.
-    {"apply_to_join", -1},
-    {"semi_apply_to_join", -1},
-    {"correlated_apply_to_join", -1},
-    {"lift_local_predicate", -1},
-    {"group_apply_by_outer_columns", -1},
-    {"push_filter_below_groupby", -1},
+    // Requires an inner Apply with no correlated columns: CXformInnerApply2InnerJoinNoCorrelations,
+    // read off the rule's own promise rather than guessed.
+    {"apply_to_join", {31}},
+    {"semi_apply_to_join", {-1}},
+    {"correlated_apply_to_join", {-1}},
+    {"lift_local_predicate", {-1}},
+    {"group_apply_by_outer_columns", {-1}},
+    {"push_filter_below_groupby", {-1}},
 };
 
 } // namespace
@@ -194,10 +198,8 @@ TEST_CASE("cascade rule: the declared contract of every registered rule", "[casc
 		auto orca_id = rule.OrcaId();
 		bool in_range = orca_id == -1 || (orca_id >= 0 && orca_id <= 151);
 		CHECK(in_range);
-		if (orca_id >= 0) {
-			CHECK(declared_ids.find(orca_id) == declared_ids.end());
-			declared_ids.insert(orca_id);
-		}
+		// The ledger-row loop below is the single place that records ids, so that the uniqueness check
+		// sees each id once.
 
 		// The ledger table above has to agree with what the rules declare, and with itself.
 		{
@@ -209,9 +211,21 @@ TEST_CASE("cascade rule: the declared contract of every registered rule", "[casc
 				}
 			}
 			REQUIRE(row != nullptr);
+			bool declared_listed = false;
+			for (auto id : row->orca_ids) {
+				bool in_range = id == -1 || (id >= 0 && id <= 151);
+				CHECK(in_range);
+				if (id != -1) {
+					CHECK(declared_ids.find(id) == declared_ids.end());
+					declared_ids.insert(id);
+				}
+				if (id == rule.OrcaId()) {
+					declared_listed = true;
+				}
+			}
 			if (rule.OrcaId() != -1) {
-				// Declared in code: the ledger row has to say the same thing.
-				CHECK(row->orca_id == rule.OrcaId());
+				// Declared in code: the ledger row has to list it.
+				CHECK(declared_listed);
 			}
 		}
 

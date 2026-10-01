@@ -27,6 +27,12 @@ namespace duckdb {
 
 class ApplyToJoin : public CascadesRule {
 public:
+	//! ORCA CXformInnerApply2InnerJoinNoCorrelations (EXformId 31): its promise asks for an inner
+	//! Apply with no correlated columns, which is exactly that xform's precondition.
+	int OrcaId() const override {
+		return 31;
+	}
+
 	ApplyToJoin() : CascadesRule(CascadesRuleKind::SUBSTITUTION, "apply_to_join") {
 	}
 
