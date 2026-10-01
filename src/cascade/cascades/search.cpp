@@ -3,6 +3,7 @@
 
 #include "duckdb/cascade/cascade_config.hpp"
 #include "duckdb/cascade/cascades/rules/apply_to_join.hpp"
+#include "duckdb/cascade/cascades/rules/left_outer_apply_to_join.hpp"
 #include "duckdb/cascade/cascades/rules/expand_nary_join.hpp"
 #include "duckdb/cascade/cascades/rules/select_2_filter.hpp"
 #include "duckdb/cascade/cascades/rules/binder_side_invariants.hpp"
@@ -62,6 +63,8 @@ void CascadesOptimizer::RegisterRules() {
 	// Identity (1)/(2): an inner Apply without correlation is a join. This is the rule that can
 	// lower the enforcer counter, so it goes first.
 	AddRule(make_uniq<ApplyToJoin>());
+	// ORCA EXformId 34: the outer counterpart of the rule above.
+	AddRule(make_uniq<LeftOuterApplyToJoin>());
 	// ORCA EXformIds 1/2/3: the NAry join expansion family, together because they differ only in the
 	// order they pick - each offers its binary tree as another expression of the same group.
 	AddRule(make_uniq<ExpandNAryJoin>());

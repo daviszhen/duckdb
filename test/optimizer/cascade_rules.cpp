@@ -16,6 +16,7 @@
 #include "duckdb/cascade/cascades/rules/correlated_apply_to_join.hpp"
 #include "duckdb/cascade/cascades/rules/expand_nary_join.hpp"
 #include "duckdb/cascade/cascades/rules/group_apply_by_outer_columns.hpp"
+#include "duckdb/cascade/cascades/rules/left_outer_apply_to_join.hpp"
 #include "duckdb/cascade/cascades/rules/binder_side_invariants.hpp"
 #include "duckdb/cascade/cascades/rules/select_2_filter.hpp"
 #include "duckdb/cascade/cascades/rules/lift_local_predicate.hpp"
@@ -93,6 +94,9 @@ const RuleContract RULE_CONTRACTS[] = {
      0, true, LogicalOperatorType::LOGICAL_LIMIT},
     {"select_2_partial_dynamic_index_get", CascadesRuleKind::EXPLORATION, LogicalOperatorType::LOGICAL_GET,
      0, true, LogicalOperatorType::LOGICAL_ORDER_BY},
+    // ORCA EXformId 34: the outer counterpart of apply_to_join.
+    {"left_outer_apply_to_join", CascadesRuleKind::SUBSTITUTION, LogicalOperatorType::LOGICAL_DEPENDENT_JOIN,
+     2, true, LogicalOperatorType::LOGICAL_PROJECTION},
 };
 
 
@@ -133,6 +137,8 @@ const RuleOrcaId RULE_ORCA_IDS[] = {
     // Correlated semi and anti: its promise asks for a semi/anti Apply with correlated columns and
     // no condition, which is the correlated variant of each - not the NoCorrelations ones.
     {"semi_apply_to_join", {36, 39}},
+    // The outer counterpart of apply_to_join: an uncorrelated left outer Apply.
+    {"left_outer_apply_to_join", {34}},
     // Correlated Apply with no condition, for inner (30, and the outer-key variant 26), semi (36) and
     // anti (39) joins: exactly the types its ReplacesWithCorrelatedJoin accepts. Outer joins are not
     // among them, so this rule does not cover the left outer xforms.
@@ -180,6 +186,7 @@ TEST_CASE("cascade rule: the declared contract of every registered rule", "[casc
 	rules.push_back(make_uniq<BinderSideInvariantRule>("select_2_partial_dynamic_index_get",
                                                     LogicalOperatorType::LOGICAL_GET,
                                                     BinderSideInvariant::GET_HAS_ACCESS_PATH));
+	rules.push_back(make_uniq<LeftOuterApplyToJoin>());
 
 	set<int> declared_ids;
 	REQUIRE(rules.size() == sizeof(RULE_CONTRACTS) / sizeof(RULE_CONTRACTS[0]));
