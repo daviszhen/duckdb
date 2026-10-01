@@ -26,6 +26,13 @@ namespace duckdb {
 
 class SemiApplyToJoin : public CascadesRule {
 public:
+	//! ORCA CXformLeftSemiApply2LeftSemiJoin (EXformId 36); the rule also covers the anti variant,
+	//! CXformLeftAntiSemiApply2LeftAntiSemiJoin (EXformId 39). Both are read off its promise, which
+	//! asks for a semi or anti Apply whose correlated columns are non-empty and which has no condition.
+	int OrcaId() const override {
+		return 36;
+	}
+
 	SemiApplyToJoin() : CascadesRule(CascadesRuleKind::SUBSTITUTION, "semi_apply_to_join") {
 	}
 
